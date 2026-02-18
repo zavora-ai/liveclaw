@@ -1,0 +1,43 @@
+# Build artifacts
+/target
+**/target
+
+# macOS
+.DS_Store
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Environment files (may contain secrets)
+.env
+.env.local
+.env.*.local
+
+# Secret keys and credentials
+*.key
+*.pem
+credentials.json
+.secret_key
+
+# Audit logs (generated at runtime)
+audit.jsonl
+
+# Artifacts directory (generated at runtime)
+artifacts/
+
+# Playground / scratch
+playground/
+
+# Docker overrides
+docker-compose.override.yml
+
+# Cargo lock is committed for binaries
+# (uncomment if this were a library)
+# Cargo.lock
+
+# Kiro
+.kiro/

@@ -1,0 +1,62 @@
+[workspace]
+members = ["liveclaw-gateway", "liveclaw-app"]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+authors = ["Michaell Faille", "James Karanja Maina"]
+license = "Apache-2.0"
+repository = "https://github.com/zavora-ai/liveclaw"
+
+[workspace.dependencies]
+# ADK-Rust crates (path deps — not committed, local only)
+adk-core = { path = "../adk-rust/adk-core" }
+adk-realtime = { path = "../adk-rust/adk-realtime" }
+adk-session = { path = "../adk-rust/adk-session" }
+adk-tool = { path = "../adk-rust/adk-tool" }
+adk-runner = { path = "../adk-rust/adk-runner" }
+adk-auth = { path = "../adk-rust/adk-auth" }
+adk-memory = { path = "../adk-rust/adk-memory" }
+adk-graph = { path = "../adk-rust/adk-graph" }
+adk-plugin = { path = "../adk-rust/adk-plugin" }
+adk-telemetry = { path = "../adk-rust/adk-telemetry" }
+
+adk-artifact = { path = "../adk-rust/adk-artifact" }
+
+# Async runtime
+tokio = { version = "1.42", features = ["rt-multi-thread", "macros", "time", "net", "io-util", "sync", "signal", "fs"] }
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+toml = "0.8"
+
+# HTTP / WebSocket
+axum = { version = "0.8", features = ["ws"] }
+tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
+tower = "0.5"
+
+# Crypto
+sha2 = "0.10"
+uuid = { version = "1.11", features = ["v4"] }
+
+# Error handling
+anyhow = "1.0"
+thiserror = "2.0"
+
+# Async traits
+async-trait = "0.1"
+
+# Logging / tracing
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["fmt", "ansi", "env-filter"] }
+
+# Regex (PII redaction)
+regex = "1.10"
+
+# Date/time
+chrono = "0.4"
+
+# Property-based testing
+proptest = "1.5"

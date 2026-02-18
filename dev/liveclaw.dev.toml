@@ -1,0 +1,48 @@
+# LiveClaw Development Configuration
+# Copy to liveclaw.toml and fill in your API key
+
+[gateway]
+host = "127.0.0.1"
+port = 8420
+require_pairing = false  # disabled for local dev
+
+[voice]
+provider = "openai"
+api_key = ""  # set via LIVECLAW_API_KEY env var or fill in here
+model = "gpt-4o-realtime-preview"
+voice = "alloy"
+instructions = "You are a helpful voice assistant for development testing."
+
+[security]
+default_role = "full"  # permissive for local dev
+tool_allowlist = []
+rate_limit_per_session = 1000
+audit_log_path = "audit.jsonl"
+
+[plugin]
+enable_pii_redaction = true
+enable_memory_autosave = true
+custom_blocked_keywords = []
+
+[memory]
+backend = "in_memory"
+recall_limit = 10
+
+[graph]
+enable_graph = false
+recursion_limit = 25
+
+[compaction]
+enable_compaction = false
+max_events_threshold = 500
+
+[artifact]
+enable_artifacts = false
+storage_path = "./artifacts"
+
+[pairing]
+max_attempts = 5
+lockout_duration_secs = 300
+
+[telemetry]
+otlp_enabled = false
