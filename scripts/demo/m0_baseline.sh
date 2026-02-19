@@ -11,6 +11,8 @@ require_file "docs/adk-utilization-matrix.md"
 require_file "docs/parity-tracking-board.md"
 require_file "scripts/run_quality_gate.sh"
 
-"${ROOT_DIR}/scripts/run_quality_gate.sh"
+if [[ "${LIVECLAW_SKIP_GATE:-0}" != "1" ]]; then
+  "${ROOT_DIR}/scripts/run_quality_gate.sh"
+fi
 
 demo_pass "M0 baseline checks are green"

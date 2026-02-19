@@ -42,14 +42,15 @@ jobs:
             target
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
 
-      - name: cargo fmt --check
-        run: cargo fmt -p liveclaw-gateway -p liveclaw-app -- --check
+      - name: Run quality gate
+        run: ./scripts/run_quality_gate.sh
 
-      - name: cargo clippy
-        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+      - name: Validate M0 demo scaffold
+        run: LIVECLAW_SKIP_GATE=1 ./scripts/demo/m0_baseline.sh
 
-      - name: cargo check
-        run: cargo check --workspace --all-features
-
-      - name: cargo test
-        run: cargo test --workspace --all-features
+      - name: Upload quality logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: adk-quality-logs
+          path: output/adk-quality
