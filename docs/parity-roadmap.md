@@ -27,12 +27,27 @@ Cadence: 2-week sprints (with Sprint 0 as a 1-week stabilization sprint)
    - Automated tests (unit + integration)
    - A benchmark or reliability metric
 
+## ADK-Rust First Architecture Contract
+
+1. ADK-Rust is the core framework and utility layer for LiveClaw.
+2. Default implementation path must use ADK crates before custom code:
+   - `adk-realtime`, `adk-runner`, `adk-session`, `adk-memory`, `adk-graph`
+   - `adk-plugin`, `adk-auth`, `adk-telemetry`, `adk-artifact`, `adk-tool`
+3. Any custom implementation requires a documented ADK gap analysis and a thin adapter boundary.
+4. No milestone can be marked complete without ADK utilization evidence:
+   - APIs/crates used
+   - custom delta introduced
+   - rationale for custom delta
+5. ADK dependency versions/revisions must be pinned and validated each sprint.
+
 ## Non-Negotiable Delivery Rules
 
 1. No sprint closes without a working demo.
 2. No milestone closes with red CI.
 3. No partial work left uncommitted at end of workday.
 4. Every merged slice must be releasable behind config or feature flags if incomplete.
+5. No subsystem reimplementation is allowed when equivalent ADK capability exists.
+6. Every sprint close must publish an ADK usage delta note.
 
 ## Milestone Ladder (Demonstrable Outcomes)
 
@@ -57,6 +72,7 @@ Scope:
 2. Establish CI truth path with ADK dependency strategy that actually resolves in CI.
 3. Add sprint demo harness skeleton (`scripts/demo/`).
 4. Create parity tracking board (M0-M6, each with acceptance checks).
+5. Add `docs/adk-utilization-matrix.md` mapping roadmap items to ADK crates/APIs.
 
 Demo gate:
 1. One-command quality gate run passes locally and in CI.
@@ -65,6 +81,7 @@ Demo gate:
 Exit criteria:
 1. `cargo check`, `cargo test`, `cargo clippy -D warnings`, `cargo fmt --check` all green.
 2. CI workflow executes without manual patching.
+3. ADK utilization matrix exists and is reviewed.
 
 ## Phase 1: Core Voice Runtime Parity (Sprints 1-2)
 Timeline: 2026-03-02 to 2026-03-27
@@ -75,6 +92,7 @@ Sprint 1 (2026-03-02 to 2026-03-13): Voice E2E Data Plane
 2. Remove hard-coded `"default"` session tagging and propagate true session IDs.
 3. Correct protocol semantics for audio acknowledgements.
 4. Add integration tests for one-session voice loop.
+5. Prove `adk-realtime` callback/data path is primary with no parallel custom pipeline.
 
 Demo gate:
 1. Start gateway.
@@ -88,6 +106,7 @@ Sprint 2 (2026-03-16 to 2026-03-27): Session Security and Auth
 2. Enforce per-session ownership checks for audio/terminate.
 3. Harden auth errors and audit events.
 4. Add tests for cross-session misuse attempts.
+5. Ensure auth policy wiring remains ADK-first (`adk-auth`) with minimal custom logic.
 
 Demo gate:
 1. Two clients, two sessions.
@@ -102,6 +121,7 @@ Sprint 3 (2026-03-30 to 2026-04-10): Tool Execution Reality
 1. Replace placeholder `load_tools()` with actual baseline toolset.
 2. Ensure AuthMiddleware-protected tools execute end-to-end.
 3. Add explicit tool execution metrics (duration, count, failures).
+4. Use `adk-tool` interfaces directly (no bespoke tool protocol layer).
 
 Demo gate:
 1. Voice prompt triggers tool call.
@@ -113,6 +133,7 @@ Sprint 4 (2026-04-13 to 2026-04-24): Graph and Plugin Completeness
 2. Respect plugin config toggles (`enable_pii_redaction`, `enable_memory_autosave`).
 3. Add missing rate-limiting plugin behavior as specified.
 4. Validate supervised interrupt-before flow.
+5. Keep orchestration and hooks on `adk-graph` and `adk-plugin` primitives.
 
 Demo gate:
 1. Supervised session pauses before tool execution.
@@ -123,6 +144,7 @@ Sprint 5 (2026-04-27 to 2026-05-08): Memory + Artifacts
 1. Implement durable memory backend option (starting with SQLite or equivalent).
 2. Store and recall session summaries meaningfully (not only session ID placeholder).
 3. Persist transcript artifacts and optional audio artifacts.
+4. Validate memory/artifact integrations through `adk-memory` and `adk-artifact` contracts.
 
 Demo gate:
 1. Session 1 stores memory facts.
@@ -133,6 +155,7 @@ Sprint 6 (2026-05-11 to 2026-05-22): Resilience + Compaction
 1. Implement reconnect/backoff policy for provider drops.
 2. Enable and validate compaction strategy from config.
 3. Add reliability tests for interrupted provider sessions.
+4. Keep session lifecycle and compaction execution in `adk-runner` orchestration path.
 
 Demo gate:
 1. Kill provider connection mid-session.
@@ -147,6 +170,7 @@ Sprint 7 (2026-05-25 to 2026-06-05): Runtime and Provider Flexibility
 1. Add explicit runtime adapter modes (`native`, `docker`), fail-fast on invalid runtime kind.
 2. Add provider profile matrix with OpenAI-compatible custom endpoint support.
 3. Add configuration validation and doctor diagnostics.
+4. Preserve ADK boundary: provider/runtime adapters integrate without bypassing ADK agent lifecycle.
 
 Demo gate:
 1. Same scenario runs in native and docker runtime modes.
@@ -157,6 +181,7 @@ Sprint 8 (2026-06-08 to 2026-06-19): Security Hardening Layer
 1. Enforce workspace scoping and forbidden path policy for file-capable tools.
 2. Add deny-by-default channel/user allowlist pattern for inbound integrations.
 3. Add tunnel/public-bind safety constraints for gateway exposure.
+4. Keep access decisions and auditing anchored to `adk-auth`.
 
 Demo gate:
 1. Attempted workspace escape is blocked and audited.
@@ -171,6 +196,7 @@ Sprint 9 (2026-06-22 to 2026-07-03): Priority Channels
 1. Implement first channel set: Telegram + Slack + Webhook bridge.
 2. Add routing isolation by channel/account/session.
 3. Add integration smoke tests for inbound/outbound message flows.
+4. Validate channel adapters do not bypass ADK runner/session/plugin pipeline.
 
 Demo gate:
 1. Same agent runtime handles inbound Telegram and Slack.
@@ -180,6 +206,7 @@ Sprint 10 (2026-07-06 to 2026-07-17): Tools and Automation Surfaces
 1. Add browser/http/cron baseline tool surfaces with policy control.
 2. Add background task scheduling and webhook-trigger entrypoint.
 3. Add operator visibility for active sessions/jobs.
+4. Ensure all tool surfaces are exposed via `adk-tool`-compatible wrappers.
 
 Demo gate:
 1. Scheduled task executes and reports result.
@@ -190,6 +217,7 @@ Sprint 11 (2026-07-20 to 2026-07-31): Release Candidate
 1. Hardening pass on security, retries, and telemetry.
 2. Performance and load test for concurrent sessions.
 3. Ship release runbook, deployment doc, and rollback playbook.
+4. Publish final ADK utilization report and custom-delta justification.
 
 Demo gate:
 1. Full end-to-end demo: pair/auth, multi-channel input, tool execution, memory recall, artifact retrieval.
@@ -206,6 +234,7 @@ Demo gate:
    - Run quality gate.
    - Run sprint demo script.
    - Publish sprint notes and known gaps.
+   - Publish ADK utilization delta for the sprint.
 
 ## Commit Progress Always (Operating Policy)
 
@@ -223,6 +252,8 @@ Demo gate:
    - Tag milestone completions: `milestone/M0` ... `milestone/M6`.
 6. PR merge rule:
    - No merge without demo evidence and quality gate pass.
+7. ADK compliance:
+   - No merge without ADK mapping for all new modules/interfaces.
 
 ## Demonstration Framework
 
@@ -238,6 +269,10 @@ Demo gate:
    - Exit non-zero on failure.
    - Print a concise pass/fail summary.
    - Be runnable in CI where feasible.
+3. Each milestone demo must include an ADK evidence block:
+   - crate/APIs exercised
+   - custom wrappers involved
+   - known ADK gaps (if any)
 
 ## Metrics and Acceptance Targets
 
@@ -251,6 +286,8 @@ Demo gate:
    - Track p50 and p95 latency for first transcript and first audio.
 5. Delivery:
    - Milestone demos pass in reproducible environment.
+6. Architecture discipline:
+   - 100% of merged features mapped to ADK crates or approved gap docs.
 
 ## Risk Register and Mitigations
 
@@ -269,3 +306,4 @@ Demo gate:
 2. Make quality gate deterministic and green.
 3. Implement M0 demo harness and lock milestone acceptance criteria.
 4. Start Sprint 1 only after M0 acceptance is signed off.
+5. Create and enforce `docs/adk-utilization-matrix.md` in sprint reviews.
