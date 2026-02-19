@@ -1,8 +1,9 @@
 //! LiveClaw entry point — wires ADK-Rust realtime sessions to the gateway.
 
 use std::collections::HashMap;
-use std::sync::Arc;
-use std::time::Duration;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
 use async_trait::async_trait;
@@ -10,12 +11,20 @@ use tokio::sync::{mpsc, RwLock};
 use tokio::task::JoinHandle;
 use tracing::{info, warn};
 
+use adk_auth::{AccessControl, AuthMiddleware, FileAuditSink, Permission, Role};
+use adk_core::{
+    CallbackContext, Content, EventActions, MemoryEntry, ReadonlyContext, Tool, ToolContext,
+};
+use adk_realtime::config::ToolDefinition;
+use adk_realtime::error::RealtimeError;
+use adk_realtime::events::ToolCall;
 use adk_realtime::openai::OpenAIRealtimeModel;
-use adk_realtime::runner::EventHandler;
+use adk_realtime::runner::{EventHandler, ToolHandler};
 use adk_realtime::{RealtimeConfig, RealtimeRunner};
 use adk_telemetry::{init_telemetry, init_with_otlp};
 
-use liveclaw_app::config::{LiveClawConfig, VoiceConfig};
+use liveclaw_app::config::{LiveClawConfig, SecurityConfig as AppSecurityConfig, VoiceConfig};
+use liveclaw_app::tools::build_baseline_tools;
 use liveclaw_gateway::pairing::PairingGuard;
 use liveclaw_gateway::protocol::SessionConfig;
 use liveclaw_gateway::server::{
@@ -26,6 +35,172 @@ use liveclaw_gateway::server::{
 struct RealtimeSession {
     runner: Arc<RealtimeRunner>,
     run_task: JoinHandle<()>,
+}
+
+#[derive(Clone)]
+struct ToolSecurityConfig {
+    default_role: String,
+    tool_allowlist: Vec<String>,
+    audit_log_path: String,
+}
+
+impl From<&AppSecurityConfig> for ToolSecurityConfig {
+    fn from(value: &AppSecurityConfig) -> Self {
+        Self {
+            default_role: value.default_role.clone(),
+            tool_allowlist: value.tool_allowlist.clone(),
+            audit_log_path: value.audit_log_path.clone(),
+        }
+    }
+}
+
+#[derive(Default)]
+struct ToolExecutionMetrics {
+    total_calls: AtomicU64,
+    failed_calls: AtomicU64,
+    total_duration_millis: AtomicU64,
+}
+
+impl ToolExecutionMetrics {
+    fn record(&self, tool_name: &str, elapsed: Duration, success: bool) {
+        let total_calls = self.total_calls.fetch_add(1, Ordering::SeqCst) + 1;
+        let failed_calls = if success {
+            self.failed_calls.load(Ordering::SeqCst)
+        } else {
+            self.failed_calls.fetch_add(1, Ordering::SeqCst) + 1
+        };
+        self.total_duration_millis
+            .fetch_add(elapsed.as_millis() as u64, Ordering::SeqCst);
+
+        info!(
+            tool = tool_name,
+            duration_ms = elapsed.as_millis(),
+            success = success,
+            total_calls = total_calls,
+            failed_calls = failed_calls,
+            "Tool execution completed"
+        );
+    }
+
+    #[cfg(test)]
+    fn snapshot(&self) -> (u64, u64, u64) {
+        (
+            self.total_calls.load(Ordering::SeqCst),
+            self.failed_calls.load(Ordering::SeqCst),
+            self.total_duration_millis.load(Ordering::SeqCst),
+        )
+    }
+}
+
+struct ToolInvocationContext {
+    function_call_id: String,
+    user_id: String,
+    session_id: String,
+    content: Content,
+    actions: Mutex<EventActions>,
+}
+
+impl ToolInvocationContext {
+    fn new(function_call_id: String, user_id: String, session_id: String) -> Self {
+        Self {
+            function_call_id,
+            user_id,
+            session_id,
+            content: Content::new("user"),
+            actions: Mutex::new(EventActions::default()),
+        }
+    }
+}
+
+#[async_trait]
+impl ReadonlyContext for ToolInvocationContext {
+    fn invocation_id(&self) -> &str {
+        &self.function_call_id
+    }
+
+    fn agent_name(&self) -> &str {
+        "liveclaw-tool-runtime"
+    }
+
+    fn user_id(&self) -> &str {
+        &self.user_id
+    }
+
+    fn app_name(&self) -> &str {
+        "liveclaw"
+    }
+
+    fn session_id(&self) -> &str {
+        &self.session_id
+    }
+
+    fn branch(&self) -> &str {
+        ""
+    }
+
+    fn user_content(&self) -> &Content {
+        &self.content
+    }
+}
+
+#[async_trait]
+impl CallbackContext for ToolInvocationContext {
+    fn artifacts(&self) -> Option<Arc<dyn adk_core::Artifacts>> {
+        None
+    }
+}
+
+#[async_trait]
+impl ToolContext for ToolInvocationContext {
+    fn function_call_id(&self) -> &str {
+        &self.function_call_id
+    }
+
+    fn actions(&self) -> EventActions {
+        self.actions
+            .lock()
+            .expect("tool actions mutex poisoned")
+            .clone()
+    }
+
+    fn set_actions(&self, actions: EventActions) {
+        *self.actions.lock().expect("tool actions mutex poisoned") = actions;
+    }
+
+    async fn search_memory(&self, _query: &str) -> adk_core::Result<Vec<MemoryEntry>> {
+        Ok(Vec::new())
+    }
+}
+
+struct AdkToolHandler {
+    tool: Arc<dyn Tool>,
+    session_id: String,
+    user_id: String,
+    metrics: Arc<ToolExecutionMetrics>,
+}
+
+#[async_trait]
+impl ToolHandler for AdkToolHandler {
+    async fn execute(&self, call: &ToolCall) -> adk_realtime::Result<serde_json::Value> {
+        let start = Instant::now();
+        let ctx = Arc::new(ToolInvocationContext::new(
+            call.call_id.clone(),
+            self.user_id.clone(),
+            self.session_id.clone(),
+        )) as Arc<dyn ToolContext>;
+
+        match self.tool.execute(ctx, call.arguments.clone()).await {
+            Ok(output) => {
+                self.metrics.record(self.tool.name(), start.elapsed(), true);
+                Ok(output)
+            }
+            Err(e) => {
+                self.metrics
+                    .record(self.tool.name(), start.elapsed(), false);
+                Err(RealtimeError::ToolError(e.to_string()))
+            }
+        }
+    }
 }
 
 /// Event handler that forwards realtime outputs with the owning session ID.
@@ -82,6 +257,8 @@ struct RunnerAdapter {
     default_model: String,
     default_voice: Option<String>,
     default_instructions: Option<String>,
+    tool_security: ToolSecurityConfig,
+    tool_metrics: Arc<ToolExecutionMetrics>,
     sessions: Arc<RwLock<HashMap<String, RealtimeSession>>>,
     audio_tx: mpsc::Sender<SessionAudioOutput>,
     transcript_tx: mpsc::Sender<SessionTranscriptOutput>,
@@ -90,6 +267,7 @@ struct RunnerAdapter {
 impl RunnerAdapter {
     fn new(
         voice_cfg: &VoiceConfig,
+        security_cfg: &AppSecurityConfig,
         audio_tx: mpsc::Sender<SessionAudioOutput>,
         transcript_tx: mpsc::Sender<SessionTranscriptOutput>,
     ) -> Self {
@@ -99,6 +277,8 @@ impl RunnerAdapter {
             default_model: voice_cfg.model.clone(),
             default_voice: voice_cfg.voice.clone(),
             default_instructions: voice_cfg.instructions.clone(),
+            tool_security: ToolSecurityConfig::from(security_cfg),
+            tool_metrics: Arc::new(ToolExecutionMetrics::default()),
             sessions: Arc::new(RwLock::new(HashMap::new())),
             audio_tx,
             transcript_tx,
@@ -122,19 +302,64 @@ impl RunnerAdapter {
 
         (model, voice, instructions)
     }
+
+    fn resolve_role(&self, cfg: Option<&SessionConfig>) -> Result<String> {
+        let role = non_empty(cfg.and_then(|c| c.role.clone()))
+            .unwrap_or_else(|| self.tool_security.default_role.clone())
+            .to_lowercase();
+
+        match role.as_str() {
+            "readonly" | "supervised" | "full" => Ok(role),
+            _ => bail!(
+                "Unsupported role '{}'. Expected one of: readonly, supervised, full.",
+                role
+            ),
+        }
+    }
+
+    fn build_session_access_control(
+        &self,
+        principal_id: &str,
+        role: &str,
+    ) -> Result<AccessControl> {
+        let readonly = Role::new("readonly");
+
+        let mut supervised = Role::new("supervised");
+        for tool_name in &self.tool_security.tool_allowlist {
+            supervised = supervised.allow(Permission::Tool(tool_name.clone()));
+        }
+
+        let full = Role::new("full").allow(Permission::AllTools);
+
+        AccessControl::builder()
+            .role(readonly)
+            .role(supervised)
+            .role(full)
+            .assign(principal_id, role)
+            .build()
+            .map_err(|e| anyhow::anyhow!("Failed to build session access control: {}", e))
+    }
+
+    fn build_protected_tools(&self, principal_id: &str, role: &str) -> Result<Vec<Arc<dyn Tool>>> {
+        let access_control = self.build_session_access_control(principal_id, role)?;
+        let audit_sink = FileAuditSink::new(&self.tool_security.audit_log_path)
+            .map_err(|e| anyhow::anyhow!("Failed to create audit sink: {}", e))?;
+        let middleware = AuthMiddleware::with_audit(access_control, audit_sink);
+        Ok(middleware.protect_all(build_baseline_tools()))
+    }
 }
 
 #[async_trait]
 impl RunnerHandle for RunnerAdapter {
     async fn create_session(
         &self,
-        _user_id: &str,
+        user_id: &str,
         session_id: &str,
         config: Option<SessionConfig>,
     ) -> Result<String> {
         if !self.provider.eq_ignore_ascii_case("openai") {
             bail!(
-                "Unsupported voice provider '{}'. Sprint 1 runtime currently supports only 'openai'.",
+                "Unsupported voice provider '{}'. Current runtime supports only 'openai'.",
                 self.provider
             );
         }
@@ -144,15 +369,23 @@ impl RunnerHandle for RunnerAdapter {
         }
 
         if let Some(cfg) = &config {
-            if cfg.role.is_some() || cfg.enable_graph.is_some() {
+            if cfg.enable_graph.is_some() {
                 info!(
                     session_id = session_id,
-                    "Ignoring session role/graph override in Sprint 1 realtime path"
+                    "Ignoring enable_graph override in realtime runner path"
                 );
             }
         }
 
         let (model_id, voice, instructions) = self.resolve_session_settings(config.as_ref());
+        let role = self.resolve_role(config.as_ref())?;
+        let protected_tools = self.build_protected_tools(user_id, &role)?;
+        info!(
+            session_id = session_id,
+            role = %role,
+            tool_count = protected_tools.len(),
+            "Configured baseline toolset for realtime session"
+        );
 
         // Build adk-realtime runner for this session.
         let model = OpenAIRealtimeModel::new(self.api_key.clone(), model_id.clone());
@@ -166,15 +399,32 @@ impl RunnerHandle for RunnerAdapter {
             realtime_config = realtime_config.with_instruction(instr);
         }
 
+        let mut runner_builder = RealtimeRunner::builder()
+            .model(Arc::new(model))
+            .config(realtime_config)
+            .event_handler(GatewayEventForwarder {
+                session_id: session_id.to_string(),
+                audio_tx: self.audio_tx.clone(),
+                transcript_tx: self.transcript_tx.clone(),
+            });
+
+        for tool in protected_tools {
+            let definition = ToolDefinition {
+                name: tool.name().to_string(),
+                description: Some(tool.enhanced_description()),
+                parameters: tool.parameters_schema(),
+            };
+            let handler = AdkToolHandler {
+                tool: tool.clone(),
+                session_id: session_id.to_string(),
+                user_id: user_id.to_string(),
+                metrics: self.tool_metrics.clone(),
+            };
+            runner_builder = runner_builder.tool(definition, handler);
+        }
+
         let runner = Arc::new(
-            RealtimeRunner::builder()
-                .model(Arc::new(model))
-                .config(realtime_config)
-                .event_handler(GatewayEventForwarder {
-                    session_id: session_id.to_string(),
-                    audio_tx: self.audio_tx.clone(),
-                    transcript_tx: self.transcript_tx.clone(),
-                })
+            runner_builder
                 .build()
                 .map_err(|e| anyhow::anyhow!("Failed to build realtime runner: {}", e))?,
         );
@@ -334,6 +584,7 @@ async fn main() -> Result<()> {
 
     let runner_handle: Arc<dyn RunnerHandle> = Arc::new(RunnerAdapter::new(
         &config.voice,
+        &config.security,
         gw_audio_tx,
         gw_transcript_tx,
     ));
@@ -357,6 +608,30 @@ async fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use liveclaw_app::config::SecurityConfig as AppSecurityConfig;
+
+    fn test_adapter(default_role: &str, allowlist: Vec<&str>) -> RunnerAdapter {
+        let voice_cfg = VoiceConfig {
+            provider: "openai".to_string(),
+            api_key: "test-key".to_string(),
+            model: "gpt-4o-realtime-preview-2024-12-17".to_string(),
+            voice: Some("alloy".to_string()),
+            instructions: Some("test".to_string()),
+            audio_format: liveclaw_app::config::AudioFormat::Pcm16_24kHz,
+        };
+
+        let security_cfg = AppSecurityConfig {
+            default_role: default_role.to_string(),
+            tool_allowlist: allowlist.into_iter().map(str::to_string).collect(),
+            rate_limit_per_session: 100,
+            audit_log_path: "/tmp/liveclaw-test-audit.jsonl".to_string(),
+        };
+
+        let (audio_tx, _audio_rx) = mpsc::channel(4);
+        let (transcript_tx, _transcript_rx) = mpsc::channel(4);
+
+        RunnerAdapter::new(&voice_cfg, &security_cfg, audio_tx, transcript_tx)
+    }
 
     #[test]
     fn test_base64_encode_known_values() {
@@ -387,5 +662,74 @@ mod tests {
         assert_eq!(transcript.session_id, "sess-42");
         assert_eq!(transcript.text, "hello");
         assert!(!transcript.is_final);
+    }
+
+    #[test]
+    fn test_protected_tools_catalog_is_non_empty() {
+        let adapter = test_adapter("supervised", vec!["echo_text", "add_numbers", "utc_time"]);
+        let tools = adapter
+            .build_protected_tools("principal-1", "supervised")
+            .unwrap();
+        assert_eq!(tools.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn test_tool_handler_denies_readonly_role() {
+        let adapter = test_adapter("readonly", vec!["echo_text"]);
+        let tool = adapter
+            .build_protected_tools("principal-1", "readonly")
+            .unwrap()
+            .into_iter()
+            .find(|t| t.name() == "echo_text")
+            .unwrap();
+
+        let handler = AdkToolHandler {
+            tool,
+            session_id: "sess-1".to_string(),
+            user_id: "principal-1".to_string(),
+            metrics: Arc::new(ToolExecutionMetrics::default()),
+        };
+
+        let call = ToolCall {
+            call_id: "call-1".to_string(),
+            name: "echo_text".to_string(),
+            arguments: serde_json::json!({ "text": "hello" }),
+        };
+
+        let err = handler.execute(&call).await.err().unwrap();
+        assert!(matches!(err, RealtimeError::ToolError(_)));
+    }
+
+    #[tokio::test]
+    async fn test_tool_handler_executes_for_full_role_and_tracks_metrics() {
+        let adapter = test_adapter("full", vec![]);
+        let tool = adapter
+            .build_protected_tools("principal-1", "full")
+            .unwrap()
+            .into_iter()
+            .find(|t| t.name() == "echo_text")
+            .unwrap();
+
+        let metrics = Arc::new(ToolExecutionMetrics::default());
+        let handler = AdkToolHandler {
+            tool,
+            session_id: "sess-1".to_string(),
+            user_id: "principal-1".to_string(),
+            metrics: metrics.clone(),
+        };
+
+        let call = ToolCall {
+            call_id: "call-1".to_string(),
+            name: "echo_text".to_string(),
+            arguments: serde_json::json!({ "text": "hello" }),
+        };
+
+        let result = handler.execute(&call).await.unwrap();
+        assert_eq!(result["text"], "hello");
+        assert_eq!(result["length"], 5);
+
+        let (total, failed, _duration) = metrics.snapshot();
+        assert_eq!(total, 1);
+        assert_eq!(failed, 0);
     }
 }
