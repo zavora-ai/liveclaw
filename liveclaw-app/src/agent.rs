@@ -56,8 +56,8 @@ pub fn build_realtime_agent(
     let protected_tools = middleware.protect_all(tools);
 
     let mut builder = RealtimeAgent::builder("voice_assistant")
-        .instruction(&config.instructions.clone().unwrap_or_default())
-        .voice(&config.voice.clone().unwrap_or_else(|| "alloy".into()))
+        .instruction(config.instructions.clone().unwrap_or_default())
+        .voice(config.voice.clone().unwrap_or_else(|| "alloy".into()))
         .server_vad()
         // before_tool_callback: rate limiting + shell injection detection
         // Signature: Fn(Arc<dyn CallbackContext>) -> Future<Result<Option<Content>>>
@@ -109,10 +109,12 @@ pub fn build_realtime_agent(
             let tx = transcript_tx.clone();
             let t = text.to_string();
             Box::pin(async move {
-                let _ = tx.send(TranscriptOutput {
-                    text: t,
-                    is_final: true,
-                }).await;
+                let _ = tx
+                    .send(TranscriptOutput {
+                        text: t,
+                        is_final: true,
+                    })
+                    .await;
             })
         }))
         // on_speech_started: latency tracking (timestamp_ms)

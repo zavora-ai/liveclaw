@@ -85,7 +85,7 @@ impl Default for GatewayConfig {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 pub struct VoiceConfig {
     #[serde(default)]
     pub provider: String,
@@ -97,19 +97,6 @@ pub struct VoiceConfig {
     pub instructions: Option<String>,
     #[serde(default)]
     pub audio_format: AudioFormat,
-}
-
-impl Default for VoiceConfig {
-    fn default() -> Self {
-        Self {
-            provider: String::new(),
-            api_key: String::new(),
-            model: String::new(),
-            voice: None,
-            instructions: None,
-            audio_format: AudioFormat::default(),
-        }
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -240,23 +227,15 @@ impl Default for PairingConfig {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 pub struct TelemetryConfig {
     #[serde(default)]
     pub otlp_enabled: bool,
 }
 
-impl Default for TelemetryConfig {
-    fn default() -> Self {
-        Self {
-            otlp_enabled: false,
-        }
-    }
-}
-
 // ── Top-level config ────────────────────────────────────────────────────────
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 pub struct LiveClawConfig {
     #[serde(default)]
     pub gateway: GatewayConfig,
@@ -278,23 +257,6 @@ pub struct LiveClawConfig {
     pub pairing: PairingConfig,
     #[serde(default)]
     pub telemetry: TelemetryConfig,
-}
-
-impl Default for LiveClawConfig {
-    fn default() -> Self {
-        Self {
-            gateway: GatewayConfig::default(),
-            voice: VoiceConfig::default(),
-            security: SecurityConfig::default(),
-            plugin: PluginConfig::default(),
-            memory: MemoryConfig::default(),
-            graph: GraphConfig::default(),
-            compaction: CompactionConfig::default(),
-            artifact: ArtifactConfig::default(),
-            pairing: PairingConfig::default(),
-            telemetry: TelemetryConfig::default(),
-        }
-    }
 }
 
 impl LiveClawConfig {
@@ -416,9 +378,7 @@ mod tests {
                 max_attempts: 3,
                 lockout_duration_secs: 600,
             },
-            telemetry: TelemetryConfig {
-                otlp_enabled: true,
-            },
+            telemetry: TelemetryConfig { otlp_enabled: true },
         };
 
         let toml_str = toml::to_string(&cfg).expect("serialize");
@@ -524,12 +484,15 @@ foo = "bar"
     fn test_audio_format_round_trip() {
         // TOML requires a table at the top level, so wrap in a struct
         #[derive(Debug, Serialize, Deserialize, PartialEq)]
-        struct Wrapper { fmt: AudioFormat }
+        struct Wrapper {
+            fmt: AudioFormat,
+        }
 
         for fmt in [AudioFormat::Pcm16_24kHz, AudioFormat::Pcm16_16kHz] {
             let w = Wrapper { fmt: fmt.clone() };
             let toml_str = toml::to_string(&w).expect("serialize audio format");
-            let deserialized: Wrapper = toml::from_str(&toml_str).expect("deserialize audio format");
+            let deserialized: Wrapper =
+                toml::from_str(&toml_str).expect("deserialize audio format");
             assert_eq!(w, deserialized);
         }
     }

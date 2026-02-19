@@ -23,7 +23,10 @@ impl MemoryAdapter {
     /// * `store` — any `MemoryService` implementation (e.g. `InMemoryMemoryService`)
     /// * `recall_limit` — maximum number of entries returned
     pub fn new(store: Arc<dyn MemoryService>, recall_limit: usize) -> Self {
-        Self { store, recall_limit }
+        Self {
+            store,
+            recall_limit,
+        }
     }
 }
 
@@ -35,7 +38,11 @@ impl adk_core::Memory for MemoryAdapter {
             user_id: String::new(),
             app_name: String::new(),
         };
-        let resp = self.store.search(req).await.map_err(|e| adk_core::AdkError::Agent(e.to_string()))?;
+        let resp = self
+            .store
+            .search(req)
+            .await
+            .map_err(|e| adk_core::AdkError::Agent(e.to_string()))?;
         Ok(resp
             .memories
             .into_iter()
@@ -117,7 +124,10 @@ mod tests {
 
     #[tokio::test]
     async fn search_delegates_query_to_memory_service() {
-        let store = Arc::new(MockMemoryService::new(vec![make_entry("hello world", "user")]));
+        let store = Arc::new(MockMemoryService::new(vec![make_entry(
+            "hello world",
+            "user",
+        )]));
         let adapter = MemoryAdapter::new(store.clone(), 5);
 
         let results = adapter.search("hello").await.unwrap();

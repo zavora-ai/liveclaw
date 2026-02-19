@@ -68,13 +68,19 @@ pub fn build_pii_redaction_plugin(patterns: Vec<regex::Regex>) -> Plugin {
                     if needs_redaction {
                         let mut new_event = event.clone();
                         let mut new_content = content.clone();
-                        new_content.parts = content.parts.iter().map(|part| {
-                            if let Some(text) = part.text() {
-                                adk_core::Part::Text { text: redact_pii(text, &patterns) }
-                            } else {
-                                part.clone()
-                            }
-                        }).collect();
+                        new_content.parts = content
+                            .parts
+                            .iter()
+                            .map(|part| {
+                                if let Some(text) = part.text() {
+                                    adk_core::Part::Text {
+                                        text: redact_pii(text, &patterns),
+                                    }
+                                } else {
+                                    part.clone()
+                                }
+                            })
+                            .collect();
                         new_event.set_content(new_content);
                         return Ok(Some(new_event));
                     }
@@ -101,7 +107,9 @@ pub fn build_memory_autosave_plugin(store: Arc<dyn MemoryService>) -> Plugin {
                         author: "system".to_string(),
                         timestamp: chrono::Utc::now(),
                     };
-                    let _ = store.add_session("liveclaw", "system", &summary, vec![entry]).await;
+                    let _ = store
+                        .add_session("liveclaw", "system", &summary, vec![entry])
+                        .await;
                 }
             })
         })),
@@ -117,7 +125,9 @@ pub fn build_guardrail_plugin(blocked_keywords: Vec<String>) -> Plugin {
         on_user_message: Some(Box::new(move |_ctx, message| {
             let keywords = blocked_keywords.clone();
             Box::pin(async move {
-                let text: String = message.parts.iter()
+                let text: String = message
+                    .parts
+                    .iter()
                     .filter_map(|p| p.text())
                     .collect::<Vec<_>>()
                     .join(" ");

@@ -29,6 +29,9 @@ audit.jsonl
 # Artifacts directory (generated at runtime)
 artifacts/
 
+# Quality gate outputs
+output/adk-quality/
+
 # Playground / scratch
 playground/
 

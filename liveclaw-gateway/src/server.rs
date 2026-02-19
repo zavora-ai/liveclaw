@@ -193,10 +193,7 @@ impl Gateway {
                     let senders_guard = senders.read().await;
                     if let Some(tx) = senders_guard.get(&output.session_id) {
                         if tx.send(resp).await.is_err() {
-                            warn!(
-                                "Failed to forward audio to session {}",
-                                output.session_id
-                            );
+                            warn!("Failed to forward audio to session {}", output.session_id);
                         }
                     }
                 }
@@ -451,7 +448,11 @@ async fn handle_create_session(
     let user_id = conn.user_id.as_deref().unwrap_or("unknown");
     let session_id = uuid::Uuid::new_v4().to_string();
 
-    match state.runner.create_session(user_id, &session_id, config).await {
+    match state
+        .runner
+        .create_session(user_id, &session_id, config)
+        .await
+    {
         Ok(sid) => {
             // Register the ws_response_sender so background tasks can forward
             // AudioOutput and TranscriptUpdate to this connection.
@@ -624,7 +625,7 @@ fn base64_decode(input: &str) -> Option<Vec<u8>> {
 fn base64_encode(input: &[u8]) -> String {
     const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
-    let mut out = String::with_capacity((input.len() + 2) / 3 * 4);
+    let mut out = String::with_capacity(input.len().div_ceil(3) * 4);
 
     for chunk in input.chunks(3) {
         let b0 = chunk[0] as u32;
@@ -915,7 +916,11 @@ mod tests {
             GatewayResponse::SessionCreated { session_id } => {
                 assert!(!session_id.is_empty());
                 // Verify ws_response_sender was registered
-                assert!(state.ws_response_senders.read().await.contains_key(&session_id));
+                assert!(state
+                    .ws_response_senders
+                    .read()
+                    .await
+                    .contains_key(&session_id));
                 // Verify session is tracked in owned_sessions
                 assert!(conn.owned_sessions.contains(&session_id));
             }
@@ -1034,7 +1039,11 @@ mod tests {
         .await;
         assert!(matches!(resp, GatewayResponse::SessionTerminated { .. }));
         assert!(!state.audio_senders.read().await.contains_key("sess-1"));
-        assert!(!state.ws_response_senders.read().await.contains_key("sess-1"));
+        assert!(!state
+            .ws_response_senders
+            .read()
+            .await
+            .contains_key("sess-1"));
         assert!(!conn.owned_sessions.contains(&"sess-1".to_string()));
     }
 
@@ -1057,9 +1066,8 @@ mod tests {
         )
         .await;
         // Should not be an error
-        match &resp {
-            GatewayResponse::Error { .. } => panic!("Expected success, got {:?}", resp),
-            _ => {}
+        if let GatewayResponse::Error { .. } = &resp {
+            panic!("Expected success, got {:?}", resp)
         }
     }
 

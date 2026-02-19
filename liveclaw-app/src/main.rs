@@ -22,7 +22,9 @@ use liveclaw_app::runner::build_runner;
 use liveclaw_app::security::{self, RateLimiter};
 
 use liveclaw_gateway::pairing::PairingGuard;
-use liveclaw_gateway::server::{Gateway, GatewayConfig, SessionAudioOutput, SessionTranscriptOutput};
+use liveclaw_gateway::server::{
+    Gateway, GatewayConfig, SessionAudioOutput, SessionTranscriptOutput,
+};
 
 // ---------------------------------------------------------------------------
 // RunnerHandle adapter — bridges adk-runner::Runner to the Gateway's trait
@@ -48,7 +50,11 @@ impl RunnerHandle for RunnerAdapter {
     ) -> Result<String> {
         // Delegate to Runner — it handles session creation via SessionService
         self.runner
-            .run(user_id.to_string(), session_id.to_string(), adk_core::Content::new("user"))
+            .run(
+                user_id.to_string(),
+                session_id.to_string(),
+                adk_core::Content::new("user"),
+            )
             .await
             .map(|_| session_id.to_string())
             .map_err(|e| anyhow::anyhow!("{}", e))
@@ -195,8 +201,7 @@ async fn main() -> Result<()> {
         Arc::new(InMemorySessionService::new());
 
     // 8. Build MemoryStore and MemoryAdapter
-    let memory_store: Arc<dyn adk_memory::MemoryService> =
-        Arc::new(InMemoryMemoryService::new());
+    let memory_store: Arc<dyn adk_memory::MemoryService> = Arc::new(InMemoryMemoryService::new());
     let memory_adapter = Arc::new(MemoryAdapter::new(
         memory_store.clone(),
         config.memory.recall_limit,

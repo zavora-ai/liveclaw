@@ -7,10 +7,19 @@ pub type SessionId = String;
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type")]
 pub enum GatewayMessage {
-    Pair { code: String },
-    CreateSession { config: Option<SessionConfig> },
-    TerminateSession { session_id: SessionId },
-    SessionAudio { session_id: SessionId, audio: String },
+    Pair {
+        code: String,
+    },
+    CreateSession {
+        config: Option<SessionConfig>,
+    },
+    TerminateSession {
+        session_id: SessionId,
+    },
+    SessionAudio {
+        session_id: SessionId,
+        audio: String,
+    },
     Ping,
 }
 
@@ -18,13 +27,31 @@ pub enum GatewayMessage {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type")]
 pub enum GatewayResponse {
-    PairSuccess { token: String },
-    PairFailure { reason: String },
-    SessionCreated { session_id: SessionId },
-    SessionTerminated { session_id: SessionId },
-    AudioOutput { session_id: SessionId, audio: String },
-    TranscriptUpdate { session_id: SessionId, text: String, is_final: bool },
-    Error { code: String, message: String },
+    PairSuccess {
+        token: String,
+    },
+    PairFailure {
+        reason: String,
+    },
+    SessionCreated {
+        session_id: SessionId,
+    },
+    SessionTerminated {
+        session_id: SessionId,
+    },
+    AudioOutput {
+        session_id: SessionId,
+        audio: String,
+    },
+    TranscriptUpdate {
+        session_id: SessionId,
+        text: String,
+        is_final: bool,
+    },
+    Error {
+        code: String,
+        message: String,
+    },
     Pong,
 }
 
@@ -48,7 +75,9 @@ mod tests {
 
     #[test]
     fn test_gateway_message_pair_roundtrip() {
-        let msg = GatewayMessage::Pair { code: "123456".into() };
+        let msg = GatewayMessage::Pair {
+            code: "123456".into(),
+        };
         let json = serde_json::to_string(&msg).unwrap();
         let parsed: GatewayMessage = serde_json::from_str(&json).unwrap();
         assert_eq!(msg, parsed);
@@ -81,7 +110,9 @@ mod tests {
 
     #[test]
     fn test_gateway_message_terminate_session() {
-        let msg = GatewayMessage::TerminateSession { session_id: "sess-001".into() };
+        let msg = GatewayMessage::TerminateSession {
+            session_id: "sess-001".into(),
+        };
         let json = serde_json::to_string(&msg).unwrap();
         let parsed: GatewayMessage = serde_json::from_str(&json).unwrap();
         assert_eq!(msg, parsed);
@@ -111,7 +142,9 @@ mod tests {
 
     #[test]
     fn test_gateway_response_pair_success() {
-        let resp = GatewayResponse::PairSuccess { token: "tok-abc".into() };
+        let resp = GatewayResponse::PairSuccess {
+            token: "tok-abc".into(),
+        };
         let json = serde_json::to_string(&resp).unwrap();
         let parsed: GatewayResponse = serde_json::from_str(&json).unwrap();
         assert_eq!(resp, parsed);
@@ -119,7 +152,9 @@ mod tests {
 
     #[test]
     fn test_gateway_response_pair_failure() {
-        let resp = GatewayResponse::PairFailure { reason: "invalid code".into() };
+        let resp = GatewayResponse::PairFailure {
+            reason: "invalid code".into(),
+        };
         let json = serde_json::to_string(&resp).unwrap();
         let parsed: GatewayResponse = serde_json::from_str(&json).unwrap();
         assert_eq!(resp, parsed);
@@ -127,7 +162,9 @@ mod tests {
 
     #[test]
     fn test_gateway_response_session_created() {
-        let resp = GatewayResponse::SessionCreated { session_id: "sess-002".into() };
+        let resp = GatewayResponse::SessionCreated {
+            session_id: "sess-002".into(),
+        };
         let json = serde_json::to_string(&resp).unwrap();
         let parsed: GatewayResponse = serde_json::from_str(&json).unwrap();
         assert_eq!(resp, parsed);
@@ -135,7 +172,9 @@ mod tests {
 
     #[test]
     fn test_gateway_response_session_terminated() {
-        let resp = GatewayResponse::SessionTerminated { session_id: "sess-002".into() };
+        let resp = GatewayResponse::SessionTerminated {
+            session_id: "sess-002".into(),
+        };
         let json = serde_json::to_string(&resp).unwrap();
         let parsed: GatewayResponse = serde_json::from_str(&json).unwrap();
         assert_eq!(resp, parsed);
@@ -240,7 +279,12 @@ mod tests {
     fn test_deserialize_from_raw_json() {
         let json = r#"{"type":"Pair","code":"999999"}"#;
         let msg: GatewayMessage = serde_json::from_str(json).unwrap();
-        assert_eq!(msg, GatewayMessage::Pair { code: "999999".into() });
+        assert_eq!(
+            msg,
+            GatewayMessage::Pair {
+                code: "999999".into()
+            }
+        );
     }
 
     #[test]

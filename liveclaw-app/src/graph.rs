@@ -6,7 +6,9 @@ use std::sync::Arc;
 
 use anyhow::Result;
 
-use adk_graph::{AgentNode, GraphAgent, MemoryCheckpointer, NodeContext, NodeOutput, State, START, END};
+use adk_graph::{
+    AgentNode, GraphAgent, MemoryCheckpointer, NodeContext, NodeOutput, State, END, START,
+};
 use adk_realtime::RealtimeAgent;
 
 // ---------------------------------------------------------------------------
@@ -60,7 +62,11 @@ pub fn build_graph_agent(
         .conditional_edge(
             "agent",
             |state: &State| {
-                if state.get("pending_tool_calls").and_then(|v| v.as_array()).map_or(false, |a| !a.is_empty()) {
+                if state
+                    .get("pending_tool_calls")
+                    .and_then(|v| v.as_array())
+                    .is_some_and(|a| !a.is_empty())
+                {
                     "tools".to_string()
                 } else {
                     END.to_string()
@@ -79,5 +85,3 @@ pub fn build_graph_agent(
 
     builder.build().map_err(|e| anyhow::anyhow!("{}", e))
 }
-
-

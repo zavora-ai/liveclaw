@@ -106,8 +106,7 @@ pub fn build_access_control(config: &SecurityConfig) -> AccessControl {
     let full = Role::new("full").allow(Permission::AllTools);
 
     // Audit sink writes JSONL to the configured path.
-    let sink = FileAuditSink::new(&config.audit_log_path)
-        .expect("Failed to create audit sink");
+    let sink = FileAuditSink::new(&config.audit_log_path).expect("Failed to create audit sink");
 
     AccessControl::builder()
         .role(readonly)

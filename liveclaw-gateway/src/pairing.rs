@@ -133,7 +133,9 @@ impl PairingGuard {
 
         let presented_hash = hash_token(token);
         let hashes = self.token_hashes.read().unwrap();
-        hashes.iter().any(|stored| constant_time_eq(stored.as_bytes(), presented_hash.as_bytes()))
+        hashes
+            .iter()
+            .any(|stored| constant_time_eq(stored.as_bytes(), presented_hash.as_bytes()))
     }
 }
 
@@ -160,7 +162,12 @@ fn hex_encode(bytes: &[u8]) -> String {
 /// to produce a zero-padded 6-digit decimal string.
 fn generate_pairing_code() -> String {
     let uuid = Uuid::new_v4();
-    let hex_str: String = uuid.to_string().chars().filter(|c| c.is_ascii_hexdigit()).take(8).collect();
+    let hex_str: String = uuid
+        .to_string()
+        .chars()
+        .filter(|c| c.is_ascii_hexdigit())
+        .take(8)
+        .collect();
     let num = u32::from_str_radix(&hex_str, 16).unwrap_or(0);
     format!("{:06}", num % 1_000_000)
 }
@@ -328,7 +335,11 @@ mod tests {
         for _ in 0..100 {
             let code = generate_pairing_code();
             assert_eq!(code.len(), 6, "code '{}' is not 6 chars", code);
-            assert!(code.chars().all(|c| c.is_ascii_digit()), "code '{}' has non-digits", code);
+            assert!(
+                code.chars().all(|c| c.is_ascii_digit()),
+                "code '{}' has non-digits",
+                code
+            );
         }
     }
 }
