@@ -221,6 +221,7 @@ flowchart TB
 #[serde(tag = "type")]
 pub enum GatewayMessage {
     Pair { code: String },
+    Authenticate { token: String },
     CreateSession { config: Option<SessionConfig> },
     TerminateSession { session_id: String },
     SessionAudio { session_id: String, audio: String },
@@ -231,6 +232,7 @@ pub enum GatewayMessage {
 #[serde(tag = "type")]
 pub enum GatewayResponse {
     PairSuccess { token: String },
+    Authenticated { principal_id: String },
     PairFailure { reason: String },
     SessionCreated { session_id: String },
     SessionTerminated { session_id: String },
@@ -905,6 +907,7 @@ pub type SessionId = String;
 #[serde(tag = "type")]
 pub enum GatewayMessage {
     Pair { code: String },
+    Authenticate { token: String },
     CreateSession { config: Option<SessionConfig> },
     TerminateSession { session_id: SessionId },
     SessionAudio { session_id: SessionId, audio: String },
@@ -915,6 +918,7 @@ pub enum GatewayMessage {
 #[serde(tag = "type")]
 pub enum GatewayResponse {
     PairSuccess { token: String },
+    Authenticated { principal_id: String },
     PairFailure { reason: String },
     SessionCreated { session_id: SessionId },
     SessionTerminated { session_id: SessionId },

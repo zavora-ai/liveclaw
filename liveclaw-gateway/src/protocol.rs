@@ -10,6 +10,9 @@ pub enum GatewayMessage {
     Pair {
         code: String,
     },
+    Authenticate {
+        token: String,
+    },
     CreateSession {
         config: Option<SessionConfig>,
     },
@@ -29,6 +32,9 @@ pub enum GatewayMessage {
 pub enum GatewayResponse {
     PairSuccess {
         token: String,
+    },
+    Authenticated {
+        principal_id: String,
     },
     PairFailure {
         reason: String,
@@ -104,6 +110,16 @@ mod tests {
     }
 
     #[test]
+    fn test_gateway_message_authenticate_roundtrip() {
+        let msg = GatewayMessage::Authenticate {
+            token: "tok-123".into(),
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        let parsed: GatewayMessage = serde_json::from_str(&json).unwrap();
+        assert_eq!(msg, parsed);
+    }
+
+    #[test]
     fn test_gateway_message_create_session_no_config() {
         let msg = GatewayMessage::CreateSession { config: None };
         let json = serde_json::to_string(&msg).unwrap();
@@ -157,6 +173,16 @@ mod tests {
     fn test_gateway_response_pair_failure() {
         let resp = GatewayResponse::PairFailure {
             reason: "invalid code".into(),
+        };
+        let json = serde_json::to_string(&resp).unwrap();
+        let parsed: GatewayResponse = serde_json::from_str(&json).unwrap();
+        assert_eq!(resp, parsed);
+    }
+
+    #[test]
+    fn test_gateway_response_authenticated() {
+        let resp = GatewayResponse::Authenticated {
+            principal_id: "principal-1".into(),
         };
         let json = serde_json::to_string(&resp).unwrap();
         let parsed: GatewayResponse = serde_json::from_str(&json).unwrap();

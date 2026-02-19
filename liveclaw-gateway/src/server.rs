@@ -8,6 +8,7 @@ use axum::response::{IntoResponse, Json};
 use axum::routing::get;
 use axum::Router;
 use serde::Serialize;
+use sha2::{Digest, Sha256};
 use tokio::net::TcpListener;
 use tokio::sync::{mpsc, RwLock};
 use tracing::{error, info, warn};
@@ -90,6 +91,9 @@ struct AppState {
     pairing: Arc<PairingGuard>,
     runner: Arc<dyn RunnerHandle>,
     audio_senders: Arc<RwLock<HashMap<String, mpsc::Sender<Vec<u8>>>>>,
+    /// Stable principal owner for each session ID (supports token-authenticated
+    /// reconnect/resume across different WebSocket connections).
+    session_owners: Arc<RwLock<HashMap<String, String>>>,
     /// Per-session senders for forwarding GatewayResponse messages (AudioOutput,
     /// TranscriptUpdate) back to the WebSocket connection that owns the session.
     ws_response_senders: Arc<RwLock<HashMap<String, mpsc::Sender<GatewayResponse>>>>,
@@ -178,6 +182,7 @@ impl Gateway {
             pairing: self.pairing,
             runner: self.runner,
             audio_senders: self.audio_senders,
+            session_owners: Arc::new(RwLock::new(HashMap::new())),
             ws_response_senders: ws_response_senders.clone(),
         };
 
@@ -269,7 +274,9 @@ async fn ws_upgrade_handler(
 struct ConnectionState {
     authenticated: bool,
     token: Option<String>,
-    user_id: Option<String>,
+    /// Stable principal identity derived from pairing token hash. Used to
+    /// enforce ownership across reconnects.
+    principal_id: Option<String>,
     /// Session IDs owned by this connection, used to register/unregister
     /// ws_response_senders for audio/transcript forwarding.
     owned_sessions: Vec<String>,
@@ -280,7 +287,7 @@ impl ConnectionState {
         Self {
             authenticated: false,
             token: None,
-            user_id: None,
+            principal_id: None,
             owned_sessions: Vec::new(),
         }
     }
@@ -297,7 +304,7 @@ async fn handle_ws(mut ws: WebSocket, state: AppState) {
     // If pairing is disabled, auto-authenticate
     if state.pairing.is_authenticated("") {
         conn.authenticated = true;
-        conn.user_id = Some("anonymous".to_string());
+        conn.principal_id = Some("anonymous".to_string());
     }
 
     // Per-connection channel for receiving server-pushed responses
@@ -376,6 +383,8 @@ async fn handle_message(
 
         GatewayMessage::Pair { code } => handle_pair(&code, state, conn),
 
+        GatewayMessage::Authenticate { token } => handle_authenticate(&token, state, conn),
+
         GatewayMessage::CreateSession { config } => {
             if !conn.authenticated {
                 return auth_required_error();
@@ -394,7 +403,7 @@ async fn handle_message(
             if !conn.authenticated {
                 return auth_required_error();
             }
-            handle_session_audio(&session_id, &audio, state).await
+            handle_session_audio(&session_id, &audio, state, conn, ws_tx).await
         }
     }
 }
@@ -403,7 +412,7 @@ async fn handle_message(
 fn auth_required_error() -> GatewayResponse {
     GatewayResponse::Error {
         code: "auth_required".to_string(),
-        message: "Authentication required. Send a Pair message first.".to_string(),
+        message: "Authentication required. Send Pair or Authenticate first.".to_string(),
     }
 }
 
@@ -415,15 +424,16 @@ fn auth_required_error() -> GatewayResponse {
 fn handle_pair(code: &str, state: &AppState, conn: &mut ConnectionState) -> GatewayResponse {
     match state.pairing.try_pair(code) {
         Ok(Some(token)) => {
+            let principal_id = principal_from_token(&token);
             conn.authenticated = true;
             conn.token = Some(token.clone());
-            conn.user_id = Some(uuid::Uuid::new_v4().to_string());
+            conn.principal_id = Some(principal_id);
             GatewayResponse::PairSuccess { token }
         }
         Ok(None) => {
             // Pairing disabled — auto-authenticated
             conn.authenticated = true;
-            conn.user_id = Some("anonymous".to_string());
+            conn.principal_id = Some("anonymous".to_string());
             GatewayResponse::PairSuccess {
                 token: "no-auth-required".to_string(),
             }
@@ -437,6 +447,32 @@ fn handle_pair(code: &str, state: &AppState, conn: &mut ConnectionState) -> Gate
     }
 }
 
+/// Handle an Authenticate message using an existing token.
+fn handle_authenticate(
+    token: &str,
+    state: &AppState,
+    conn: &mut ConnectionState,
+) -> GatewayResponse {
+    if !state.pairing.is_authenticated(token) {
+        return GatewayResponse::Error {
+            code: "invalid_token".to_string(),
+            message: "Token authentication failed".to_string(),
+        };
+    }
+
+    let principal_id = if state.pairing.is_authenticated("") {
+        "anonymous".to_string()
+    } else {
+        principal_from_token(token)
+    };
+
+    conn.authenticated = true;
+    conn.token = Some(token.to_string());
+    conn.principal_id = Some(principal_id.clone());
+
+    GatewayResponse::Authenticated { principal_id }
+}
+
 /// Handle a CreateSession message — delegates to Runner and registers the
 /// session's ws_response_sender so audio/transcript output can be forwarded.
 async fn handle_create_session(
@@ -445,15 +481,24 @@ async fn handle_create_session(
     conn: &mut ConnectionState,
     ws_tx: &mpsc::Sender<GatewayResponse>,
 ) -> GatewayResponse {
-    let user_id = conn.user_id.as_deref().unwrap_or("unknown");
+    let principal_id = conn
+        .principal_id
+        .clone()
+        .unwrap_or_else(|| "unknown".to_string());
     let session_id = uuid::Uuid::new_v4().to_string();
 
     match state
         .runner
-        .create_session(user_id, &session_id, config)
+        .create_session(&principal_id, &session_id, config)
         .await
     {
         Ok(sid) => {
+            state
+                .session_owners
+                .write()
+                .await
+                .insert(sid.clone(), principal_id);
+
             // Register the ws_response_sender so background tasks can forward
             // AudioOutput and TranscriptUpdate to this connection.
             state
@@ -461,7 +506,9 @@ async fn handle_create_session(
                 .write()
                 .await
                 .insert(sid.clone(), ws_tx.clone());
-            conn.owned_sessions.push(sid.clone());
+            if !conn.owned_sessions.contains(&sid) {
+                conn.owned_sessions.push(sid.clone());
+            }
             GatewayResponse::SessionCreated { session_id: sid }
         }
         Err(e) => {
@@ -481,10 +528,16 @@ async fn handle_terminate_session(
     state: &AppState,
     conn: &mut ConnectionState,
 ) -> GatewayResponse {
+    if let Err(resp) = authorize_session_access(session_id, state, conn, None).await {
+        return resp;
+    }
+
     // Remove audio sender for this session
     state.audio_senders.write().await.remove(session_id);
     // Remove ws_response_sender for this session
     state.ws_response_senders.write().await.remove(session_id);
+    // Remove stable session owner
+    state.session_owners.write().await.remove(session_id);
     // Remove from owned sessions
     conn.owned_sessions.retain(|s| s != session_id);
 
@@ -507,7 +560,13 @@ async fn handle_session_audio(
     session_id: &str,
     audio_b64: &str,
     state: &AppState,
+    conn: &mut ConnectionState,
+    ws_tx: &mpsc::Sender<GatewayResponse>,
 ) -> GatewayResponse {
+    if let Err(resp) = authorize_session_access(session_id, state, conn, Some(ws_tx)).await {
+        return resp;
+    }
+
     // Decode base64 audio data
     let audio_bytes = match base64_decode(audio_b64) {
         Some(bytes) => bytes,
@@ -534,6 +593,67 @@ async fn handle_session_audio(
                 message: format!("Failed to forward audio: {}", e),
             }
         }
+    }
+}
+
+/// Compute a stable principal identity from a raw token.
+fn principal_from_token(token: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(token.as_bytes());
+    format!("{:x}", hasher.finalize())
+}
+
+/// Ensure the authenticated connection can operate on `session_id`.
+///
+/// Access is granted only when the connection principal matches the stable
+/// session owner. On successful reconnect access, optionally rebinds the
+/// session's ws_response_sender to this connection so pushed outputs resume.
+async fn authorize_session_access(
+    session_id: &str,
+    state: &AppState,
+    conn: &mut ConnectionState,
+    ws_tx: Option<&mpsc::Sender<GatewayResponse>>,
+) -> Result<(), GatewayResponse> {
+    let Some(principal_id) = conn.principal_id.as_deref() else {
+        return Err(auth_required_error());
+    };
+
+    if conn.owned_sessions.iter().any(|sid| sid == session_id) {
+        if let Some(sender) = ws_tx {
+            state
+                .ws_response_senders
+                .write()
+                .await
+                .insert(session_id.to_string(), sender.clone());
+        }
+        return Ok(());
+    }
+
+    let owner = {
+        let owners = state.session_owners.read().await;
+        owners.get(session_id).cloned()
+    };
+
+    match owner {
+        Some(owner_id) if owner_id == principal_id => {
+            conn.owned_sessions.push(session_id.to_string());
+            if let Some(sender) = ws_tx {
+                state
+                    .ws_response_senders
+                    .write()
+                    .await
+                    .insert(session_id.to_string(), sender.clone());
+            }
+            Ok(())
+        }
+        Some(_) => Err(GatewayResponse::Error {
+            code: "forbidden_session".to_string(),
+            message: "Session is not owned by the authenticated principal".to_string(),
+        }),
+        None => Err(GatewayResponse::Error {
+            code: "session_not_found".to_string(),
+            message: format!("Session '{}' not found", session_id),
+        }),
     }
 }
 
@@ -724,6 +844,7 @@ mod tests {
             pairing: Arc::new(PairingGuard::new(require_pairing, &[])),
             runner: Arc::new(runner),
             audio_senders: Arc::new(RwLock::new(HashMap::new())),
+            session_owners: Arc::new(RwLock::new(HashMap::new())),
             ws_response_senders: Arc::new(RwLock::new(HashMap::new())),
         }
     }
@@ -732,7 +853,7 @@ mod tests {
         ConnectionState {
             authenticated: true,
             token: Some("test-token".to_string()),
-            user_id: Some("user-1".to_string()),
+            principal_id: Some("user-1".to_string()),
             owned_sessions: Vec::new(),
         }
     }
@@ -897,6 +1018,71 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn test_authenticate_with_valid_token() {
+        let state = make_state(MockRunner::ok(), true);
+        let mut conn_a = unauthed_conn();
+        let ws_tx_a = dummy_ws_tx();
+
+        let code = state.pairing.pairing_code().unwrap();
+        let token = match handle_message(
+            GatewayMessage::Pair { code },
+            &state,
+            &mut conn_a,
+            &ws_tx_a,
+        )
+        .await
+        {
+            GatewayResponse::PairSuccess { token } => token,
+            other => panic!("Expected PairSuccess, got {:?}", other),
+        };
+
+        let mut conn_b = unauthed_conn();
+        let ws_tx_b = dummy_ws_tx();
+        let resp = handle_message(
+            GatewayMessage::Authenticate {
+                token: token.clone(),
+            },
+            &state,
+            &mut conn_b,
+            &ws_tx_b,
+        )
+        .await;
+
+        match resp {
+            GatewayResponse::Authenticated { principal_id } => {
+                assert_eq!(principal_id, principal_from_token(&token));
+                assert!(conn_b.authenticated);
+            }
+            other => panic!("Expected Authenticated, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_authenticate_rejects_invalid_token() {
+        let state = make_state(MockRunner::ok(), true);
+        let mut conn = unauthed_conn();
+        let ws_tx = dummy_ws_tx();
+
+        let resp = handle_message(
+            GatewayMessage::Authenticate {
+                token: "invalid-token".to_string(),
+            },
+            &state,
+            &mut conn,
+            &ws_tx,
+        )
+        .await;
+
+        match resp {
+            GatewayResponse::Error { code, .. } => {
+                assert_eq!(code, "invalid_token");
+                assert!(!conn.authenticated);
+            }
+            other => panic!("Expected invalid_token error, got {:?}", other),
+        }
+    }
+
     // --- Session creation ---
 
     #[tokio::test]
@@ -987,6 +1173,7 @@ mod tests {
         let state = make_state(MockRunner::ok(), false);
         let mut conn = authed_conn();
         let ws_tx = dummy_ws_tx();
+        conn.owned_sessions.push("sess-1".to_string());
 
         let resp = handle_message(
             GatewayMessage::TerminateSession {
@@ -1026,6 +1213,11 @@ mod tests {
             .write()
             .await
             .insert("sess-1".to_string(), ws_resp_tx);
+        state
+            .session_owners
+            .write()
+            .await
+            .insert("sess-1".to_string(), "user-1".to_string());
         conn.owned_sessions.push("sess-1".to_string());
 
         let resp = handle_message(
@@ -1044,6 +1236,7 @@ mod tests {
             .read()
             .await
             .contains_key("sess-1"));
+        assert!(!state.session_owners.read().await.contains_key("sess-1"));
         assert!(!conn.owned_sessions.contains(&"sess-1".to_string()));
     }
 
@@ -1054,6 +1247,7 @@ mod tests {
         let state = make_state(MockRunner::ok(), false);
         let mut conn = authed_conn();
         let ws_tx = dummy_ws_tx();
+        conn.owned_sessions.push("sess-1".to_string());
 
         let resp = handle_message(
             GatewayMessage::SessionAudio {
@@ -1078,6 +1272,7 @@ mod tests {
         let state = make_state(MockRunner::ok(), false);
         let mut conn = authed_conn();
         let ws_tx = dummy_ws_tx();
+        conn.owned_sessions.push("sess-1".to_string());
 
         let resp = handle_message(
             GatewayMessage::SessionAudio {
@@ -1093,6 +1288,150 @@ mod tests {
             GatewayResponse::Error { code, .. } => assert_eq!(code, "invalid_audio"),
             other => panic!("Expected invalid_audio error, got {:?}", other),
         }
+    }
+
+    #[tokio::test]
+    async fn test_session_audio_rejects_unowned_session() {
+        let state = make_state(MockRunner::ok(), false);
+        let mut owner = authed_conn();
+        let mut intruder = ConnectionState {
+            authenticated: true,
+            token: Some("tok-2".to_string()),
+            principal_id: Some("user-2".to_string()),
+            owned_sessions: Vec::new(),
+        };
+        let ws_tx = dummy_ws_tx();
+
+        // Owner creates a session and gets ownership.
+        let sid = match handle_message(
+            GatewayMessage::CreateSession { config: None },
+            &state,
+            &mut owner,
+            &ws_tx,
+        )
+        .await
+        {
+            GatewayResponse::SessionCreated { session_id } => session_id,
+            other => panic!("Expected SessionCreated, got {:?}", other),
+        };
+
+        let resp = handle_message(
+            GatewayMessage::SessionAudio {
+                session_id: sid,
+                audio: "AQID".to_string(),
+            },
+            &state,
+            &mut intruder,
+            &ws_tx,
+        )
+        .await;
+
+        match resp {
+            GatewayResponse::Error { code, .. } => assert_eq!(code, "forbidden_session"),
+            other => panic!("Expected forbidden_session, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_terminate_rejects_unowned_session() {
+        let state = make_state(MockRunner::ok(), false);
+        let mut owner = authed_conn();
+        let mut intruder = ConnectionState {
+            authenticated: true,
+            token: Some("tok-2".to_string()),
+            principal_id: Some("user-2".to_string()),
+            owned_sessions: Vec::new(),
+        };
+        let ws_tx = dummy_ws_tx();
+
+        let sid = match handle_message(
+            GatewayMessage::CreateSession { config: None },
+            &state,
+            &mut owner,
+            &ws_tx,
+        )
+        .await
+        {
+            GatewayResponse::SessionCreated { session_id } => session_id,
+            other => panic!("Expected SessionCreated, got {:?}", other),
+        };
+
+        let resp = handle_message(
+            GatewayMessage::TerminateSession { session_id: sid },
+            &state,
+            &mut intruder,
+            &ws_tx,
+        )
+        .await;
+
+        match resp {
+            GatewayResponse::Error { code, .. } => assert_eq!(code, "forbidden_session"),
+            other => panic!("Expected forbidden_session, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_token_auth_can_resume_session_control() {
+        let state = make_state(MockRunner::ok(), true);
+        let ws_tx = dummy_ws_tx();
+
+        let mut conn_a = unauthed_conn();
+        let code = state.pairing.pairing_code().unwrap();
+        let token = match handle_message(GatewayMessage::Pair { code }, &state, &mut conn_a, &ws_tx)
+            .await
+        {
+            GatewayResponse::PairSuccess { token } => token,
+            other => panic!("Expected PairSuccess, got {:?}", other),
+        };
+
+        let sid = match handle_message(
+            GatewayMessage::CreateSession { config: None },
+            &state,
+            &mut conn_a,
+            &ws_tx,
+        )
+        .await
+        {
+            GatewayResponse::SessionCreated { session_id } => session_id,
+            other => panic!("Expected SessionCreated, got {:?}", other),
+        };
+
+        // New connection authenticates with same token and can control the session.
+        let mut conn_b = unauthed_conn();
+        let auth_resp = handle_message(
+            GatewayMessage::Authenticate {
+                token: token.clone(),
+            },
+            &state,
+            &mut conn_b,
+            &ws_tx,
+        )
+        .await;
+        assert!(matches!(auth_resp, GatewayResponse::Authenticated { .. }));
+
+        let audio_resp = handle_message(
+            GatewayMessage::SessionAudio {
+                session_id: sid.clone(),
+                audio: "AQID".to_string(),
+            },
+            &state,
+            &mut conn_b,
+            &ws_tx,
+        )
+        .await;
+        assert!(matches!(audio_resp, GatewayResponse::AudioAccepted { .. }));
+
+        let terminate_resp = handle_message(
+            GatewayMessage::TerminateSession { session_id: sid },
+            &state,
+            &mut conn_b,
+            &ws_tx,
+        )
+        .await;
+        assert!(matches!(
+            terminate_resp,
+            GatewayResponse::SessionTerminated { .. }
+        ));
     }
 
     // --- Base64 helpers ---
@@ -1151,7 +1490,7 @@ mod tests {
         let conn = ConnectionState::new();
         assert!(!conn.authenticated);
         assert!(conn.token.is_none());
-        assert!(conn.user_id.is_none());
+        assert!(conn.principal_id.is_none());
         assert!(conn.owned_sessions.is_empty());
     }
 
