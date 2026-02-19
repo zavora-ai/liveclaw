@@ -7,11 +7,11 @@ Scope: Baseline defects identified during parity/readiness review
 
 | ID | Severity | Area | Defect | Owner | Target Milestone | Status |
 |---|---|---|---|---|---|---|
-| LC-001 | P0 | Voice data plane | `SessionAudio` path is effectively dropped by runner adapter no-op | Core Runtime | M1 | OPEN |
-| LC-002 | P0 | Session routing | Agent output session IDs are hard-coded instead of propagated per session | Core Runtime | M1 | OPEN |
+| LC-001 | P0 | Voice data plane | `SessionAudio` path is effectively dropped by runner adapter no-op | Core Runtime | M1 | CLOSED |
+| LC-002 | P0 | Session routing | Agent output session IDs are hard-coded instead of propagated per session | Core Runtime | M1 | CLOSED |
 | LC-003 | P1 | Session security | Missing per-session ownership checks for terminate/audio actions | Security | M2 | OPEN |
 | LC-004 | P1 | Authentication | Pairing/token lifecycle lacks full token-authenticate flow semantics | Security | M2 | OPEN |
-| LC-005 | P1 | Protocol correctness | `SessionAudio` success uses `SessionCreated` response semantics | Gateway | M1 | OPEN |
+| LC-005 | P1 | Protocol correctness | `SessionAudio` success uses `SessionCreated` response semantics | Gateway | M1 | CLOSED |
 | LC-006 | P1 | Tooling | Tool loader is placeholder (empty) and does not provide production-capable baseline tools | Agent Runtime | M3 | OPEN |
 | LC-007 | P1 | Graph execution | Graph tools node is stubbed and does not execute pending tool calls | Agent Runtime | M3 | OPEN |
 | LC-008 | P1 | Plugin completeness | Plugin config toggles not fully enforced and rate-limiting plugin path incomplete | Platform | M4 | OPEN |
@@ -24,3 +24,9 @@ Scope: Baseline defects identified during parity/readiness review
    - linked commit SHA
    - test coverage evidence
    - demo evidence in milestone script
+
+## Resolution Notes (Sprint 1)
+
+1. `LC-001` closed by wiring `SessionAudio` to per-session `adk_realtime::RealtimeRunner` instances in `liveclaw-app/src/main.rs`.
+2. `LC-002` closed by replacing hard-coded `"default"` tagging with session-bound `GatewayEventForwarder` callback routing in `liveclaw-app/src/main.rs`.
+3. `LC-005` closed by returning `GatewayResponse::AudioAccepted` for `SessionAudio` success in `liveclaw-gateway/src/server.rs`.
