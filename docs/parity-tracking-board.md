@@ -10,7 +10,7 @@ Status scale: `NOT_STARTED`, `IN_PROGRESS`, `AT_RISK`, `BLOCKED`, `DONE`
 | M0 Baseline Recovery | DONE | Core Team | 2026-02-27 | `scripts/demo/m0_baseline.sh` | Quality gate green; CI ADK path valid; parity docs present; P0/P1 register maintained |
 | M1 Voice E2E | IN_PROGRESS | Core Team | 2026-03-13 | `scripts/demo/m1_voice_e2e.sh` | SessionAudio reaches live runtime; session IDs propagate end-to-end |
 | M2 Secure Multi-Session | IN_PROGRESS | Core Team | 2026-03-27 | `scripts/demo/m2_secure_sessions.sh` | Token auth path implemented; per-session ownership enforced |
-| M3 Tool and Graph Execution | NOT_STARTED | Core Team | 2026-04-24 | `scripts/demo/m3_tools_graph.sh` | Non-empty toolset; RBAC enforced; graph tools node executes |
+| M3 Tool and Graph Execution | IN_PROGRESS | Core Team | 2026-04-24 | `scripts/demo/m3_tools_graph.sh` | Non-empty toolset; RBAC enforced; graph tools node executes |
 | M4 Memory, Artifacts, Resilience | NOT_STARTED | Core Team | 2026-05-22 | `scripts/demo/m4_memory_artifacts.sh` | Persistent recall across restarts; artifact persistence; reconnect behavior validated |
 | M5 ZeroClaw Track Parity | NOT_STARTED | Core Team | 2026-06-19 | `scripts/demo/m5_runtime_security.sh` | Runtime modes validated; provider flexibility; security hardening gates pass |
 | M6 OpenClaw Track Parity + RC | NOT_STARTED | Core Team | 2026-07-31 | `scripts/demo/m6_release_flow.sh` | Priority channels work; ops surfaces validated; release candidate checklist passes |
@@ -45,6 +45,16 @@ Status scale: `NOT_STARTED`, `IN_PROGRESS`, `AT_RISK`, `BLOCKED`, `DONE`
 | Add cross-session misuse tests | DONE | `test_session_audio_rejects_unowned_session`, `test_terminate_rejects_unowned_session` |
 | Add reconnect with token control test | DONE | `test_token_auth_can_resume_session_control` |
 | Sprint 2 demo script for secure multi-session checks | DONE | `scripts/demo/m2_secure_sessions.sh` |
+
+## Sprint 3 Checklist (In Progress)
+
+| Item | Status | Evidence |
+|---|---|---|
+| Replace placeholder tool loader with baseline ADK toolset | DONE | `liveclaw-app/src/tools.rs` `build_baseline_tools()` |
+| Wire tools into realtime runtime with ADK interfaces | DONE | `liveclaw-app/src/main.rs` converts `Arc<dyn adk_core::Tool>` into realtime tool definitions + handlers |
+| Enforce RBAC on tool execution path | DONE | `liveclaw-app/src/main.rs` session-specific `AuthMiddleware::with_audit` |
+| Add explicit tool execution metrics (count/failures/duration) | DONE | `liveclaw-app/src/main.rs` `ToolExecutionMetrics` and structured logs |
+| Add M3 demo checks | DONE | `scripts/demo/m3_tools_graph.sh` |
 
 ## Notes
 

@@ -12,7 +12,7 @@ Scope: Baseline defects identified during parity/readiness review
 | LC-003 | P1 | Session security | Missing per-session ownership checks for terminate/audio actions | Security | M2 | CLOSED |
 | LC-004 | P1 | Authentication | Pairing/token lifecycle lacks full token-authenticate flow semantics | Security | M2 | CLOSED |
 | LC-005 | P1 | Protocol correctness | `SessionAudio` success uses `SessionCreated` response semantics | Gateway | M1 | CLOSED |
-| LC-006 | P1 | Tooling | Tool loader is placeholder (empty) and does not provide production-capable baseline tools | Agent Runtime | M3 | OPEN |
+| LC-006 | P1 | Tooling | Tool loader is placeholder (empty) and does not provide production-capable baseline tools | Agent Runtime | M3 | CLOSED |
 | LC-007 | P1 | Graph execution | Graph tools node is stubbed and does not execute pending tool calls | Agent Runtime | M3 | OPEN |
 | LC-008 | P1 | Plugin completeness | Plugin config toggles not fully enforced and rate-limiting plugin path incomplete | Platform | M4 | OPEN |
 | LC-009 | P1 | Compaction | Compaction config exists but runtime compaction is disabled | Platform | M4 | OPEN |
@@ -32,3 +32,4 @@ Scope: Baseline defects identified during parity/readiness review
 3. `LC-005` closed by returning `GatewayResponse::AudioAccepted` for `SessionAudio` success in `liveclaw-gateway/src/server.rs`.
 4. `LC-003` closed by enforcing stable principal ownership checks in `liveclaw-gateway/src/server.rs` before audio/terminate operations.
 5. `LC-004` closed by introducing token-based `Authenticate` flow with resume control tests in `liveclaw-gateway/src/protocol.rs` and `liveclaw-gateway/src/server.rs`.
+6. `LC-006` closed by implementing baseline `adk-tool::FunctionTool` catalog and session-wired RBAC execution path in `liveclaw-app/src/tools.rs` and `liveclaw-app/src/main.rs`.
