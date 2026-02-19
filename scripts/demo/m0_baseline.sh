@@ -9,6 +9,7 @@ demo_header "M0 Baseline Recovery"
 require_file "docs/parity-roadmap.md"
 require_file "docs/adk-utilization-matrix.md"
 require_file "docs/parity-tracking-board.md"
+require_file "docs/m0-defect-register.md"
 require_file "scripts/run_quality_gate.sh"
 
 if [[ "${LIVECLAW_SKIP_GATE:-0}" != "1" ]]; then
