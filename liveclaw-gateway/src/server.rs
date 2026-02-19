@@ -521,9 +521,9 @@ async fn handle_session_audio(
 
     match state.runner.send_audio(session_id, &audio_bytes).await {
         Ok(()) => {
-            // Audio forwarded successfully — no explicit response needed per protocol,
-            // but we acknowledge to keep the client informed.
-            GatewayResponse::SessionCreated {
+            // Audio forwarded successfully; acknowledge with protocol-specific
+            // audio acceptance instead of reusing session creation semantics.
+            GatewayResponse::AudioAccepted {
                 session_id: session_id.to_string(),
             }
         }
@@ -1065,9 +1065,11 @@ mod tests {
             &ws_tx,
         )
         .await;
-        // Should not be an error
-        if let GatewayResponse::Error { .. } = &resp {
-            panic!("Expected success, got {:?}", resp)
+        match resp {
+            GatewayResponse::AudioAccepted { session_id } => {
+                assert_eq!(session_id, "sess-1");
+            }
+            other => panic!("Expected AudioAccepted, got {:?}", other),
         }
     }
 

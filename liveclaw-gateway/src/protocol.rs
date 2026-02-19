@@ -39,6 +39,9 @@ pub enum GatewayResponse {
     SessionTerminated {
         session_id: SessionId,
     },
+    AudioAccepted {
+        session_id: SessionId,
+    },
     AudioOutput {
         session_id: SessionId,
         audio: String,
@@ -173,6 +176,16 @@ mod tests {
     #[test]
     fn test_gateway_response_session_terminated() {
         let resp = GatewayResponse::SessionTerminated {
+            session_id: "sess-002".into(),
+        };
+        let json = serde_json::to_string(&resp).unwrap();
+        let parsed: GatewayResponse = serde_json::from_str(&json).unwrap();
+        assert_eq!(resp, parsed);
+    }
+
+    #[test]
+    fn test_gateway_response_audio_accepted() {
+        let resp = GatewayResponse::AudioAccepted {
             session_id: "sess-002".into(),
         };
         let json = serde_json::to_string(&resp).unwrap();

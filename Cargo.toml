@@ -12,7 +12,7 @@ repository = "https://github.com/zavora-ai/liveclaw"
 [workspace.dependencies]
 # ADK-Rust crates (path deps — not committed, local only)
 adk-core = { path = "../adk-rust/adk-core" }
-adk-realtime = { path = "../adk-rust/adk-realtime" }
+adk-realtime = { path = "../adk-rust/adk-realtime", features = ["openai"] }
 adk-session = { path = "../adk-rust/adk-session" }
 adk-tool = { path = "../adk-rust/adk-tool" }
 adk-runner = { path = "../adk-rust/adk-runner" }

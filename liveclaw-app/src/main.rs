@@ -1,90 +1,303 @@
-//! LiveClaw entry point — wires all ADK-Rust components together and starts
-//! the Gateway server.
+//! LiveClaw entry point — wires ADK-Rust realtime sessions to the gateway.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::Result;
-use tokio::sync::mpsc;
-use tracing::info;
+use anyhow::{bail, Context, Result};
+use async_trait::async_trait;
+use tokio::sync::{mpsc, RwLock};
+use tokio::task::JoinHandle;
+use tracing::{info, warn};
 
-use adk_memory::InMemoryMemoryService;
-use adk_runner::EventsCompactionConfig;
-use adk_session::InMemorySessionService;
+use adk_realtime::openai::OpenAIRealtimeModel;
+use adk_realtime::runner::EventHandler;
+use adk_realtime::{RealtimeConfig, RealtimeRunner};
 use adk_telemetry::{init_telemetry, init_with_otlp};
 
-use liveclaw_app::agent::{self, AudioOutput, TranscriptOutput};
-use liveclaw_app::config::LiveClawConfig;
-use liveclaw_app::graph;
-use liveclaw_app::memory::MemoryAdapter;
-use liveclaw_app::plugins::{build_pii_patterns, build_plugin_manager};
-use liveclaw_app::runner::build_runner;
-use liveclaw_app::security::{self, RateLimiter};
-
+use liveclaw_app::config::{LiveClawConfig, VoiceConfig};
 use liveclaw_gateway::pairing::PairingGuard;
+use liveclaw_gateway::protocol::SessionConfig;
 use liveclaw_gateway::server::{
-    Gateway, GatewayConfig, SessionAudioOutput, SessionTranscriptOutput,
+    Gateway, GatewayConfig, RunnerHandle, SessionAudioOutput, SessionTranscriptOutput,
 };
 
-// ---------------------------------------------------------------------------
-// RunnerHandle adapter — bridges adk-runner::Runner to the Gateway's trait
-// ---------------------------------------------------------------------------
+/// A connected realtime session and its background event loop task.
+struct RealtimeSession {
+    runner: Arc<RealtimeRunner>,
+    run_task: JoinHandle<()>,
+}
 
-use async_trait::async_trait;
-use liveclaw_gateway::protocol::SessionConfig;
-use liveclaw_gateway::server::RunnerHandle;
+/// Event handler that forwards realtime outputs with the owning session ID.
+struct GatewayEventForwarder {
+    session_id: String,
+    audio_tx: mpsc::Sender<SessionAudioOutput>,
+    transcript_tx: mpsc::Sender<SessionTranscriptOutput>,
+}
 
-/// Adapter that implements the Gateway's [`RunnerHandle`] trait by delegating
-/// to `adk-runner::Runner`.
+#[async_trait]
+impl EventHandler for GatewayEventForwarder {
+    async fn on_audio(&self, audio: &[u8], _item_id: &str) -> adk_realtime::Result<()> {
+        if self
+            .audio_tx
+            .send(SessionAudioOutput {
+                session_id: self.session_id.clone(),
+                data: audio.to_vec(),
+            })
+            .await
+            .is_err()
+        {
+            warn!(
+                session_id = %self.session_id,
+                "Gateway audio output channel is closed"
+            );
+        }
+        Ok(())
+    }
+
+    async fn on_transcript(&self, transcript: &str, _item_id: &str) -> adk_realtime::Result<()> {
+        if self
+            .transcript_tx
+            .send(SessionTranscriptOutput {
+                session_id: self.session_id.clone(),
+                text: transcript.to_string(),
+                is_final: false,
+            })
+            .await
+            .is_err()
+        {
+            warn!(
+                session_id = %self.session_id,
+                "Gateway transcript output channel is closed"
+            );
+        }
+        Ok(())
+    }
+}
+
+/// Adapter implementing gateway session operations on top of adk-realtime.
 struct RunnerAdapter {
-    runner: Arc<adk_runner::Runner>,
+    provider: String,
+    api_key: String,
+    default_model: String,
+    default_voice: Option<String>,
+    default_instructions: Option<String>,
+    sessions: Arc<RwLock<HashMap<String, RealtimeSession>>>,
+    audio_tx: mpsc::Sender<SessionAudioOutput>,
+    transcript_tx: mpsc::Sender<SessionTranscriptOutput>,
+}
+
+impl RunnerAdapter {
+    fn new(
+        voice_cfg: &VoiceConfig,
+        audio_tx: mpsc::Sender<SessionAudioOutput>,
+        transcript_tx: mpsc::Sender<SessionTranscriptOutput>,
+    ) -> Self {
+        Self {
+            provider: voice_cfg.provider.clone(),
+            api_key: effective_api_key(&voice_cfg.api_key),
+            default_model: voice_cfg.model.clone(),
+            default_voice: voice_cfg.voice.clone(),
+            default_instructions: voice_cfg.instructions.clone(),
+            sessions: Arc::new(RwLock::new(HashMap::new())),
+            audio_tx,
+            transcript_tx,
+        }
+    }
+
+    fn resolve_session_settings(
+        &self,
+        cfg: Option<&SessionConfig>,
+    ) -> (String, String, Option<String>) {
+        let model = non_empty(cfg.and_then(|c| c.model.clone()))
+            .or_else(|| non_empty(Some(self.default_model.clone())))
+            .unwrap_or_else(|| "gpt-4o-realtime-preview-2024-12-17".to_string());
+
+        let voice = non_empty(cfg.and_then(|c| c.voice.clone()))
+            .or_else(|| non_empty(self.default_voice.clone()))
+            .unwrap_or_else(|| "alloy".to_string());
+
+        let instructions = non_empty(cfg.and_then(|c| c.instructions.clone()))
+            .or_else(|| non_empty(self.default_instructions.clone()));
+
+        (model, voice, instructions)
+    }
 }
 
 #[async_trait]
 impl RunnerHandle for RunnerAdapter {
     async fn create_session(
         &self,
-        user_id: &str,
+        _user_id: &str,
         session_id: &str,
-        _config: Option<SessionConfig>,
+        config: Option<SessionConfig>,
     ) -> Result<String> {
-        // Delegate to Runner — it handles session creation via SessionService
-        self.runner
-            .run(
-                user_id.to_string(),
-                session_id.to_string(),
-                adk_core::Content::new("user"),
-            )
+        if !self.provider.eq_ignore_ascii_case("openai") {
+            bail!(
+                "Unsupported voice provider '{}'. Sprint 1 runtime currently supports only 'openai'.",
+                self.provider
+            );
+        }
+
+        if self.api_key.trim().is_empty() {
+            bail!("Missing API key. Set [voice].api_key or LIVECLAW_API_KEY / OPENAI_API_KEY.");
+        }
+
+        if let Some(cfg) = &config {
+            if cfg.role.is_some() || cfg.enable_graph.is_some() {
+                info!(
+                    session_id = session_id,
+                    "Ignoring session role/graph override in Sprint 1 realtime path"
+                );
+            }
+        }
+
+        let (model_id, voice, instructions) = self.resolve_session_settings(config.as_ref());
+
+        // Build adk-realtime runner for this session.
+        let model = OpenAIRealtimeModel::new(self.api_key.clone(), model_id.clone());
+        let mut realtime_config = RealtimeConfig::default()
+            .with_model(model_id)
+            .with_text_and_audio()
+            .with_server_vad()
+            .with_voice(voice);
+
+        if let Some(instr) = instructions {
+            realtime_config = realtime_config.with_instruction(instr);
+        }
+
+        let runner = Arc::new(
+            RealtimeRunner::builder()
+                .model(Arc::new(model))
+                .config(realtime_config)
+                .event_handler(GatewayEventForwarder {
+                    session_id: session_id.to_string(),
+                    audio_tx: self.audio_tx.clone(),
+                    transcript_tx: self.transcript_tx.clone(),
+                })
+                .build()
+                .map_err(|e| anyhow::anyhow!("Failed to build realtime runner: {}", e))?,
+        );
+
+        runner
+            .connect()
             .await
-            .map(|_| session_id.to_string())
-            .map_err(|e| anyhow::anyhow!("{}", e))
+            .map_err(|e| anyhow::anyhow!("Failed to connect realtime session: {}", e))?;
+
+        let run_runner = runner.clone();
+        let sid = session_id.to_string();
+        let run_task = tokio::spawn(async move {
+            match run_runner.run().await {
+                Ok(()) => info!(session_id = %sid, "Realtime runner loop closed"),
+                Err(e) => warn!(session_id = %sid, error = %e, "Realtime runner loop ended"),
+            }
+        });
+
+        let mut sessions = self.sessions.write().await;
+        if sessions.contains_key(session_id) {
+            let _ = runner.close().await;
+            run_task.abort();
+            bail!("Session '{}' already exists", session_id);
+        }
+
+        sessions.insert(session_id.to_string(), RealtimeSession { runner, run_task });
+
+        Ok(session_id.to_string())
     }
 
-    async fn terminate_session(&self, _session_id: &str) -> Result<()> {
-        // Runner handles cleanup when the event stream ends
+    async fn terminate_session(&self, session_id: &str) -> Result<()> {
+        let session = { self.sessions.write().await.remove(session_id) };
+
+        let Some(RealtimeSession { runner, run_task }) = session else {
+            bail!("Session '{}' not found", session_id);
+        };
+
+        if let Err(e) = runner.close().await {
+            warn!(session_id = session_id, error = %e, "Failed to close realtime session cleanly");
+        }
+
+        run_task.abort();
+        let _ = run_task.await;
+
         Ok(())
     }
 
-    async fn send_audio(&self, _session_id: &str, _audio: &[u8]) -> Result<()> {
-        // Audio forwarding is handled via the mpsc channels wired into
-        // the RealtimeAgent callbacks
-        Ok(())
+    async fn send_audio(&self, session_id: &str, audio: &[u8]) -> Result<()> {
+        if audio.is_empty() {
+            bail!("Audio payload is empty");
+        }
+
+        let runner = {
+            let sessions = self.sessions.read().await;
+            sessions.get(session_id).map(|s| s.runner.clone())
+        }
+        .ok_or_else(|| anyhow::anyhow!("Session '{}' not found", session_id))?;
+
+        let audio_b64 = base64_encode(audio);
+        runner
+            .send_audio(&audio_b64)
+            .await
+            .context("Failed to send audio to realtime provider")
     }
 }
 
-// ---------------------------------------------------------------------------
-// Placeholder tool loader
-// ---------------------------------------------------------------------------
-
-/// Placeholder tool loader — returns an empty Vec.
-/// Actual tool loading depends on the specific deployment configuration.
-fn load_tools() -> Vec<Arc<dyn adk_core::Tool>> {
-    Vec::new()
+fn non_empty(value: Option<String>) -> Option<String> {
+    value.and_then(|v| {
+        let trimmed = v.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        }
+    })
 }
 
-// ---------------------------------------------------------------------------
-// Application entry point
-// ---------------------------------------------------------------------------
+fn effective_api_key(configured: &str) -> String {
+    if !configured.trim().is_empty() {
+        return configured.trim().to_string();
+    }
+
+    if let Ok(val) = std::env::var("LIVECLAW_API_KEY") {
+        if !val.trim().is_empty() {
+            return val.trim().to_string();
+        }
+    }
+
+    std::env::var("OPENAI_API_KEY")
+        .ok()
+        .map(|v| v.trim().to_string())
+        .unwrap_or_default()
+}
+
+fn base64_encode(input: &[u8]) -> String {
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+    let mut out = String::with_capacity(input.len().div_ceil(3) * 4);
+
+    for chunk in input.chunks(3) {
+        let b0 = chunk[0] as u32;
+        let b1 = if chunk.len() > 1 { chunk[1] as u32 } else { 0 };
+        let b2 = if chunk.len() > 2 { chunk[2] as u32 } else { 0 };
+        let triple = (b0 << 16) | (b1 << 8) | b2;
+
+        out.push(TABLE[((triple >> 18) & 0x3F) as usize] as char);
+        out.push(TABLE[((triple >> 12) & 0x3F) as usize] as char);
+
+        if chunk.len() > 1 {
+            out.push(TABLE[((triple >> 6) & 0x3F) as usize] as char);
+        } else {
+            out.push('=');
+        }
+
+        if chunk.len() > 2 {
+            out.push(TABLE[(triple & 0x3F) as usize] as char);
+        } else {
+            out.push('=');
+        }
+    }
+
+    out
+}
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -95,7 +308,7 @@ async fn main() -> Result<()> {
 
     let config = LiveClawConfig::load(&config_path)?;
 
-    // 1. Initialize telemetry
+    // Initialize telemetry
     if config.telemetry.otlp_enabled {
         init_with_otlp("liveclaw", "http://localhost:4317").ok();
     } else {
@@ -103,140 +316,10 @@ async fn main() -> Result<()> {
     }
     info!("LiveClaw starting with config from '{}'", config_path);
 
-    // 2. Build adk-auth AccessControl
-    let security_cfg = security::SecurityConfig {
-        default_role: config.security.default_role.clone(),
-        tool_allowlist: config.security.tool_allowlist.clone(),
-        rate_limit_per_session: config.security.rate_limit_per_session,
-        audit_log_path: config.security.audit_log_path.clone(),
-    };
-    let access_control = Arc::new(security::build_access_control(&security_cfg));
-
-    // 3. Build rate limiter
-    let rate_limiter = Arc::new(RateLimiter::new(config.security.rate_limit_per_session));
-
-    // 4. Build audio/transcript channels for Gateway ↔ RealtimeAgent
-    //
-    // Agent-side channels: the RealtimeAgent callbacks produce un-tagged
-    // AudioOutput/TranscriptOutput. These are consumed by the agent.
-    let (audio_tx, _audio_rx) = mpsc::channel::<AudioOutput>(256);
-    let (transcript_tx, _transcript_rx) = mpsc::channel::<TranscriptOutput>(256);
-
-    // Gateway-side channels: session-tagged outputs that the Gateway consumes
-    // to forward AudioOutput and TranscriptUpdate responses to WebSocket clients.
+    // Gateway output channels consumed by background routing tasks.
     let (gw_audio_tx, gw_audio_rx) = mpsc::channel::<SessionAudioOutput>(256);
     let (gw_transcript_tx, gw_transcript_rx) = mpsc::channel::<SessionTranscriptOutput>(256);
 
-    // Bridge: spawn tasks that read from agent-side channels and forward to
-    // gateway-side channels with session tagging. In a full implementation,
-    // the session_id would come from the InvocationContext in the agent
-    // callbacks. For now, we use a placeholder that will be replaced when
-    // per-session callback wiring is implemented.
-    {
-        let gw_audio_tx = gw_audio_tx.clone();
-        tokio::spawn(async move {
-            let mut rx = _audio_rx;
-            while let Some(output) = rx.recv().await {
-                let _ = gw_audio_tx
-                    .send(SessionAudioOutput {
-                        session_id: "default".to_string(),
-                        data: output.data,
-                    })
-                    .await;
-            }
-        });
-    }
-    {
-        let gw_transcript_tx = gw_transcript_tx.clone();
-        tokio::spawn(async move {
-            let mut rx = _transcript_rx;
-            while let Some(output) = rx.recv().await {
-                let _ = gw_transcript_tx
-                    .send(SessionTranscriptOutput {
-                        session_id: "default".to_string(),
-                        text: output.text,
-                        is_final: output.is_final,
-                    })
-                    .await;
-            }
-        });
-    }
-
-    // 5. Build tools and RealtimeAgent
-    let tools = load_tools();
-    let voice_cfg = agent::VoiceConfig {
-        provider: config.voice.provider.clone(),
-        api_key: config.voice.api_key.clone(),
-        model: config.voice.model.clone(),
-        voice: config.voice.voice.clone(),
-        instructions: config.voice.instructions.clone(),
-        audio_format: format!("{:?}", config.voice.audio_format),
-    };
-    let realtime_agent = agent::build_realtime_agent(
-        &voice_cfg,
-        tools,
-        access_control.clone(),
-        rate_limiter.clone(),
-        audio_tx,
-        transcript_tx,
-    )?;
-
-    // 6. Optionally wrap in GraphAgent
-    let agent: Arc<dyn adk_core::Agent> = if config.graph.enable_graph {
-        let graph_cfg = graph::GraphConfig {
-            enable_graph: config.graph.enable_graph,
-            recursion_limit: Some(config.graph.recursion_limit),
-        };
-        Arc::new(graph::build_graph_agent(
-            realtime_agent,
-            &graph_cfg,
-            &config.security.default_role,
-        )?)
-    } else {
-        Arc::new(realtime_agent)
-    };
-
-    // 7. Build SessionService
-    let session_service: Arc<dyn adk_session::SessionService> =
-        Arc::new(InMemorySessionService::new());
-
-    // 8. Build MemoryStore and MemoryAdapter
-    let memory_store: Arc<dyn adk_memory::MemoryService> = Arc::new(InMemoryMemoryService::new());
-    let memory_adapter = Arc::new(MemoryAdapter::new(
-        memory_store.clone(),
-        config.memory.recall_limit,
-    ));
-
-    // 9. Build artifact service (optional)
-    let artifact_service: Option<Arc<dyn adk_artifact::ArtifactService>> =
-        if config.artifact.enable_artifacts {
-            Some(Arc::new(adk_artifact::InMemoryArtifactService::new()))
-        } else {
-            None
-        };
-
-    // 10. Build PluginManager
-    let pii_patterns = build_pii_patterns();
-    let plugin_manager = Arc::new(build_plugin_manager(
-        memory_store.clone(),
-        pii_patterns,
-        config.plugin.custom_blocked_keywords.clone(),
-    ));
-
-    // 11. Build compaction config (optional — requires a summarizer implementation)
-    let compaction_config: Option<EventsCompactionConfig> = None;
-
-    // 12. Build Runner
-    let runner = Arc::new(build_runner(
-        agent,
-        session_service,
-        Some(memory_adapter),
-        artifact_service,
-        Some(plugin_manager),
-        compaction_config,
-    )?);
-
-    // 13. Build PairingGuard
     let pairing = Arc::new(PairingGuard::with_lockout(
         config.gateway.require_pairing,
         &[],
@@ -244,12 +327,17 @@ async fn main() -> Result<()> {
         Duration::from_secs(config.pairing.lockout_duration_secs),
     ));
 
-    // 14. Build and start Gateway
     let gateway_config = GatewayConfig {
         host: config.gateway.host.clone(),
         port: config.gateway.port,
     };
-    let runner_handle: Arc<dyn RunnerHandle> = Arc::new(RunnerAdapter { runner });
+
+    let runner_handle: Arc<dyn RunnerHandle> = Arc::new(RunnerAdapter::new(
+        &config.voice,
+        gw_audio_tx,
+        gw_transcript_tx,
+    ));
+
     let gateway = Gateway::with_output_channels(
         gateway_config,
         pairing,
@@ -262,5 +350,42 @@ async fn main() -> Result<()> {
         "Starting Gateway on {}:{}",
         config.gateway.host, config.gateway.port
     );
+
     gateway.start().await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_base64_encode_known_values() {
+        assert_eq!(base64_encode(&[1, 2, 3]), "AQID");
+        assert_eq!(base64_encode(b"a"), "YQ==");
+        assert_eq!(base64_encode(&[]), "");
+    }
+
+    #[tokio::test]
+    async fn test_gateway_event_forwarder_tags_audio_and_transcript() {
+        let (audio_tx, mut audio_rx) = mpsc::channel(4);
+        let (transcript_tx, mut transcript_rx) = mpsc::channel(4);
+
+        let handler = GatewayEventForwarder {
+            session_id: "sess-42".to_string(),
+            audio_tx,
+            transcript_tx,
+        };
+
+        handler.on_audio(&[7, 8, 9], "item-a").await.unwrap();
+        handler.on_transcript("hello", "item-b").await.unwrap();
+
+        let audio = audio_rx.recv().await.unwrap();
+        assert_eq!(audio.session_id, "sess-42");
+        assert_eq!(audio.data, vec![7, 8, 9]);
+
+        let transcript = transcript_rx.recv().await.unwrap();
+        assert_eq!(transcript.session_id, "sess-42");
+        assert_eq!(transcript.text, "hello");
+        assert!(!transcript.is_final);
+    }
 }
