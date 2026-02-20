@@ -24,6 +24,15 @@ pub enum GatewayMessage {
         session_id: SessionId,
         audio: String,
     },
+    SessionAudioCommit {
+        session_id: SessionId,
+    },
+    SessionResponseCreate {
+        session_id: SessionId,
+    },
+    SessionResponseInterrupt {
+        session_id: SessionId,
+    },
     PriorityProbe,
     GetGatewayHealth,
     GetDiagnostics,
@@ -50,6 +59,15 @@ pub enum GatewayResponse {
         session_id: SessionId,
     },
     AudioAccepted {
+        session_id: SessionId,
+    },
+    AudioCommitted {
+        session_id: SessionId,
+    },
+    ResponseCreateAccepted {
+        session_id: SessionId,
+    },
+    ResponseInterruptAccepted {
         session_id: SessionId,
     },
     AudioOutput {
@@ -148,6 +166,9 @@ pub fn supported_client_message_types() -> Vec<String> {
         "CreateSession".to_string(),
         "TerminateSession".to_string(),
         "SessionAudio".to_string(),
+        "SessionAudioCommit".to_string(),
+        "SessionResponseCreate".to_string(),
+        "SessionResponseInterrupt".to_string(),
         "PriorityProbe".to_string(),
         "GetGatewayHealth".to_string(),
         "GetDiagnostics".to_string(),
@@ -164,6 +185,9 @@ pub fn supported_server_response_types() -> Vec<String> {
         "SessionCreated".to_string(),
         "SessionTerminated".to_string(),
         "AudioAccepted".to_string(),
+        "AudioCommitted".to_string(),
+        "ResponseCreateAccepted".to_string(),
+        "ResponseInterruptAccepted".to_string(),
         "AudioOutput".to_string(),
         "TranscriptUpdate".to_string(),
         "PriorityProbeAccepted".to_string(),
@@ -241,6 +265,36 @@ mod tests {
         let msg = GatewayMessage::SessionAudio {
             session_id: "sess-001".into(),
             audio: "base64encodedaudio==".into(),
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        let parsed: GatewayMessage = serde_json::from_str(&json).unwrap();
+        assert_eq!(msg, parsed);
+    }
+
+    #[test]
+    fn test_gateway_message_session_audio_commit() {
+        let msg = GatewayMessage::SessionAudioCommit {
+            session_id: "sess-001".into(),
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        let parsed: GatewayMessage = serde_json::from_str(&json).unwrap();
+        assert_eq!(msg, parsed);
+    }
+
+    #[test]
+    fn test_gateway_message_session_response_create() {
+        let msg = GatewayMessage::SessionResponseCreate {
+            session_id: "sess-001".into(),
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        let parsed: GatewayMessage = serde_json::from_str(&json).unwrap();
+        assert_eq!(msg, parsed);
+    }
+
+    #[test]
+    fn test_gateway_message_session_response_interrupt() {
+        let msg = GatewayMessage::SessionResponseInterrupt {
+            session_id: "sess-001".into(),
         };
         let json = serde_json::to_string(&msg).unwrap();
         let parsed: GatewayMessage = serde_json::from_str(&json).unwrap();
@@ -338,6 +392,36 @@ mod tests {
     #[test]
     fn test_gateway_response_audio_accepted() {
         let resp = GatewayResponse::AudioAccepted {
+            session_id: "sess-002".into(),
+        };
+        let json = serde_json::to_string(&resp).unwrap();
+        let parsed: GatewayResponse = serde_json::from_str(&json).unwrap();
+        assert_eq!(resp, parsed);
+    }
+
+    #[test]
+    fn test_gateway_response_audio_committed() {
+        let resp = GatewayResponse::AudioCommitted {
+            session_id: "sess-002".into(),
+        };
+        let json = serde_json::to_string(&resp).unwrap();
+        let parsed: GatewayResponse = serde_json::from_str(&json).unwrap();
+        assert_eq!(resp, parsed);
+    }
+
+    #[test]
+    fn test_gateway_response_response_create_accepted() {
+        let resp = GatewayResponse::ResponseCreateAccepted {
+            session_id: "sess-002".into(),
+        };
+        let json = serde_json::to_string(&resp).unwrap();
+        let parsed: GatewayResponse = serde_json::from_str(&json).unwrap();
+        assert_eq!(resp, parsed);
+    }
+
+    #[test]
+    fn test_gateway_response_response_interrupt_accepted() {
+        let resp = GatewayResponse::ResponseInterruptAccepted {
             session_id: "sess-002".into(),
         };
         let json = serde_json::to_string(&resp).unwrap();
@@ -462,10 +546,16 @@ mod tests {
         assert!(client_types.contains(&"GetDiagnostics".to_string()));
         assert!(client_types.contains(&"GetGatewayHealth".to_string()));
         assert!(client_types.contains(&"PriorityProbe".to_string()));
+        assert!(client_types.contains(&"SessionAudioCommit".to_string()));
+        assert!(client_types.contains(&"SessionResponseCreate".to_string()));
+        assert!(client_types.contains(&"SessionResponseInterrupt".to_string()));
         assert!(server_types.contains(&"Diagnostics".to_string()));
         assert!(server_types.contains(&"GatewayHealth".to_string()));
         assert!(server_types.contains(&"PriorityProbeAccepted".to_string()));
         assert!(server_types.contains(&"PriorityNotice".to_string()));
+        assert!(server_types.contains(&"AudioCommitted".to_string()));
+        assert!(server_types.contains(&"ResponseCreateAccepted".to_string()));
+        assert!(server_types.contains(&"ResponseInterruptAccepted".to_string()));
     }
 
     #[test]

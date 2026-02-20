@@ -276,7 +276,7 @@ Demo gate:
    - known ADK gaps (if any)
 4. Standard operator client for manual checks:
    - Launch with `scripts/ws_client.sh`.
-   - Use `tools/ws-client/index.html` to pair/auth/create sessions, stream SessionAudio, and inspect live gateway responses.
+   - Use `tools/ws-client/index.html` to pair/auth/create sessions, stream SessionAudio (file + mic), inspect transcript deltas, and play `AudioOutput`.
    - Capture manual verification notes (pair/auth/session/audio round-trip) alongside demo script output.
 
 ## Metrics and Acceptance Targets

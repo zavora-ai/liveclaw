@@ -55,6 +55,9 @@ trait SessionRuntime: Send + Sync {
     async fn run(&self) -> Result<()>;
     async fn close(&self) -> Result<()>;
     async fn send_audio_base64(&self, audio_base64: &str) -> Result<()>;
+    async fn commit_audio(&self) -> Result<()>;
+    async fn create_response(&self) -> Result<()>;
+    async fn interrupt_response(&self) -> Result<()>;
 }
 
 struct RealtimeRunnerRuntime {
@@ -95,6 +98,27 @@ impl SessionRuntime for RealtimeRunnerRuntime {
             .send_audio(audio_base64)
             .await
             .map_err(|e| anyhow::anyhow!("Failed to send audio to realtime provider: {}", e))
+    }
+
+    async fn commit_audio(&self) -> Result<()> {
+        self.runner
+            .commit_audio()
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to commit realtime audio buffer: {}", e))
+    }
+
+    async fn create_response(&self) -> Result<()> {
+        self.runner
+            .create_response()
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to request realtime response: {}", e))
+    }
+
+    async fn interrupt_response(&self) -> Result<()> {
+        self.runner
+            .interrupt()
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to interrupt realtime response: {}", e))
     }
 }
 
@@ -791,6 +815,14 @@ impl RunnerAdapter {
         };
         Ok(middleware.protect_all(build_baseline_tools_with_workspace(workspace_policy)))
     }
+
+    async fn runtime_for_session(&self, session_id: &str) -> Result<Arc<dyn SessionRuntime>> {
+        let runtime = {
+            let sessions = self.sessions.read().await;
+            sessions.get(session_id).map(|s| s.runtime.clone())
+        };
+        runtime.ok_or_else(|| anyhow::anyhow!("Session '{}' not found", session_id))
+    }
 }
 
 #[async_trait]
@@ -1004,14 +1036,25 @@ impl RunnerHandle for RunnerAdapter {
             bail!("Audio payload is empty");
         }
 
-        let runtime = {
-            let sessions = self.sessions.read().await;
-            sessions.get(session_id).map(|s| s.runtime.clone())
-        }
-        .ok_or_else(|| anyhow::anyhow!("Session '{}' not found", session_id))?;
+        let runtime = self.runtime_for_session(session_id).await?;
 
         let audio_b64 = base64_encode(audio);
         runtime.send_audio_base64(&audio_b64).await
+    }
+
+    async fn commit_audio(&self, session_id: &str) -> Result<()> {
+        let runtime = self.runtime_for_session(session_id).await?;
+        runtime.commit_audio().await
+    }
+
+    async fn create_response(&self, session_id: &str) -> Result<()> {
+        let runtime = self.runtime_for_session(session_id).await?;
+        runtime.create_response().await
+    }
+
+    async fn interrupt_response(&self, session_id: &str) -> Result<()> {
+        let runtime = self.runtime_for_session(session_id).await?;
+        runtime.interrupt_response().await
     }
 
     async fn diagnostics(&self) -> Result<RuntimeDiagnostics> {
@@ -1845,6 +1888,18 @@ mod tests {
         }
 
         async fn send_audio_base64(&self, _audio_base64: &str) -> Result<()> {
+            Ok(())
+        }
+
+        async fn commit_audio(&self) -> Result<()> {
+            Ok(())
+        }
+
+        async fn create_response(&self) -> Result<()> {
+            Ok(())
+        }
+
+        async fn interrupt_response(&self) -> Result<()> {
             Ok(())
         }
     }

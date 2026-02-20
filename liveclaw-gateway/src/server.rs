@@ -45,6 +45,15 @@ pub trait RunnerHandle: Send + Sync {
     /// Forward audio data to the active RealtimeAgent session.
     async fn send_audio(&self, session_id: &str, audio: &[u8]) -> anyhow::Result<()>;
 
+    /// Commit buffered audio for manual turn-management flows.
+    async fn commit_audio(&self, session_id: &str) -> anyhow::Result<()>;
+
+    /// Trigger model response generation for manual turn-management flows.
+    async fn create_response(&self, session_id: &str) -> anyhow::Result<()>;
+
+    /// Interrupt an in-flight model response.
+    async fn interrupt_response(&self, session_id: &str) -> anyhow::Result<()>;
+
     /// Return runtime diagnostics for operator validation.
     async fn diagnostics(&self) -> anyhow::Result<RuntimeDiagnostics>;
 }
@@ -451,6 +460,27 @@ async fn handle_message(
             handle_session_audio(&session_id, &audio, state, conn, ws_tx, ws_priority_tx).await
         }
 
+        GatewayMessage::SessionAudioCommit { session_id } => {
+            if !conn.authenticated {
+                return auth_required_error();
+            }
+            handle_session_audio_commit(&session_id, state, conn, ws_tx, ws_priority_tx).await
+        }
+
+        GatewayMessage::SessionResponseCreate { session_id } => {
+            if !conn.authenticated {
+                return auth_required_error();
+            }
+            handle_session_response_create(&session_id, state, conn, ws_tx, ws_priority_tx).await
+        }
+
+        GatewayMessage::SessionResponseInterrupt { session_id } => {
+            if !conn.authenticated {
+                return auth_required_error();
+            }
+            handle_session_response_interrupt(&session_id, state, conn, ws_tx, ws_priority_tx).await
+        }
+
         GatewayMessage::GetDiagnostics => {
             if !conn.authenticated {
                 return auth_required_error();
@@ -654,6 +684,96 @@ async fn handle_session_audio(
             GatewayResponse::Error {
                 code: "audio_send_failed".to_string(),
                 message: format!("Failed to forward audio: {}", e),
+            }
+        }
+    }
+}
+
+/// Handle SessionAudioCommit — commit the provider-side buffered input audio.
+async fn handle_session_audio_commit(
+    session_id: &str,
+    state: &AppState,
+    conn: &mut ConnectionState,
+    ws_tx: &mpsc::Sender<GatewayResponse>,
+    ws_priority_tx: &mpsc::Sender<GatewayResponse>,
+) -> GatewayResponse {
+    if let Err(resp) =
+        authorize_session_access(session_id, state, conn, Some(ws_tx), Some(ws_priority_tx)).await
+    {
+        return resp;
+    }
+
+    match state.runner.commit_audio(session_id).await {
+        Ok(()) => GatewayResponse::AudioCommitted {
+            session_id: session_id.to_string(),
+        },
+        Err(e) => {
+            warn!("Failed to commit audio for session {}: {}", session_id, e);
+            GatewayResponse::Error {
+                code: "audio_commit_failed".to_string(),
+                message: format!("Failed to commit audio: {}", e),
+            }
+        }
+    }
+}
+
+/// Handle SessionResponseCreate — request response generation from current input.
+async fn handle_session_response_create(
+    session_id: &str,
+    state: &AppState,
+    conn: &mut ConnectionState,
+    ws_tx: &mpsc::Sender<GatewayResponse>,
+    ws_priority_tx: &mpsc::Sender<GatewayResponse>,
+) -> GatewayResponse {
+    if let Err(resp) =
+        authorize_session_access(session_id, state, conn, Some(ws_tx), Some(ws_priority_tx)).await
+    {
+        return resp;
+    }
+
+    match state.runner.create_response(session_id).await {
+        Ok(()) => GatewayResponse::ResponseCreateAccepted {
+            session_id: session_id.to_string(),
+        },
+        Err(e) => {
+            warn!(
+                "Failed to create response for session {}: {}",
+                session_id, e
+            );
+            GatewayResponse::Error {
+                code: "response_create_failed".to_string(),
+                message: format!("Failed to create response: {}", e),
+            }
+        }
+    }
+}
+
+/// Handle SessionResponseInterrupt — cancel current output generation.
+async fn handle_session_response_interrupt(
+    session_id: &str,
+    state: &AppState,
+    conn: &mut ConnectionState,
+    ws_tx: &mpsc::Sender<GatewayResponse>,
+    ws_priority_tx: &mpsc::Sender<GatewayResponse>,
+) -> GatewayResponse {
+    if let Err(resp) =
+        authorize_session_access(session_id, state, conn, Some(ws_tx), Some(ws_priority_tx)).await
+    {
+        return resp;
+    }
+
+    match state.runner.interrupt_response(session_id).await {
+        Ok(()) => GatewayResponse::ResponseInterruptAccepted {
+            session_id: session_id.to_string(),
+        },
+        Err(e) => {
+            warn!(
+                "Failed to interrupt response for session {}: {}",
+                session_id, e
+            );
+            GatewayResponse::Error {
+                code: "response_interrupt_failed".to_string(),
+                message: format!("Failed to interrupt response: {}", e),
             }
         }
     }
@@ -941,6 +1061,12 @@ mod tests {
         terminate_err: Option<String>,
         /// If set, send_audio returns this error.
         audio_err: Option<String>,
+        /// If set, commit_audio returns this error.
+        audio_commit_err: Option<String>,
+        /// If set, create_response returns this error.
+        response_create_err: Option<String>,
+        /// If set, interrupt_response returns this error.
+        response_interrupt_err: Option<String>,
         /// If set, diagnostics returns this error.
         diagnostics_err: Option<String>,
     }
@@ -951,6 +1077,9 @@ mod tests {
                 create_err: None,
                 terminate_err: None,
                 audio_err: None,
+                audio_commit_err: None,
+                response_create_err: None,
+                response_interrupt_err: None,
                 diagnostics_err: None,
             }
         }
@@ -960,6 +1089,9 @@ mod tests {
                 create_err: Some(msg.to_string()),
                 terminate_err: None,
                 audio_err: None,
+                audio_commit_err: None,
+                response_create_err: None,
+                response_interrupt_err: None,
                 diagnostics_err: None,
             }
         }
@@ -988,6 +1120,27 @@ mod tests {
 
         async fn send_audio(&self, _session_id: &str, _audio: &[u8]) -> anyhow::Result<()> {
             match &self.audio_err {
+                Some(e) => Err(anyhow::anyhow!("{}", e)),
+                None => Ok(()),
+            }
+        }
+
+        async fn commit_audio(&self, _session_id: &str) -> anyhow::Result<()> {
+            match &self.audio_commit_err {
+                Some(e) => Err(anyhow::anyhow!("{}", e)),
+                None => Ok(()),
+            }
+        }
+
+        async fn create_response(&self, _session_id: &str) -> anyhow::Result<()> {
+            match &self.response_create_err {
+                Some(e) => Err(anyhow::anyhow!("{}", e)),
+                None => Ok(()),
+            }
+        }
+
+        async fn interrupt_response(&self, _session_id: &str) -> anyhow::Result<()> {
+            match &self.response_interrupt_err {
                 Some(e) => Err(anyhow::anyhow!("{}", e)),
                 None => Ok(()),
             }
@@ -1284,6 +1437,69 @@ mod tests {
             GatewayMessage::SessionAudio {
                 session_id: "s1".into(),
                 audio: "AAAA".into(),
+            },
+            &state,
+            &mut conn,
+            &ws_tx,
+            &ws_priority_tx,
+        )
+        .await;
+        match resp {
+            GatewayResponse::Error { code, .. } => assert_eq!(code, "auth_required"),
+            other => panic!("Expected auth_required error, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_session_audio_commit_requires_auth() {
+        let state = make_state(MockRunner::ok(), true);
+        let mut conn = unauthed_conn();
+        let (ws_tx, ws_priority_tx) = dummy_ws_txs();
+        let resp = handle_message(
+            GatewayMessage::SessionAudioCommit {
+                session_id: "s1".into(),
+            },
+            &state,
+            &mut conn,
+            &ws_tx,
+            &ws_priority_tx,
+        )
+        .await;
+        match resp {
+            GatewayResponse::Error { code, .. } => assert_eq!(code, "auth_required"),
+            other => panic!("Expected auth_required error, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_session_response_create_requires_auth() {
+        let state = make_state(MockRunner::ok(), true);
+        let mut conn = unauthed_conn();
+        let (ws_tx, ws_priority_tx) = dummy_ws_txs();
+        let resp = handle_message(
+            GatewayMessage::SessionResponseCreate {
+                session_id: "s1".into(),
+            },
+            &state,
+            &mut conn,
+            &ws_tx,
+            &ws_priority_tx,
+        )
+        .await;
+        match resp {
+            GatewayResponse::Error { code, .. } => assert_eq!(code, "auth_required"),
+            other => panic!("Expected auth_required error, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_session_response_interrupt_requires_auth() {
+        let state = make_state(MockRunner::ok(), true);
+        let mut conn = unauthed_conn();
+        let (ws_tx, ws_priority_tx) = dummy_ws_txs();
+        let resp = handle_message(
+            GatewayMessage::SessionResponseInterrupt {
+                session_id: "s1".into(),
             },
             &state,
             &mut conn,
@@ -1629,6 +1845,81 @@ mod tests {
                 assert_eq!(session_id, "sess-1");
             }
             other => panic!("Expected AudioAccepted, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_session_audio_commit_forwards_to_runner() {
+        let state = make_state(MockRunner::ok(), false);
+        let mut conn = authed_conn();
+        let (ws_tx, ws_priority_tx) = dummy_ws_txs();
+        conn.owned_sessions.push("sess-1".to_string());
+
+        let resp = handle_message(
+            GatewayMessage::SessionAudioCommit {
+                session_id: "sess-1".into(),
+            },
+            &state,
+            &mut conn,
+            &ws_tx,
+            &ws_priority_tx,
+        )
+        .await;
+        match resp {
+            GatewayResponse::AudioCommitted { session_id } => {
+                assert_eq!(session_id, "sess-1");
+            }
+            other => panic!("Expected AudioCommitted, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_session_response_create_forwards_to_runner() {
+        let state = make_state(MockRunner::ok(), false);
+        let mut conn = authed_conn();
+        let (ws_tx, ws_priority_tx) = dummy_ws_txs();
+        conn.owned_sessions.push("sess-1".to_string());
+
+        let resp = handle_message(
+            GatewayMessage::SessionResponseCreate {
+                session_id: "sess-1".into(),
+            },
+            &state,
+            &mut conn,
+            &ws_tx,
+            &ws_priority_tx,
+        )
+        .await;
+        match resp {
+            GatewayResponse::ResponseCreateAccepted { session_id } => {
+                assert_eq!(session_id, "sess-1");
+            }
+            other => panic!("Expected ResponseCreateAccepted, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_session_response_interrupt_forwards_to_runner() {
+        let state = make_state(MockRunner::ok(), false);
+        let mut conn = authed_conn();
+        let (ws_tx, ws_priority_tx) = dummy_ws_txs();
+        conn.owned_sessions.push("sess-1".to_string());
+
+        let resp = handle_message(
+            GatewayMessage::SessionResponseInterrupt {
+                session_id: "sess-1".into(),
+            },
+            &state,
+            &mut conn,
+            &ws_tx,
+            &ws_priority_tx,
+        )
+        .await;
+        match resp {
+            GatewayResponse::ResponseInterruptAccepted { session_id } => {
+                assert_eq!(session_id, "sess-1");
+            }
+            other => panic!("Expected ResponseInterruptAccepted, got {:?}", other),
         }
     }
 

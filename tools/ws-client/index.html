@@ -141,6 +141,10 @@
         grid-template-columns: repeat(2, 1fr);
       }
 
+      .field-row.triple {
+        grid-template-columns: repeat(3, 1fr);
+      }
+
       .field-stack {
         display: grid;
         gap: 6px;
@@ -262,6 +266,26 @@
         background: #f5f2ea;
       }
 
+      .inline-check {
+        display: flex;
+        gap: 8px;
+        align-items: center;
+        color: var(--muted);
+        font-size: 0.85rem;
+      }
+
+      .inline-check input[type="checkbox"] {
+        width: auto;
+      }
+
+      .output-pane {
+        min-height: 100px;
+        max-height: 160px;
+        overflow: auto;
+        font-family: "JetBrains Mono", "Menlo", "Consolas", monospace;
+        font-size: 0.84rem;
+      }
+
       @media (max-width: 920px) {
         .status-bar {
           grid-template-columns: 1fr;
@@ -272,7 +296,8 @@
         }
 
         .field-row,
-        .field-row.compact {
+        .field-row.compact,
+        .field-row.triple {
           grid-template-columns: 1fr;
         }
       }
@@ -383,7 +408,7 @@
               <label for="audioFile">Upload Audio/PCM File</label>
               <input id="audioFile" type="file" />
             </div>
-            <div class="field-row compact">
+            <div class="field-row triple">
               <div class="field-stack">
                 <label for="chunkSize">Chunk Bytes</label>
                 <input id="chunkSize" type="number" min="256" step="256" value="9600" />
@@ -392,13 +417,53 @@
                 <label for="chunkDelay">Delay ms</label>
                 <input id="chunkDelay" type="number" min="0" step="10" value="120" />
               </div>
+              <div class="field-stack">
+                <label for="inputRate">Input Sample Rate (Hz)</label>
+                <input id="inputRate" type="number" min="8000" step="1000" value="24000" />
+              </div>
+            </div>
+            <div class="field-row compact">
+              <div class="field-stack">
+                <label for="playbackRate">Output Sample Rate (Hz)</label>
+                <input id="playbackRate" type="number" min="8000" step="1000" value="24000" />
+              </div>
+              <div class="field-stack">
+                <label for="autoPlayOutput">Playback</label>
+                <label class="inline-check">
+                  <input id="autoPlayOutput" type="checkbox" checked />
+                  Auto-play AudioOutput
+                </label>
+              </div>
             </div>
             <div class="field-row">
               <button id="sendFileBtn" class="primary">Send File as SessionAudio Chunks</button>
               <span id="audioProgress" class="badge">idle</span>
             </div>
+            <div class="field-row triple">
+              <button id="micStartBtn" class="soft">Start Mic Stream</button>
+              <button id="micStopBtn" class="warn" disabled>Stop Mic Stream</button>
+              <button id="playLastBtn" class="muted">Play Last Output</button>
+            </div>
+            <div class="field-row compact">
+              <span id="micStatus" class="badge">mic: idle</span>
+              <span id="playbackStatus" class="badge">play: idle</span>
+            </div>
+            <div class="field-row triple">
+              <button id="commitAudioBtn" class="muted">Commit Audio</button>
+              <button id="createResponseBtn" class="soft">Create Response</button>
+              <button id="interruptResponseBtn" class="warn">Interrupt Response</button>
+            </div>
+            <div class="field-stack">
+              <label for="transcriptView">Session Transcript View</label>
+              <textarea
+                id="transcriptView"
+                class="output-pane"
+                readonly
+                placeholder="TranscriptUpdate deltas for the active session appear here."
+              ></textarea>
+            </div>
             <p class="hint">
-              Tip: for real provider decoding, pre-convert to PCM16 mono 24kHz before upload.
+              Upload accepts common browser-decodable audio and converts to PCM16 mono. For raw files, use .pcm.
             </p>
           </div>
         </article>
@@ -417,6 +482,9 @@
                   <option value="CreateSession">CreateSession</option>
                   <option value="TerminateSession">TerminateSession</option>
                   <option value="SessionAudio">SessionAudio</option>
+                  <option value="SessionAudioCommit">SessionAudioCommit</option>
+                  <option value="SessionResponseCreate">SessionResponseCreate</option>
+                  <option value="SessionResponseInterrupt">SessionResponseInterrupt</option>
                 </select>
               </div>
               <div class="field-stack">
@@ -475,8 +543,20 @@
           audioFile: $("audioFile"),
           chunkSize: $("chunkSize"),
           chunkDelay: $("chunkDelay"),
+          inputRate: $("inputRate"),
+          playbackRate: $("playbackRate"),
+          autoPlayOutput: $("autoPlayOutput"),
           sendFileBtn: $("sendFileBtn"),
           audioProgress: $("audioProgress"),
+          micStartBtn: $("micStartBtn"),
+          micStopBtn: $("micStopBtn"),
+          micStatus: $("micStatus"),
+          playLastBtn: $("playLastBtn"),
+          playbackStatus: $("playbackStatus"),
+          commitAudioBtn: $("commitAudioBtn"),
+          createResponseBtn: $("createResponseBtn"),
+          interruptResponseBtn: $("interruptResponseBtn"),
+          transcriptView: $("transcriptView"),
           rawJson: $("rawJson"),
           sendRawBtn: $("sendRawBtn"),
           templateType: $("templateType"),
@@ -490,10 +570,31 @@
           sessionId: "liveclaw.ws.session_id",
         };
 
+        const DEFAULT_SAMPLE_RATE = 24000;
+        const MIC_BUFFER_SIZE = 4096;
+        const AudioCtx = window.AudioContext || window.webkitAudioContext;
+        const OfflineCtx = window.OfflineAudioContext || window.webkitOfflineAudioContext;
+
         let ws = null;
+        let playbackContext = null;
+        let playbackCursor = 0;
+        let lastAudioOutputBytes = null;
+        const voiceCounters = {
+          accepted: 0,
+          transcript: 0,
+          audioOutput: 0,
+        };
+
+        const micState = {
+          stream: null,
+          context: null,
+          source: null,
+          processor: null,
+          sink: null,
+          active: false,
+        };
 
         const now = () => new Date().toLocaleTimeString();
-
         const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
         function log(kind, text) {
@@ -509,17 +610,45 @@
           els.statusPill.textContent = details ? `${state} - ${details}` : state;
         }
 
+        function setMicStatus(text) {
+          els.micStatus.textContent = `mic: ${text}`;
+        }
+
+        function setPlaybackStatus(text) {
+          els.playbackStatus.textContent = `play: ${text}`;
+        }
+
+        function parseRate(value, fallback) {
+          const num = Number(value);
+          if (!Number.isFinite(num) || num <= 0) return fallback;
+          return Math.floor(num);
+        }
+
+        function activeSessionId() {
+          return els.sessionId.value.trim();
+        }
+
         function updateBadges() {
-          const sid = els.sessionId.value.trim();
+          const sid = activeSessionId();
           const tok = els.tokenInput.value.trim();
           els.sessionBadge.textContent = sid ? `session: ${sid}` : "session: none";
           els.tokenBadge.textContent = tok ? `token: ${tok.slice(0, 12)}...` : "token: none";
         }
 
+        function resetSessionOutputState() {
+          voiceCounters.accepted = 0;
+          voiceCounters.transcript = 0;
+          voiceCounters.audioOutput = 0;
+          lastAudioOutputBytes = null;
+          els.transcriptView.value = "";
+          els.audioProgress.textContent = "idle";
+          setPlaybackStatus("idle");
+        }
+
         function savePrefs() {
           localStorage.setItem(keys.wsUrl, els.wsUrl.value.trim());
           localStorage.setItem(keys.token, els.tokenInput.value.trim());
-          localStorage.setItem(keys.sessionId, els.sessionId.value.trim());
+          localStorage.setItem(keys.sessionId, activeSessionId());
         }
 
         function loadPrefs() {
@@ -540,11 +669,14 @@
           return true;
         }
 
-        function sendObject(message) {
-          if (!requireOpenSocket()) return;
+        function sendObject(message, options = {}) {
+          if (!requireOpenSocket()) return false;
           const serialized = JSON.stringify(message);
           ws.send(serialized);
-          log("out", serialized);
+          if (!options.silent) {
+            log("out", serialized);
+          }
+          return true;
         }
 
         function parseJson(text) {
@@ -572,7 +704,7 @@
         }
 
         function templateForType(type) {
-          const sid = els.sessionId.value.trim() || "<SESSION_ID>";
+          const sid = activeSessionId() || "<SESSION_ID>";
           const token = els.tokenInput.value.trim() || "<TOKEN>";
           const code = els.pairCode.value.trim() || "<PAIRING_CODE>";
           switch (type) {
@@ -590,6 +722,12 @@
                 session_id: sid,
                 audio: els.audioB64.value.trim() || "AQID",
               };
+            case "SessionAudioCommit":
+              return { type: "SessionAudioCommit", session_id: sid };
+            case "SessionResponseCreate":
+              return { type: "SessionResponseCreate", session_id: sid };
+            case "SessionResponseInterrupt":
+              return { type: "SessionResponseInterrupt", session_id: sid };
             case "GetDiagnostics":
               return { type: "GetDiagnostics" };
             case "GetGatewayHealth":
@@ -599,6 +737,316 @@
             case "Ping":
             default:
               return { type: "Ping" };
+          }
+        }
+
+        function bytesToBase64(bytes) {
+          let binary = "";
+          for (let i = 0; i < bytes.length; i += 1) {
+            binary += String.fromCharCode(bytes[i]);
+          }
+          return btoa(binary);
+        }
+
+        function base64ToBytes(audioB64) {
+          const binary = atob(audioB64);
+          const out = new Uint8Array(binary.length);
+          for (let i = 0; i < binary.length; i += 1) {
+            out[i] = binary.charCodeAt(i);
+          }
+          return out;
+        }
+
+        function float32ToPcm16Bytes(samples) {
+          const out = new Uint8Array(samples.length * 2);
+          for (let i = 0; i < samples.length; i += 1) {
+            const sample = Math.max(-1, Math.min(1, samples[i]));
+            const value = sample < 0 ? Math.round(sample * 0x8000) : Math.round(sample * 0x7fff);
+            out[i * 2] = value & 0xff;
+            out[i * 2 + 1] = (value >> 8) & 0xff;
+          }
+          return out;
+        }
+
+        function pcm16BytesToFloat32(bytes) {
+          const sampleCount = Math.floor(bytes.length / 2);
+          const out = new Float32Array(sampleCount);
+          for (let i = 0; i < sampleCount; i += 1) {
+            const lo = bytes[i * 2];
+            const hi = bytes[i * 2 + 1];
+            let sample = (hi << 8) | lo;
+            if (sample & 0x8000) sample -= 0x10000;
+            out[i] = sample / 32768;
+          }
+          return out;
+        }
+
+        function resampleFloat32Linear(samples, sourceRate, targetRate) {
+          if (sourceRate === targetRate) {
+            return samples;
+          }
+          const ratio = sourceRate / targetRate;
+          const outLength = Math.max(1, Math.round(samples.length / ratio));
+          const out = new Float32Array(outLength);
+          for (let i = 0; i < outLength; i += 1) {
+            const sourceIndex = i * ratio;
+            const low = Math.floor(sourceIndex);
+            const high = Math.min(low + 1, samples.length - 1);
+            const weight = sourceIndex - low;
+            out[i] = samples[low] * (1 - weight) + samples[high] * weight;
+          }
+          return out;
+        }
+
+        function inputBufferToMono(inputBuffer) {
+          if (inputBuffer.numberOfChannels <= 1) {
+            return new Float32Array(inputBuffer.getChannelData(0));
+          }
+          const mono = new Float32Array(inputBuffer.length);
+          for (let c = 0; c < inputBuffer.numberOfChannels; c += 1) {
+            const channel = inputBuffer.getChannelData(c);
+            for (let i = 0; i < inputBuffer.length; i += 1) {
+              mono[i] += channel[i];
+            }
+          }
+          for (let i = 0; i < mono.length; i += 1) {
+            mono[i] /= inputBuffer.numberOfChannels;
+          }
+          return mono;
+        }
+
+        function isRawPcmFile(file) {
+          const name = (file?.name || "").toLowerCase();
+          return name.endsWith(".pcm") || name.endsWith(".raw") || name.endsWith(".s16le");
+        }
+
+        async function decodeFileToPcm16(file, targetRate) {
+          if (isRawPcmFile(file)) {
+            return new Uint8Array(await file.arrayBuffer());
+          }
+
+          if (!AudioCtx || !OfflineCtx) {
+            throw new Error("Web Audio API is not available in this browser.");
+          }
+
+          const decodeContext = new AudioCtx();
+          try {
+            const inputBuffer = await file.arrayBuffer();
+            const decoded = await decodeContext.decodeAudioData(inputBuffer.slice(0));
+            const frameCount = Math.max(1, Math.ceil(decoded.duration * targetRate));
+            const offline = new OfflineCtx(1, frameCount, targetRate);
+            const source = offline.createBufferSource();
+            source.buffer = decoded;
+            source.connect(offline.destination);
+            source.start(0);
+            const rendered = await offline.startRendering();
+            return float32ToPcm16Bytes(rendered.getChannelData(0));
+          } finally {
+            decodeContext.close().catch(() => {});
+          }
+        }
+
+        async function ensurePlaybackContext(sampleRate) {
+          if (!AudioCtx) {
+            throw new Error("Audio playback is not supported in this browser.");
+          }
+          if (!playbackContext) {
+            playbackContext = new AudioCtx({ sampleRate });
+          }
+          if (playbackContext.state === "suspended") {
+            await playbackContext.resume();
+          }
+          return playbackContext;
+        }
+
+        async function playPcm16Chunk(bytes) {
+          if (!(bytes instanceof Uint8Array) || bytes.length < 2) {
+            throw new Error("AudioOutput chunk is empty.");
+          }
+          const sampleRate = parseRate(els.playbackRate.value, DEFAULT_SAMPLE_RATE);
+          const context = await ensurePlaybackContext(sampleRate);
+          const samples = pcm16BytesToFloat32(bytes);
+          const buffer = context.createBuffer(1, samples.length, sampleRate);
+          buffer.getChannelData(0).set(samples);
+
+          const source = context.createBufferSource();
+          source.buffer = buffer;
+          source.connect(context.destination);
+          const startAt = Math.max(context.currentTime + 0.01, playbackCursor);
+          source.start(startAt);
+          playbackCursor = startAt + buffer.duration;
+          setPlaybackStatus(`${voiceCounters.audioOutput} evt`);
+        }
+
+        function appendTranscript(text, isFinal) {
+          if (!text) return;
+          els.transcriptView.value += text;
+          if (isFinal) {
+            els.transcriptView.value += "\n";
+          }
+          els.transcriptView.scrollTop = els.transcriptView.scrollHeight;
+        }
+
+        async function sendFileAsAudioChunks() {
+          if (!requireOpenSocket()) return;
+          const sid = activeSessionId();
+          if (!sid) {
+            log("error", "Session ID required to send audio.");
+            return;
+          }
+
+          const file = els.audioFile.files[0];
+          if (!file) {
+            log("error", "Select a file first.");
+            return;
+          }
+
+          const chunkSize = Number(els.chunkSize.value) || 9600;
+          const delayMs = Number(els.chunkDelay.value) || 0;
+          const targetRate = parseRate(els.inputRate.value, DEFAULT_SAMPLE_RATE);
+
+          if (chunkSize <= 0) {
+            log("error", "Chunk size must be positive.");
+            return;
+          }
+
+          els.audioProgress.textContent = "decode";
+          const bytes = await decodeFileToPcm16(file, targetRate);
+          const totalChunks = Math.max(1, Math.ceil(bytes.length / chunkSize));
+
+          log(
+            "system",
+            `Streaming ${file.name} as PCM16 mono ${targetRate}Hz (${bytes.length} bytes) in ${totalChunks} chunk(s), chunk=${chunkSize}, delay=${delayMs}ms`
+          );
+
+          els.sendFileBtn.disabled = true;
+          try {
+            for (let idx = 0; idx < totalChunks; idx += 1) {
+              const start = idx * chunkSize;
+              const end = Math.min(start + chunkSize, bytes.length);
+              const chunk = bytes.subarray(start, end);
+              sendObject(
+                {
+                  type: "SessionAudio",
+                  session_id: sid,
+                  audio: bytesToBase64(chunk),
+                },
+                { silent: true }
+              );
+              els.audioProgress.textContent = `${idx + 1}/${totalChunks}`;
+              if (delayMs > 0) await sleep(delayMs);
+            }
+            els.audioProgress.textContent = "done";
+            log("system", "File audio stream completed.");
+          } finally {
+            els.sendFileBtn.disabled = false;
+          }
+        }
+
+        async function startMicStream() {
+          if (!requireOpenSocket()) return;
+          const sid = activeSessionId();
+          if (!sid) {
+            log("error", "Create or set a Session ID before starting mic stream.");
+            return;
+          }
+          if (!navigator.mediaDevices?.getUserMedia) {
+            log("error", "getUserMedia is not available in this browser.");
+            return;
+          }
+          if (!AudioCtx) {
+            log("error", "Web Audio API is not available in this browser.");
+            return;
+          }
+          if (micState.active) {
+            log("system", "Mic stream is already active.");
+            return;
+          }
+
+          const stream = await navigator.mediaDevices.getUserMedia({
+            audio: {
+              channelCount: 1,
+              echoCancellation: true,
+              noiseSuppression: true,
+              autoGainControl: true,
+            },
+          });
+
+          const context = new AudioCtx();
+          const source = context.createMediaStreamSource(stream);
+          const processor = context.createScriptProcessor(MIC_BUFFER_SIZE, 1, 1);
+          const sink = context.createGain();
+          sink.gain.value = 0;
+
+          processor.onaudioprocess = (event) => {
+            if (!ws || ws.readyState !== WebSocket.OPEN) return;
+            const activeSid = activeSessionId();
+            if (!activeSid) return;
+            const targetRate = parseRate(els.inputRate.value, DEFAULT_SAMPLE_RATE);
+            const mono = inputBufferToMono(event.inputBuffer);
+            const resampled = resampleFloat32Linear(mono, context.sampleRate, targetRate);
+            const pcmBytes = float32ToPcm16Bytes(resampled);
+            if (pcmBytes.length === 0) return;
+            sendObject(
+              {
+                type: "SessionAudio",
+                session_id: activeSid,
+                audio: bytesToBase64(pcmBytes),
+              },
+              { silent: true }
+            );
+          };
+
+          source.connect(processor);
+          processor.connect(sink);
+          sink.connect(context.destination);
+
+          micState.stream = stream;
+          micState.context = context;
+          micState.source = source;
+          micState.processor = processor;
+          micState.sink = sink;
+          micState.active = true;
+          els.micStartBtn.disabled = true;
+          els.micStopBtn.disabled = false;
+          setMicStatus(`live ${context.sampleRate}Hz`);
+          log("system", `Mic streaming started for session ${sid}.`);
+        }
+
+        async function stopMicStream() {
+          if (!micState.active) return;
+
+          try {
+            micState.processor?.disconnect();
+            micState.source?.disconnect();
+            micState.sink?.disconnect();
+            micState.stream?.getTracks().forEach((track) => track.stop());
+            await micState.context?.close();
+          } catch (err) {
+            log("error", `Failed to stop mic stream cleanly: ${err.message}`);
+          } finally {
+            micState.stream = null;
+            micState.context = null;
+            micState.source = null;
+            micState.processor = null;
+            micState.sink = null;
+            micState.active = false;
+            els.micStartBtn.disabled = false;
+            els.micStopBtn.disabled = true;
+            setMicStatus("idle");
+            log("system", "Mic streaming stopped.");
+          }
+        }
+
+        async function playLastOutput() {
+          if (!lastAudioOutputBytes) {
+            log("error", "No AudioOutput has been received yet.");
+            return;
+          }
+          try {
+            await playPcm16Chunk(lastAudioOutputBytes);
+          } catch (err) {
+            log("error", `Playback failed: ${err.message}`);
           }
         }
 
@@ -622,10 +1070,11 @@
             savePrefs();
           };
 
-          ws.onclose = (event) => {
+          ws.onclose = async (event) => {
             const reason = event.reason || "no reason";
             setStatus("closed", `${event.code}`);
             log("system", `Socket closed (${event.code}) - ${reason}`);
+            await stopMicStream();
           };
 
           ws.onerror = () => {
@@ -650,6 +1099,7 @@
               els.sessionId.value = parsed.session_id;
               savePrefs();
               updateBadges();
+              resetSessionOutputState();
             }
 
             if (parsed.type === "Diagnostics" && parsed.data) {
@@ -686,6 +1136,51 @@
               const level = p.level || "info";
               els.prioBadge.textContent = `prio: ${code} (${level})`;
             }
+
+            if (parsed.type === "AudioAccepted" && parsed.session_id && parsed.session_id === activeSessionId()) {
+              voiceCounters.accepted += 1;
+              els.audioProgress.textContent = `ack ${voiceCounters.accepted}`;
+            }
+
+            if (parsed.type === "AudioCommitted" && parsed.session_id && parsed.session_id === activeSessionId()) {
+              els.audioProgress.textContent = "committed";
+            }
+
+            if (
+              parsed.type === "ResponseCreateAccepted" &&
+              parsed.session_id &&
+              parsed.session_id === activeSessionId()
+            ) {
+              els.audioProgress.textContent = "response requested";
+            }
+
+            if (
+              parsed.type === "ResponseInterruptAccepted" &&
+              parsed.session_id &&
+              parsed.session_id === activeSessionId()
+            ) {
+              setPlaybackStatus("interrupted");
+            }
+
+            if (parsed.type === "TranscriptUpdate" && parsed.session_id && parsed.session_id === activeSessionId()) {
+              voiceCounters.transcript += 1;
+              appendTranscript(parsed.text || "", Boolean(parsed.is_final));
+            }
+
+            if (parsed.type === "AudioOutput" && parsed.session_id && parsed.session_id === activeSessionId()) {
+              try {
+                lastAudioOutputBytes = base64ToBytes(parsed.audio || "");
+                voiceCounters.audioOutput += 1;
+                setPlaybackStatus(`${voiceCounters.audioOutput} evt`);
+                if (els.autoPlayOutput.checked) {
+                  playPcm16Chunk(lastAudioOutputBytes).catch((err) => {
+                    log("error", `Auto-play failed: ${err.message}`);
+                  });
+                }
+              } catch (err) {
+                log("error", `Failed to decode AudioOutput: ${err.message}`);
+              }
+            }
           };
         }
 
@@ -711,66 +1206,6 @@
             type: "CreateSession",
             config: Object.keys(cfg).length > 0 ? cfg : null,
           };
-        }
-
-        function bytesToBase64(bytes) {
-          let binary = "";
-          for (let i = 0; i < bytes.length; i += 1) {
-            binary += String.fromCharCode(bytes[i]);
-          }
-          return btoa(binary);
-        }
-
-        async function sendFileAsAudioChunks() {
-          if (!requireOpenSocket()) return;
-
-          const sid = els.sessionId.value.trim();
-          if (!sid) {
-            log("error", "Session ID required to send audio.");
-            return;
-          }
-
-          const file = els.audioFile.files[0];
-          if (!file) {
-            log("error", "Select a file first.");
-            return;
-          }
-
-          const chunkSize = Number(els.chunkSize.value) || 9600;
-          const delayMs = Number(els.chunkDelay.value) || 0;
-
-          if (chunkSize <= 0) {
-            log("error", "Chunk size must be positive.");
-            return;
-          }
-
-          const bytes = new Uint8Array(await file.arrayBuffer());
-          const totalChunks = Math.max(1, Math.ceil(bytes.length / chunkSize));
-
-          log(
-            "system",
-            `Streaming ${file.name} (${bytes.length} bytes) in ${totalChunks} chunk(s), chunk=${chunkSize}, delay=${delayMs}ms`
-          );
-
-          els.sendFileBtn.disabled = true;
-          try {
-            for (let idx = 0; idx < totalChunks; idx += 1) {
-              const start = idx * chunkSize;
-              const end = Math.min(start + chunkSize, bytes.length);
-              const chunk = bytes.subarray(start, end);
-              const audioB64 = bytesToBase64(chunk);
-              sendObject({
-                type: "SessionAudio",
-                session_id: sid,
-                audio: audioB64,
-              });
-              els.audioProgress.textContent = `${idx + 1}/${totalChunks}`;
-              if (delayMs > 0) await sleep(delayMs);
-            }
-            els.audioProgress.textContent = "done";
-          } finally {
-            els.sendFileBtn.disabled = false;
-          }
         }
 
         els.connectBtn.addEventListener("click", connect);
@@ -817,16 +1252,19 @@
         });
 
         els.terminateBtn.addEventListener("click", () => {
-          const sid = els.sessionId.value.trim();
+          const sid = activeSessionId();
           if (!sid) {
             log("error", "Session ID is empty.");
             return;
           }
           sendObject({ type: "TerminateSession", session_id: sid });
+          stopMicStream().catch((err) => {
+            log("error", `Mic stop failed: ${err.message}`);
+          });
         });
 
         els.sendB64Btn.addEventListener("click", () => {
-          const sid = els.sessionId.value.trim();
+          const sid = activeSessionId();
           const audio = els.audioB64.value.trim();
           if (!sid) {
             log("error", "Session ID is empty.");
@@ -841,8 +1279,54 @@
 
         els.sendFileBtn.addEventListener("click", () => {
           sendFileAsAudioChunks().catch((err) => {
+            els.audioProgress.textContent = "error";
             log("error", `Audio stream failed: ${err.message}`);
           });
+        });
+
+        els.micStartBtn.addEventListener("click", () => {
+          startMicStream().catch((err) => {
+            log("error", `Mic stream start failed: ${err.message}`);
+          });
+        });
+
+        els.micStopBtn.addEventListener("click", () => {
+          stopMicStream().catch((err) => {
+            log("error", `Mic stream stop failed: ${err.message}`);
+          });
+        });
+
+        els.playLastBtn.addEventListener("click", () => {
+          playLastOutput().catch((err) => {
+            log("error", `Playback failed: ${err.message}`);
+          });
+        });
+
+        els.commitAudioBtn.addEventListener("click", () => {
+          const sid = activeSessionId();
+          if (!sid) {
+            log("error", "Session ID is empty.");
+            return;
+          }
+          sendObject({ type: "SessionAudioCommit", session_id: sid });
+        });
+
+        els.createResponseBtn.addEventListener("click", () => {
+          const sid = activeSessionId();
+          if (!sid) {
+            log("error", "Session ID is empty.");
+            return;
+          }
+          sendObject({ type: "SessionResponseCreate", session_id: sid });
+        });
+
+        els.interruptResponseBtn.addEventListener("click", () => {
+          const sid = activeSessionId();
+          if (!sid) {
+            log("error", "Session ID is empty.");
+            return;
+          }
+          sendObject({ type: "SessionResponseInterrupt", session_id: sid });
         });
 
         els.sendRawBtn.addEventListener("click", () => {
@@ -874,8 +1358,14 @@
           });
         });
 
+        window.addEventListener("beforeunload", () => {
+          stopMicStream().catch(() => {});
+        });
+
         loadPrefs();
         setStatus("closed");
+        setMicStatus("idle");
+        setPlaybackStatus("idle");
         log("system", "Ready. Connect, Pair/Auth, then CreateSession.");
       })();
     </script>

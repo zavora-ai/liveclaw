@@ -8,7 +8,7 @@ Status scale: `NOT_STARTED`, `IN_PROGRESS`, `AT_RISK`, `BLOCKED`, `DONE`
 | Milestone | Status | Owner | Target Date | Demo Script | Acceptance Checks |
 |---|---|---|---|---|---|
 | M0 Baseline Recovery | DONE | Core Team | 2026-02-27 | `scripts/demo/m0_baseline.sh` | Quality gate green; CI ADK path valid; parity docs present; P0/P1 register maintained |
-| M1 Voice E2E | IN_PROGRESS | Core Team | 2026-03-13 | `scripts/demo/m1_voice_e2e.sh` | SessionAudio reaches live runtime; session IDs propagate end-to-end |
+| M1 Voice E2E | IN_PROGRESS | Core Team | 2026-03-13 | `scripts/demo/m1_voice_e2e.sh` + `scripts/demo/m1_voice_e2e_live.sh` | SessionAudio reaches live runtime; provider-backed transcript/audio roundtrip validated; session IDs propagate end-to-end |
 | M2 Secure Multi-Session | IN_PROGRESS | Core Team | 2026-03-27 | `scripts/demo/m2_secure_sessions.sh` | Token auth path implemented; per-session ownership enforced |
 | M3 Tool and Graph Execution | IN_PROGRESS | Core Team | 2026-04-24 | `scripts/demo/m3_tools_graph.sh` | Non-empty toolset; RBAC enforced; graph tools node executes |
 | M4 Memory, Artifacts, Resilience | IN_PROGRESS | Core Team | 2026-05-22 | `scripts/demo/m4_memory_artifacts.sh` | Persistent recall across restarts; artifact persistence; reconnect behavior validated |
@@ -126,6 +126,17 @@ Status scale: `NOT_STARTED`, `IN_PROGRESS`, `AT_RISK`, `BLOCKED`, `DONE`
 | Track priority channel bindings in gateway health snapshot | DONE | `GatewayHealth.active_priority_bindings` in `liveclaw-gateway/src/protocol.rs` and `liveclaw-gateway/src/server.rs` |
 | Keep browser WS client aligned with priority probe/notice flow | DONE | `tools/ws-client/index.html` adds Priority Probe action, template, and `prio` badge |
 | Extend M6 release-flow demo for priority-path verification | DONE | `scripts/demo/m6_release_flow.sh` includes priority probe tests |
+
+## Sprint 11 Checklist (In Progress)
+
+| Item | Status | Evidence |
+|---|---|---|
+| Add provider-backed live voice roundtrip script for true M1 E2E validation | DONE | `scripts/demo/m1_voice_e2e_live.sh` (gateway startup/reuse, WS session, audio stream, session-scoped audio/transcript assertions) |
+| Add deterministic audio generation helper for E2E harness | DONE | `scripts/generate_e2e_pcm.sh` uses OpenAI speech API (`format=pcm`) |
+| Align M1 milestone acceptance criteria to require live transcript/audio evidence | DONE | Milestone board row now references both `m1_voice_e2e.sh` and `m1_voice_e2e_live.sh` |
+| Harden live harness for operator environments with running gateways | DONE | `scripts/demo/m1_voice_e2e_live.sh` supports `LIVECLAW_E2E_USE_EXISTING_GATEWAY`, token/pair-code auth overrides, and richer failure diagnostics |
+| Add manual turn-control voice protocol for deterministic prerecorded-audio flows | DONE | `SessionAudioCommit` / `SessionResponseCreate` / `SessionResponseInterrupt` in `liveclaw-gateway/src/protocol.rs` + `liveclaw-gateway/src/server.rs` + `liveclaw-app/src/main.rs` runner wiring |
+| Keep reusable browser WS client aligned with full voice E2E path | DONE | `tools/ws-client/index.html` adds mic streaming, upload-to-PCM conversion, `AudioOutput` playback, and session transcript pane |
 
 ## Notes
 

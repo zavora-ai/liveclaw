@@ -113,8 +113,13 @@ cargo fmt --check
 ## Browser WS Client
 
 LiveClaw includes a reusable browser WebSocket client for pairing, auth,
-session control, and SessionAudio chunk streaming.
+session control, and full voice-path validation.
 It syncs message templates from `GetDiagnostics` and shows runtime + security + gateway-health + priority badges so protocol changes stay visible in the client per sprint.
+The client now supports:
+- Uploading common audio formats and converting them to PCM16 mono for `SessionAudio`
+- Live microphone streaming to `SessionAudio`
+- Decoding and playback of `AudioOutput`
+- Per-session transcript view for `TranscriptUpdate`
 
 ```bash
 cd /Users/jameskaranja/Developer/projects/liveclaw
@@ -136,6 +141,35 @@ Run without auto-opening a browser tab:
 OPEN_BROWSER=0 ./scripts/ws_client.sh
 ```
 
+## Live Voice E2E Validation
+
+Run the provider-backed end-to-end voice probe (no mocks):
+
+```bash
+cd /Users/jameskaranja/Developer/projects/liveclaw
+./scripts/demo/m1_voice_e2e_live.sh
+```
+
+This script:
+- starts LiveClaw (or reuses an already-running gateway),
+- creates a WS session,
+- generates PCM speech audio via `scripts/generate_e2e_pcm.sh`,
+- streams audio chunks through `SessionAudio`,
+- asserts `AudioAccepted`, `TranscriptUpdate`, and `AudioOutput` for the created session ID,
+- terminates the session and verifies `SessionTerminated`.
+
+Required:
+- `OPENAI_API_KEY` or `LIVECLAW_API_KEY`
+- `websocat`
+
+Useful overrides:
+- `LIVECLAW_E2E_USE_EXISTING_GATEWAY=auto|always|never` (default `auto`)
+- `LIVECLAW_E2E_TOKEN=<token>` for pairing-required existing gateway runs
+- `LIVECLAW_E2E_PAIR_CODE=<code>` optional pairing-code override
+- `LIVECLAW_E2E_WS_URL=ws://host:port/ws`
+- `LIVECLAW_E2E_FORCE_RESPONSE=1` to send `SessionAudioCommit` + `SessionResponseCreate` after upload
+- `LIVECLAW_E2E_SAMPLE_RATE=24000` and `LIVECLAW_E2E_TRAILING_SILENCE_MS=1200` for VAD tuning
+
 ## Documentation
 
 - [Design Document](docs/design.md) — architecture, data flows, component interfaces
@@ -150,6 +184,9 @@ Clients connect via WebSocket and exchange JSON messages:
 { "type": "Pair", "code": "123456" }
 { "type": "CreateSession", "config": null }
 { "type": "SessionAudio", "session_id": "...", "audio": "<base64>" }
+{ "type": "SessionAudioCommit", "session_id": "..." }
+{ "type": "SessionResponseCreate", "session_id": "..." }
+{ "type": "SessionResponseInterrupt", "session_id": "..." }
 { "type": "TerminateSession", "session_id": "..." }
 { "type": "GetGatewayHealth" }
 { "type": "PriorityProbe" }
@@ -159,6 +196,10 @@ Clients connect via WebSocket and exchange JSON messages:
 // Server → Client
 { "type": "PairSuccess", "token": "..." }
 { "type": "SessionCreated", "session_id": "..." }
+{ "type": "AudioAccepted", "session_id": "..." }
+{ "type": "AudioCommitted", "session_id": "..." }
+{ "type": "ResponseCreateAccepted", "session_id": "..." }
+{ "type": "ResponseInterruptAccepted", "session_id": "..." }
 { "type": "AudioOutput", "session_id": "...", "audio": "<base64>" }
 { "type": "TranscriptUpdate", "session_id": "...", "text": "...", "is_final": true }
 { "type": "PriorityProbeAccepted", "queued_standard": true, "queued_priority": true }
