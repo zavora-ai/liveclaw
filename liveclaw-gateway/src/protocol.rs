@@ -23,6 +23,7 @@ pub enum GatewayMessage {
         session_id: SessionId,
         audio: String,
     },
+    GetDiagnostics,
     Ping,
 }
 
@@ -57,6 +58,9 @@ pub enum GatewayResponse {
         text: String,
         is_final: bool,
     },
+    Diagnostics {
+        data: RuntimeDiagnostics,
+    },
     Error {
         code: String,
         message: String,
@@ -74,6 +78,25 @@ pub struct SessionConfig {
     pub role: Option<String>,
     /// Whether to wrap the RealtimeAgent in a GraphAgent
     pub enable_graph: Option<bool>,
+}
+
+/// Runtime and feature diagnostics for operator validation.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct RuntimeDiagnostics {
+    pub runtime_kind: String,
+    pub provider_profile: String,
+    pub provider_kind: String,
+    pub provider_model: String,
+    pub provider_base_url: Option<String>,
+    pub reconnect_enabled: bool,
+    pub reconnect_max_attempts: u32,
+    pub reconnect_attempts_total: u64,
+    pub reconnect_successes_total: u64,
+    pub reconnect_failures_total: u64,
+    pub compaction_enabled: bool,
+    pub compaction_max_events_threshold: usize,
+    pub compactions_applied_total: u64,
+    pub active_sessions: usize,
 }
 
 #[cfg(test)]
@@ -155,6 +178,15 @@ mod tests {
         let parsed: GatewayMessage = serde_json::from_str(&json).unwrap();
         assert_eq!(msg, parsed);
         assert_eq!(json, r#"{"type":"Ping"}"#);
+    }
+
+    #[test]
+    fn test_gateway_message_get_diagnostics() {
+        let msg = GatewayMessage::GetDiagnostics;
+        let json = serde_json::to_string(&msg).unwrap();
+        let parsed: GatewayMessage = serde_json::from_str(&json).unwrap();
+        assert_eq!(msg, parsed);
+        assert_eq!(json, r#"{"type":"GetDiagnostics"}"#);
     }
 
     // --- GatewayResponse serialization tests ---
@@ -247,6 +279,31 @@ mod tests {
         let resp = GatewayResponse::Error {
             code: "auth_required".into(),
             message: "Not authenticated".into(),
+        };
+        let json = serde_json::to_string(&resp).unwrap();
+        let parsed: GatewayResponse = serde_json::from_str(&json).unwrap();
+        assert_eq!(resp, parsed);
+    }
+
+    #[test]
+    fn test_gateway_response_diagnostics() {
+        let resp = GatewayResponse::Diagnostics {
+            data: RuntimeDiagnostics {
+                runtime_kind: "native".into(),
+                provider_profile: "legacy".into(),
+                provider_kind: "openai".into(),
+                provider_model: "gpt-4o-realtime-preview".into(),
+                provider_base_url: Some("wss://api.openai.com/v1/realtime".into()),
+                reconnect_enabled: true,
+                reconnect_max_attempts: 5,
+                reconnect_attempts_total: 2,
+                reconnect_successes_total: 1,
+                reconnect_failures_total: 1,
+                compaction_enabled: true,
+                compaction_max_events_threshold: 500,
+                compactions_applied_total: 3,
+                active_sessions: 1,
+            },
         };
         let json = serde_json::to_string(&resp).unwrap();
         let parsed: GatewayResponse = serde_json::from_str(&json).unwrap();

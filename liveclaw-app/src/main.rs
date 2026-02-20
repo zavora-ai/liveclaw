@@ -33,7 +33,7 @@ use liveclaw_app::config::{
 use liveclaw_app::storage::{build_memory_service, FileArtifactService};
 use liveclaw_app::tools::build_baseline_tools;
 use liveclaw_gateway::pairing::PairingGuard;
-use liveclaw_gateway::protocol::SessionConfig;
+use liveclaw_gateway::protocol::{RuntimeDiagnostics, SessionConfig};
 use liveclaw_gateway::server::{
     Gateway, GatewayConfig, RunnerHandle, SessionAudioOutput, SessionTranscriptOutput,
 };
@@ -183,6 +183,14 @@ struct ToolExecutionMetrics {
     total_calls: AtomicU64,
     failed_calls: AtomicU64,
     total_duration_millis: AtomicU64,
+}
+
+#[derive(Default)]
+struct RuntimeDiagnosticsCounters {
+    reconnect_attempts_total: AtomicU64,
+    reconnect_successes_total: AtomicU64,
+    reconnect_failures_total: AtomicU64,
+    compactions_applied_total: AtomicU64,
 }
 
 impl ToolExecutionMetrics {
@@ -380,6 +388,7 @@ async fn reconnect_with_backoff(
     session_id: &str,
     runtime: Arc<dyn SessionRuntime>,
     shutdown: Arc<AtomicBool>,
+    diagnostics: Arc<RuntimeDiagnosticsCounters>,
     policy: &ReconnectPolicy,
 ) -> bool {
     if !policy.enable_reconnect || policy.max_attempts == 0 {
@@ -390,6 +399,9 @@ async fn reconnect_with_backoff(
         if shutdown.load(Ordering::SeqCst) {
             return false;
         }
+        diagnostics
+            .reconnect_attempts_total
+            .fetch_add(1, Ordering::SeqCst);
 
         let backoff = policy.backoff_for_attempt(attempt);
         warn!(
@@ -407,6 +419,9 @@ async fn reconnect_with_backoff(
 
         match runtime.connect().await {
             Ok(()) => {
+                diagnostics
+                    .reconnect_successes_total
+                    .fetch_add(1, Ordering::SeqCst);
                 info!(
                     session_id = session_id,
                     attempt = attempt,
@@ -415,6 +430,9 @@ async fn reconnect_with_backoff(
                 return true;
             }
             Err(e) => {
+                diagnostics
+                    .reconnect_failures_total
+                    .fetch_add(1, Ordering::SeqCst);
                 warn!(
                     session_id = session_id,
                     attempt = attempt,
@@ -438,6 +456,7 @@ fn spawn_runtime_loop(
     session_id: String,
     runtime: Arc<dyn SessionRuntime>,
     shutdown: Arc<AtomicBool>,
+    diagnostics: Arc<RuntimeDiagnosticsCounters>,
     reconnect_policy: ReconnectPolicy,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
@@ -462,6 +481,7 @@ fn spawn_runtime_loop(
                         &session_id,
                         runtime.clone(),
                         shutdown.clone(),
+                        diagnostics.clone(),
                         &reconnect_policy,
                     )
                     .await;
@@ -482,6 +502,7 @@ struct GatewayEventForwarder {
     session_memory_entries: Arc<RwLock<HashMap<String, Vec<adk_memory::MemoryEntry>>>>,
     artifact_service: Option<Arc<dyn ArtifactService>>,
     memory_compaction: MemoryCompactionPolicy,
+    runtime_diagnostics: Arc<RuntimeDiagnosticsCounters>,
     audio_sequence: AtomicU64,
     transcript_sequence: AtomicU64,
     audio_tx: mpsc::Sender<SessionAudioOutput>,
@@ -504,6 +525,9 @@ impl GatewayEventForwarder {
             if self.memory_compaction.enabled
                 && compact_memory_entries(entries, self.memory_compaction.max_events_threshold)
             {
+                self.runtime_diagnostics
+                    .compactions_applied_total
+                    .fetch_add(1, Ordering::SeqCst);
                 info!(
                     session_id = %self.session_id,
                     threshold = self.memory_compaction.max_events_threshold,
@@ -639,6 +663,7 @@ struct RunnerAdapter {
     default_instructions: Option<String>,
     tool_security: ToolSecurityConfig,
     tool_metrics: Arc<ToolExecutionMetrics>,
+    runtime_diagnostics: Arc<RuntimeDiagnosticsCounters>,
     memory_store: Arc<dyn MemoryService>,
     session_memory_entries: Arc<RwLock<HashMap<String, Vec<adk_memory::MemoryEntry>>>>,
     artifact_service: Option<Arc<dyn ArtifactService>>,
@@ -652,6 +677,7 @@ struct RunnerAdapter {
 struct RunnerAdapterInit {
     runtime_kind: RuntimeKind,
     provider: ProviderSelection,
+    runtime_diagnostics: Arc<RuntimeDiagnosticsCounters>,
     memory_store: Arc<dyn MemoryService>,
     artifact_service: Option<Arc<dyn ArtifactService>>,
     reconnect_policy: ReconnectPolicy,
@@ -673,6 +699,7 @@ impl RunnerAdapter {
             default_instructions: voice_cfg.instructions.clone(),
             tool_security: ToolSecurityConfig::from(security_cfg),
             tool_metrics: Arc::new(ToolExecutionMetrics::default()),
+            runtime_diagnostics: init.runtime_diagnostics,
             memory_store: init.memory_store,
             session_memory_entries: Arc::new(RwLock::new(HashMap::new())),
             artifact_service: init.artifact_service,
@@ -820,6 +847,7 @@ impl RunnerHandle for RunnerAdapter {
                 session_memory_entries: self.session_memory_entries.clone(),
                 artifact_service: self.artifact_service.clone(),
                 memory_compaction: self.memory_compaction_policy.clone(),
+                runtime_diagnostics: self.runtime_diagnostics.clone(),
                 audio_sequence: AtomicU64::new(0),
                 transcript_sequence: AtomicU64::new(0),
                 audio_tx: self.audio_tx.clone(),
@@ -854,6 +882,7 @@ impl RunnerHandle for RunnerAdapter {
             session_id.to_string(),
             runtime.clone(),
             shutdown.clone(),
+            self.runtime_diagnostics.clone(),
             self.reconnect_policy.clone(),
         );
 
@@ -953,6 +982,39 @@ impl RunnerHandle for RunnerAdapter {
         let audio_b64 = base64_encode(audio);
         runtime.send_audio_base64(&audio_b64).await
     }
+
+    async fn diagnostics(&self) -> Result<RuntimeDiagnostics> {
+        let active_sessions = self.sessions.read().await.len();
+
+        Ok(RuntimeDiagnostics {
+            runtime_kind: runtime_kind_label(&self.runtime_kind).to_string(),
+            provider_profile: self.provider.profile_name.clone(),
+            provider_kind: provider_kind_label(&self.provider.kind).to_string(),
+            provider_model: self.provider.default_model.clone(),
+            provider_base_url: self.provider.base_url.clone(),
+            reconnect_enabled: self.reconnect_policy.enable_reconnect,
+            reconnect_max_attempts: self.reconnect_policy.max_attempts,
+            reconnect_attempts_total: self
+                .runtime_diagnostics
+                .reconnect_attempts_total
+                .load(Ordering::SeqCst),
+            reconnect_successes_total: self
+                .runtime_diagnostics
+                .reconnect_successes_total
+                .load(Ordering::SeqCst),
+            reconnect_failures_total: self
+                .runtime_diagnostics
+                .reconnect_failures_total
+                .load(Ordering::SeqCst),
+            compaction_enabled: self.memory_compaction_policy.enabled,
+            compaction_max_events_threshold: self.memory_compaction_policy.max_events_threshold,
+            compactions_applied_total: self
+                .runtime_diagnostics
+                .compactions_applied_total
+                .load(Ordering::SeqCst),
+            active_sessions,
+        })
+    }
 }
 
 fn non_empty(value: Option<String>) -> Option<String> {
@@ -1011,6 +1073,13 @@ fn provider_kind_label(kind: &ProviderKind) -> &'static str {
     match kind {
         ProviderKind::OpenAI => "openai",
         ProviderKind::OpenAICompatible => "openai_compatible",
+    }
+}
+
+fn runtime_kind_label(kind: &RuntimeKind) -> &'static str {
+    match kind {
+        RuntimeKind::Native => "native",
+        RuntimeKind::Docker => "docker",
     }
 }
 
@@ -1297,6 +1366,7 @@ async fn main() -> Result<()> {
         RunnerAdapterInit {
             runtime_kind: config.runtime.kind.clone(),
             provider,
+            runtime_diagnostics: Arc::new(RuntimeDiagnosticsCounters::default()),
             memory_store,
             artifact_service,
             reconnect_policy: ReconnectPolicy::from(&config.resilience),
@@ -1368,6 +1438,7 @@ mod tests {
                     default_model: "gpt-4o-realtime-preview-2024-12-17".to_string(),
                     base_url: None,
                 },
+                runtime_diagnostics: Arc::new(RuntimeDiagnosticsCounters::default()),
                 memory_store,
                 artifact_service: None,
                 reconnect_policy: ReconnectPolicy::from(&ResilienceConfig::default()),
@@ -1402,6 +1473,7 @@ mod tests {
                 enabled: false,
                 max_events_threshold: 500,
             },
+            runtime_diagnostics: Arc::new(RuntimeDiagnosticsCounters::default()),
             audio_sequence: AtomicU64::new(0),
             transcript_sequence: AtomicU64::new(0),
             audio_tx,
@@ -1458,6 +1530,7 @@ mod tests {
                 enabled: false,
                 max_events_threshold: 500,
             },
+            runtime_diagnostics: Arc::new(RuntimeDiagnosticsCounters::default()),
             audio_sequence: AtomicU64::new(0),
             transcript_sequence: AtomicU64::new(0),
             audio_tx,
@@ -1714,6 +1787,7 @@ mod tests {
             "sess-recover".to_string(),
             runtime.clone(),
             shutdown,
+            Arc::new(RuntimeDiagnosticsCounters::default()),
             policy,
         );
         tokio::time::timeout(Duration::from_millis(200), handle)
@@ -1742,8 +1816,13 @@ mod tests {
             max_backoff: Duration::from_millis(1),
         };
 
-        let handle =
-            spawn_runtime_loop("sess-budget".to_string(), runtime.clone(), shutdown, policy);
+        let handle = spawn_runtime_loop(
+            "sess-budget".to_string(),
+            runtime.clone(),
+            shutdown,
+            Arc::new(RuntimeDiagnosticsCounters::default()),
+            policy,
+        );
         tokio::time::timeout(Duration::from_millis(200), handle)
             .await
             .expect("runtime loop should complete")
@@ -1751,6 +1830,23 @@ mod tests {
 
         assert_eq!(runtime.run_calls.load(Ordering::SeqCst), 1);
         assert_eq!(runtime.connect_calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn test_runner_diagnostics_snapshot_exposes_runtime_and_provider_config() {
+        let adapter = test_adapter("full", vec![]);
+        let diagnostics = adapter.diagnostics().await.unwrap();
+
+        assert_eq!(diagnostics.runtime_kind, "native");
+        assert_eq!(diagnostics.provider_profile, "legacy");
+        assert_eq!(diagnostics.provider_kind, "openai");
+        assert_eq!(
+            diagnostics.provider_model,
+            "gpt-4o-realtime-preview-2024-12-17"
+        );
+        assert_eq!(diagnostics.reconnect_max_attempts, 5);
+        assert_eq!(diagnostics.compaction_max_events_threshold, 500);
+        assert_eq!(diagnostics.active_sessions, 0);
     }
 
     #[test]

@@ -96,6 +96,7 @@ Status scale: `NOT_STARTED`, `IN_PROGRESS`, `AT_RISK`, `BLOCKED`, `DONE`
 | Add provider profile matrix with OpenAI-compatible endpoint support | DONE | `liveclaw-app/src/config.rs` `ProvidersConfig`; `liveclaw-app/src/main.rs` `resolve_provider_selection` with `OpenAIRealtimeModel::with_base_url` |
 | Add runtime/provider configuration validation and doctor diagnostics | DONE | `liveclaw-app/src/main.rs` `validate_runtime_and_provider` + `--doctor` command path |
 | Add provider env matrix helper for operators | DONE | `scripts/provider_env_matrix.sh` |
+| Expose live diagnostics via gateway for WS client validation | DONE | `liveclaw-gateway/src/protocol.rs` `GetDiagnostics` / `Diagnostics`; `liveclaw-gateway/src/server.rs` handler and tests |
 | Add Sprint 7 checks in M5 demo script | DONE | `scripts/demo/m5_runtime_security.sh` |
 
 ## Notes

@@ -16,6 +16,8 @@ demo_header "M5 Runtime and Security Parity"
   cargo test -p liveclaw-app --bin liveclaw-app tests::test_resolve_provider_selection_openai_compatible_profile -- --exact
   cargo test -p liveclaw-app --bin liveclaw-app tests::test_validate_runtime_and_provider_rejects_missing_compat_base_url -- --exact
   cargo test -p liveclaw-app --bin liveclaw-app tests::test_validate_runtime_and_provider_rejects_non_ws_base_url -- --exact
+  cargo test -p liveclaw-app --bin liveclaw-app tests::test_runner_diagnostics_snapshot_exposes_runtime_and_provider_config -- --exact
+  cargo test -p liveclaw-gateway --lib server::tests::test_get_diagnostics_success -- --exact
 
   # Provider env diagnostic matrix and doctor command output.
   ./scripts/provider_env_matrix.sh

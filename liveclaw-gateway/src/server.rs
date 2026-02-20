@@ -14,7 +14,7 @@ use tokio::sync::{mpsc, RwLock};
 use tracing::{error, info, warn};
 
 use crate::pairing::PairingGuard;
-use crate::protocol::{GatewayMessage, GatewayResponse, SessionConfig};
+use crate::protocol::{GatewayMessage, GatewayResponse, RuntimeDiagnostics, SessionConfig};
 
 // ---------------------------------------------------------------------------
 // RunnerHandle trait — abstracts the Runner interface so the gateway crate
@@ -40,6 +40,9 @@ pub trait RunnerHandle: Send + Sync {
 
     /// Forward audio data to the active RealtimeAgent session.
     async fn send_audio(&self, session_id: &str, audio: &[u8]) -> anyhow::Result<()>;
+
+    /// Return runtime diagnostics for operator validation.
+    async fn diagnostics(&self) -> anyhow::Result<RuntimeDiagnostics>;
 }
 
 // ---------------------------------------------------------------------------
@@ -405,6 +408,13 @@ async fn handle_message(
             }
             handle_session_audio(&session_id, &audio, state, conn, ws_tx).await
         }
+
+        GatewayMessage::GetDiagnostics => {
+            if !conn.authenticated {
+                return auth_required_error();
+            }
+            handle_get_diagnostics(state).await
+        }
     }
 }
 
@@ -593,6 +603,18 @@ async fn handle_session_audio(
                 message: format!("Failed to forward audio: {}", e),
             }
         }
+    }
+}
+
+/// Handle GetDiagnostics — returns runtime/provider/resilience/compaction
+/// metrics from the active runner.
+async fn handle_get_diagnostics(state: &AppState) -> GatewayResponse {
+    match state.runner.diagnostics().await {
+        Ok(data) => GatewayResponse::Diagnostics { data },
+        Err(e) => GatewayResponse::Error {
+            code: "diagnostics_failed".to_string(),
+            message: format!("Failed to fetch diagnostics: {}", e),
+        },
     }
 }
 
@@ -790,6 +812,8 @@ mod tests {
         terminate_err: Option<String>,
         /// If set, send_audio returns this error.
         audio_err: Option<String>,
+        /// If set, diagnostics returns this error.
+        diagnostics_err: Option<String>,
     }
 
     impl MockRunner {
@@ -798,6 +822,7 @@ mod tests {
                 create_err: None,
                 terminate_err: None,
                 audio_err: None,
+                diagnostics_err: None,
             }
         }
 
@@ -806,6 +831,7 @@ mod tests {
                 create_err: Some(msg.to_string()),
                 terminate_err: None,
                 audio_err: None,
+                diagnostics_err: None,
             }
         }
     }
@@ -835,6 +861,28 @@ mod tests {
             match &self.audio_err {
                 Some(e) => Err(anyhow::anyhow!("{}", e)),
                 None => Ok(()),
+            }
+        }
+
+        async fn diagnostics(&self) -> anyhow::Result<RuntimeDiagnostics> {
+            match &self.diagnostics_err {
+                Some(e) => Err(anyhow::anyhow!("{}", e)),
+                None => Ok(RuntimeDiagnostics {
+                    runtime_kind: "native".to_string(),
+                    provider_profile: "legacy".to_string(),
+                    provider_kind: "openai".to_string(),
+                    provider_model: "gpt-4o-realtime-preview".to_string(),
+                    provider_base_url: Some("wss://api.openai.com/v1/realtime".to_string()),
+                    reconnect_enabled: true,
+                    reconnect_max_attempts: 5,
+                    reconnect_attempts_total: 2,
+                    reconnect_successes_total: 1,
+                    reconnect_failures_total: 1,
+                    compaction_enabled: true,
+                    compaction_max_events_threshold: 500,
+                    compactions_applied_total: 3,
+                    active_sessions: 1,
+                }),
             }
         }
     }
@@ -887,6 +935,31 @@ mod tests {
         assert!(!conn.authenticated);
         let resp = handle_message(GatewayMessage::Ping, &state, &mut conn, &ws_tx).await;
         assert_eq!(resp, GatewayResponse::Pong);
+    }
+
+    #[tokio::test]
+    async fn test_get_diagnostics_requires_auth() {
+        let state = make_state(MockRunner::ok(), true);
+        let mut conn = unauthed_conn();
+        let ws_tx = dummy_ws_tx();
+        let resp = handle_message(GatewayMessage::GetDiagnostics, &state, &mut conn, &ws_tx).await;
+        assert_eq!(resp, auth_required_error());
+    }
+
+    #[tokio::test]
+    async fn test_get_diagnostics_success() {
+        let state = make_state(MockRunner::ok(), true);
+        let mut conn = authed_conn();
+        let ws_tx = dummy_ws_tx();
+        let resp = handle_message(GatewayMessage::GetDiagnostics, &state, &mut conn, &ws_tx).await;
+        match resp {
+            GatewayResponse::Diagnostics { data } => {
+                assert_eq!(data.runtime_kind, "native");
+                assert_eq!(data.provider_profile, "legacy");
+                assert_eq!(data.compactions_applied_total, 3);
+            }
+            other => panic!("Expected Diagnostics response, got {:?}", other),
+        }
     }
 
     // --- Auth required for session commands ---

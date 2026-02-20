@@ -67,7 +67,7 @@
 
       .status-bar {
         display: grid;
-        grid-template-columns: 1fr auto auto auto;
+        grid-template-columns: 1fr auto auto auto auto;
         gap: 10px;
         align-items: center;
         padding: 14px;
@@ -291,6 +291,7 @@
         <span id="statusPill" class="status-pill closed">closed</span>
         <span class="badge" id="sessionBadge">session: none</span>
         <span class="badge" id="tokenBadge">token: none</span>
+        <span class="badge" id="diagBadge">diag: n/a</span>
         <button id="clearLog" class="muted">Clear Log</button>
       </section>
 
@@ -357,6 +358,7 @@
             </div>
             <div class="field-row">
               <button id="pingBtn" class="muted">Ping</button>
+              <button id="diagnosticsBtn" class="soft">Get Diagnostics</button>
               <button id="terminateBtn" class="warn">Terminate Session</button>
             </div>
           </div>
@@ -422,6 +424,7 @@
           statusPill: $("statusPill"),
           sessionBadge: $("sessionBadge"),
           tokenBadge: $("tokenBadge"),
+          diagBadge: $("diagBadge"),
           wsUrl: $("wsUrl"),
           connectBtn: $("connectBtn"),
           disconnectBtn: $("disconnectBtn"),
@@ -437,6 +440,7 @@
           createSessionBtn: $("createSessionBtn"),
           sessionId: $("sessionId"),
           pingBtn: $("pingBtn"),
+          diagnosticsBtn: $("diagnosticsBtn"),
           terminateBtn: $("terminateBtn"),
           audioB64: $("audioB64"),
           sendB64Btn: $("sendB64Btn"),
@@ -571,6 +575,13 @@
               savePrefs();
               updateBadges();
             }
+
+            if (parsed.type === "Diagnostics" && parsed.data) {
+              const d = parsed.data;
+              const compactions = Number(d.compactions_applied_total || 0);
+              const reconnects = Number(d.reconnect_attempts_total || 0);
+              els.diagBadge.textContent = `diag: rc=${reconnects} cp=${compactions}`;
+            }
           };
         }
 
@@ -687,6 +698,10 @@
 
         els.pingBtn.addEventListener("click", () => {
           sendObject({ type: "Ping" });
+        });
+
+        els.diagnosticsBtn.addEventListener("click", () => {
+          sendObject({ type: "GetDiagnostics" });
         });
 
         els.terminateBtn.addEventListener("click", () => {

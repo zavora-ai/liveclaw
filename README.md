@@ -143,6 +143,7 @@ Clients connect via WebSocket and exchange JSON messages:
 { "type": "CreateSession", "config": null }
 { "type": "SessionAudio", "session_id": "...", "audio": "<base64>" }
 { "type": "TerminateSession", "session_id": "..." }
+{ "type": "GetDiagnostics" }
 { "type": "Ping" }
 
 // Server → Client
@@ -150,6 +151,7 @@ Clients connect via WebSocket and exchange JSON messages:
 { "type": "SessionCreated", "session_id": "..." }
 { "type": "AudioOutput", "session_id": "...", "audio": "<base64>" }
 { "type": "TranscriptUpdate", "session_id": "...", "text": "...", "is_final": true }
+{ "type": "Diagnostics", "data": { "...": "runtime/provider/reconnect/compaction snapshot" } }
 { "type": "Pong" }
 ```
 
