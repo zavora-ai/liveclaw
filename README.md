@@ -63,7 +63,7 @@ Key sections:
 |---|---|
 | `[gateway]` | Host, port, pairing toggle |
 | `[voice]` | Provider, API key, model, voice, instructions |
-| `[security]` | Default role, tool allowlist, rate limit, audit log path |
+| `[security]` | Default role, tool allowlist, rate limit, audit log path, workspace tool boundary, principal allowlist mode, public bind override |
 | `[plugin]` | PII redaction, memory auto-save, blocked keywords |
 | `[memory]` | Backend type, recall limit |
 | `[graph]` | Enable graph orchestration, recursion limit |
@@ -87,6 +87,13 @@ cargo run -p liveclaw-app -- --doctor dev/liveclaw.dev.toml
 ./scripts/provider_env_matrix.sh
 ```
 
+Security hardening diagnostics exposed via `GetDiagnostics`:
+- `security_workspace_root`
+- `security_forbidden_tool_paths`
+- `security_deny_by_default_principal_allowlist`
+- `security_principal_allowlist_size`
+- `security_allow_public_bind`
+
 ## Development
 
 ```bash
@@ -107,7 +114,7 @@ cargo fmt --check
 
 LiveClaw includes a reusable browser WebSocket client for pairing, auth,
 session control, and SessionAudio chunk streaming.
-It also syncs message templates from `GetDiagnostics` so protocol additions stay visible in the client per sprint.
+It syncs message templates from `GetDiagnostics` and shows runtime + security badges so protocol changes stay visible in the client per sprint.
 
 ```bash
 cd /Users/jameskaranja/Developer/projects/liveclaw

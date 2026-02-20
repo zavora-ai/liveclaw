@@ -31,7 +31,7 @@ use liveclaw_app::config::{
     RuntimeKind, SecurityConfig as AppSecurityConfig, VoiceConfig,
 };
 use liveclaw_app::storage::{build_memory_service, FileArtifactService};
-use liveclaw_app::tools::build_baseline_tools;
+use liveclaw_app::tools::{build_baseline_tools_with_workspace, WorkspaceToolPolicy};
 use liveclaw_gateway::pairing::PairingGuard;
 use liveclaw_gateway::protocol::{
     supported_client_message_types, supported_server_response_types, RuntimeDiagnostics,
@@ -169,6 +169,11 @@ struct ToolSecurityConfig {
     default_role: String,
     tool_allowlist: Vec<String>,
     audit_log_path: String,
+    workspace_root: String,
+    forbidden_tool_paths: Vec<String>,
+    principal_allowlist: Vec<String>,
+    deny_by_default_principal_allowlist: bool,
+    allow_public_bind: bool,
 }
 
 impl From<&AppSecurityConfig> for ToolSecurityConfig {
@@ -177,6 +182,11 @@ impl From<&AppSecurityConfig> for ToolSecurityConfig {
             default_role: value.default_role.clone(),
             tool_allowlist: value.tool_allowlist.clone(),
             audit_log_path: value.audit_log_path.clone(),
+            workspace_root: value.workspace_root.clone(),
+            forbidden_tool_paths: value.forbidden_tool_paths.clone(),
+            principal_allowlist: value.principal_allowlist.clone(),
+            deny_by_default_principal_allowlist: value.deny_by_default_principal_allowlist,
+            allow_public_bind: value.allow_public_bind,
         }
     }
 }
@@ -774,7 +784,12 @@ impl RunnerAdapter {
         let audit_sink = FileAuditSink::new(&self.tool_security.audit_log_path)
             .map_err(|e| anyhow::anyhow!("Failed to create audit sink: {}", e))?;
         let middleware = AuthMiddleware::with_audit(access_control, audit_sink);
-        Ok(middleware.protect_all(build_baseline_tools()))
+        let workspace_policy = WorkspaceToolPolicy {
+            workspace_root: std::path::PathBuf::from(&self.tool_security.workspace_root),
+            forbidden_paths: self.tool_security.forbidden_tool_paths.clone(),
+            max_read_bytes: 16_384,
+        };
+        Ok(middleware.protect_all(build_baseline_tools_with_workspace(workspace_policy)))
     }
 }
 
@@ -786,6 +801,19 @@ impl RunnerHandle for RunnerAdapter {
         session_id: &str,
         config: Option<SessionConfig>,
     ) -> Result<String> {
+        if self.tool_security.deny_by_default_principal_allowlist
+            && !self
+                .tool_security
+                .principal_allowlist
+                .iter()
+                .any(|allowed| allowed == user_id)
+        {
+            bail!(
+                "Principal '{}' is not in security.principal_allowlist and deny-by-default mode is enabled",
+                user_id
+            );
+        }
+
         if self.provider.api_key.trim().is_empty() {
             bail!("Missing API key. Set [voice].api_key or LIVECLAW_API_KEY / OPENAI_API_KEY.");
         }
@@ -1018,6 +1046,13 @@ impl RunnerHandle for RunnerAdapter {
                 .runtime_diagnostics
                 .compactions_applied_total
                 .load(Ordering::SeqCst),
+            security_workspace_root: self.tool_security.workspace_root.clone(),
+            security_forbidden_tool_paths: self.tool_security.forbidden_tool_paths.clone(),
+            security_deny_by_default_principal_allowlist: self
+                .tool_security
+                .deny_by_default_principal_allowlist,
+            security_principal_allowlist_size: self.tool_security.principal_allowlist.len(),
+            security_allow_public_bind: self.tool_security.allow_public_bind,
             active_sessions,
         })
     }
@@ -1199,6 +1234,16 @@ fn validate_runtime_and_provider(
     report
         .notes
         .push(format!("provider.model={}", provider.default_model));
+    report.notes.push(format!(
+        "security.workspace_root={} security.forbidden_tool_paths={}",
+        config.security.workspace_root,
+        config.security.forbidden_tool_paths.join(",")
+    ));
+    report.notes.push(format!(
+        "security.principal_allowlist_size={} deny_by_default={}",
+        config.security.principal_allowlist.len(),
+        config.security.deny_by_default_principal_allowlist
+    ));
 
     if provider.api_key.trim().is_empty() {
         if require_api_key {
@@ -1241,6 +1286,21 @@ fn validate_runtime_and_provider(
         report.notes.push(format!(
             "runtime.docker_image={}",
             config.runtime.docker_image
+        ));
+    }
+
+    let host = config.gateway.host.trim();
+    let public_bind = host == "0.0.0.0" || host == "::";
+    if public_bind && !config.security.allow_public_bind {
+        bail!(
+            "Refusing public bind on host '{}' because security.allow_public_bind=false",
+            config.gateway.host
+        );
+    }
+    if public_bind && config.security.allow_public_bind {
+        report.warnings.push(format!(
+            "gateway is configured for public bind on '{}' (operator override enabled)",
+            config.gateway.host
         ));
     }
 
@@ -1425,6 +1485,11 @@ mod tests {
             tool_allowlist: allowlist.into_iter().map(str::to_string).collect(),
             rate_limit_per_session: 100,
             audit_log_path: "/tmp/liveclaw-test-audit.jsonl".to_string(),
+            workspace_root: ".".to_string(),
+            forbidden_tool_paths: vec![".git".to_string(), "target".to_string()],
+            principal_allowlist: Vec::new(),
+            deny_by_default_principal_allowlist: false,
+            allow_public_bind: false,
         };
 
         let (audio_tx, _audio_rx) = mpsc::channel(4);
@@ -1590,11 +1655,19 @@ mod tests {
 
     #[test]
     fn test_protected_tools_catalog_is_non_empty() {
-        let adapter = test_adapter("supervised", vec!["echo_text", "add_numbers", "utc_time"]);
+        let adapter = test_adapter(
+            "supervised",
+            vec![
+                "echo_text",
+                "add_numbers",
+                "utc_time",
+                "read_workspace_file",
+            ],
+        );
         let tools = adapter
             .build_protected_tools("principal-1", "supervised")
             .unwrap();
-        assert_eq!(tools.len(), 3);
+        assert_eq!(tools.len(), 4);
     }
 
     #[tokio::test]
@@ -1860,7 +1933,30 @@ mod tests {
         );
         assert_eq!(diagnostics.reconnect_max_attempts, 5);
         assert_eq!(diagnostics.compaction_max_events_threshold, 500);
+        assert_eq!(diagnostics.security_workspace_root, ".");
+        assert_eq!(
+            diagnostics.security_forbidden_tool_paths,
+            vec![".git".to_string(), "target".to_string()]
+        );
+        assert!(!diagnostics.security_deny_by_default_principal_allowlist);
+        assert_eq!(diagnostics.security_principal_allowlist_size, 0);
+        assert!(!diagnostics.security_allow_public_bind);
         assert_eq!(diagnostics.active_sessions, 0);
+    }
+
+    #[tokio::test]
+    async fn test_create_session_denied_when_principal_not_allowlisted() {
+        let mut adapter = test_adapter("full", vec![]);
+        adapter.tool_security.deny_by_default_principal_allowlist = true;
+        adapter.tool_security.principal_allowlist = vec!["principal-allowed".to_string()];
+
+        let err = adapter
+            .create_session("principal-denied", "sess-denied", None)
+            .await
+            .unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("not in security.principal_allowlist"));
     }
 
     #[test]
@@ -1975,5 +2071,30 @@ mod tests {
 
         let err = validate_runtime_and_provider(&cfg, true).unwrap_err();
         assert!(err.to_string().contains("must start with ws:// or wss://"));
+    }
+
+    #[test]
+    fn test_validate_runtime_and_provider_rejects_public_bind_without_override() {
+        let mut cfg = LiveClawConfig::default();
+        cfg.gateway.host = "0.0.0.0".to_string();
+        cfg.security.allow_public_bind = false;
+
+        let err = validate_runtime_and_provider(&cfg, false).unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("Refusing public bind on host '0.0.0.0'"));
+    }
+
+    #[test]
+    fn test_validate_runtime_and_provider_allows_public_bind_with_override_warning() {
+        let mut cfg = LiveClawConfig::default();
+        cfg.gateway.host = "0.0.0.0".to_string();
+        cfg.security.allow_public_bind = true;
+
+        let (_provider, report) = validate_runtime_and_provider(&cfg, false).unwrap();
+        assert!(report
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("public bind")));
     }
 }

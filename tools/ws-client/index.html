@@ -67,7 +67,7 @@
 
       .status-bar {
         display: grid;
-        grid-template-columns: 1fr auto auto auto auto;
+        grid-template-columns: 1fr auto auto auto auto auto;
         gap: 10px;
         align-items: center;
         padding: 14px;
@@ -292,6 +292,7 @@
         <span class="badge" id="sessionBadge">session: none</span>
         <span class="badge" id="tokenBadge">token: none</span>
         <span class="badge" id="diagBadge">diag: n/a</span>
+        <span class="badge" id="secBadge">sec: n/a</span>
         <button id="clearLog" class="muted">Clear Log</button>
       </section>
 
@@ -441,6 +442,7 @@
           sessionBadge: $("sessionBadge"),
           tokenBadge: $("tokenBadge"),
           diagBadge: $("diagBadge"),
+          secBadge: $("secBadge"),
           wsUrl: $("wsUrl"),
           connectBtn: $("connectBtn"),
           disconnectBtn: $("disconnectBtn"),
@@ -640,7 +642,18 @@
               const d = parsed.data;
               const compactions = Number(d.compactions_applied_total || 0);
               const reconnects = Number(d.reconnect_attempts_total || 0);
+              const allowlistSize = Number(d.security_principal_allowlist_size || 0);
+              const denyDefault = Boolean(d.security_deny_by_default_principal_allowlist);
+              const publicBind = Boolean(d.security_allow_public_bind);
               els.diagBadge.textContent = `diag: rc=${reconnects} cp=${compactions}`;
+              els.secBadge.textContent =
+                `sec: deny=${denyDefault ? "on" : "off"} allow=${allowlistSize} bind=${publicBind ? "public" : "local"}`;
+              if (d.security_workspace_root) {
+                log(
+                  "system",
+                  `Diagnostics security: workspace=${d.security_workspace_root} forbidden=${(d.security_forbidden_tool_paths || []).join(",")}`
+                );
+              }
               syncTemplateOptions(d.supported_client_messages);
             }
           };

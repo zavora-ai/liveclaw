@@ -1,6 +1,6 @@
 # LiveClaw Parity Tracking Board
 
-Date: 2026-02-19
+Date: 2026-02-20
 Status scale: `NOT_STARTED`, `IN_PROGRESS`, `AT_RISK`, `BLOCKED`, `DONE`
 
 ## Milestone Board
@@ -99,6 +99,16 @@ Status scale: `NOT_STARTED`, `IN_PROGRESS`, `AT_RISK`, `BLOCKED`, `DONE`
 | Expose live diagnostics via gateway for WS client validation | DONE | `liveclaw-gateway/src/protocol.rs` `GetDiagnostics` / `Diagnostics`; `liveclaw-gateway/src/server.rs` handler and tests |
 | Keep browser client aligned with protocol via server-advertised message capabilities | DONE | `RuntimeDiagnostics.supported_client_messages` consumed by `tools/ws-client/index.html` template sync |
 | Add Sprint 7 checks in M5 demo script | DONE | `scripts/demo/m5_runtime_security.sh` |
+
+## Sprint 8 Checklist (In Progress)
+
+| Item | Status | Evidence |
+|---|---|---|
+| Add workspace-scoped file-read tool for supervised/full sessions | DONE | `liveclaw-app/src/tools.rs` `read_workspace_file` + policy/path resolution tests |
+| Enforce deny-by-default principal allowlist mode at session creation | DONE | `liveclaw-app/src/main.rs` `RunnerAdapter::create_session` allowlist gate + `test_create_session_denied_when_principal_not_allowlisted` |
+| Block public gateway bind unless explicit security override is set | DONE | `liveclaw-app/src/main.rs` `validate_runtime_and_provider` public bind checks + override warning test |
+| Expose security posture in diagnostics and keep browser client aligned | DONE | `liveclaw-gateway/src/protocol.rs` security diagnostics fields + `tools/ws-client/index.html` security badge updates |
+| Extend M5 parity script with Sprint 8 security checks | DONE | `scripts/demo/m5_runtime_security.sh` includes public bind and allowlist tests |
 
 ## Notes
 

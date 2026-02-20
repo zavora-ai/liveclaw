@@ -60,7 +60,7 @@ pub enum GatewayResponse {
         is_final: bool,
     },
     Diagnostics {
-        data: RuntimeDiagnostics,
+        data: Box<RuntimeDiagnostics>,
     },
     Error {
         code: String,
@@ -100,6 +100,11 @@ pub struct RuntimeDiagnostics {
     pub compaction_enabled: bool,
     pub compaction_max_events_threshold: usize,
     pub compactions_applied_total: u64,
+    pub security_workspace_root: String,
+    pub security_forbidden_tool_paths: Vec<String>,
+    pub security_deny_by_default_principal_allowlist: bool,
+    pub security_principal_allowlist_size: usize,
+    pub security_allow_public_bind: bool,
     pub active_sessions: usize,
 }
 
@@ -322,7 +327,7 @@ mod tests {
     #[test]
     fn test_gateway_response_diagnostics() {
         let resp = GatewayResponse::Diagnostics {
-            data: RuntimeDiagnostics {
+            data: Box::new(RuntimeDiagnostics {
                 protocol_version: PROTOCOL_VERSION.to_string(),
                 supported_client_messages: supported_client_message_types(),
                 supported_server_responses: supported_server_response_types(),
@@ -339,8 +344,13 @@ mod tests {
                 compaction_enabled: true,
                 compaction_max_events_threshold: 500,
                 compactions_applied_total: 3,
+                security_workspace_root: ".".into(),
+                security_forbidden_tool_paths: vec![".git".into(), "target".into()],
+                security_deny_by_default_principal_allowlist: false,
+                security_principal_allowlist_size: 0,
+                security_allow_public_bind: false,
                 active_sessions: 1,
-            },
+            }),
         };
         let json = serde_json::to_string(&resp).unwrap();
         let parsed: GatewayResponse = serde_json::from_str(&json).unwrap();

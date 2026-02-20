@@ -610,7 +610,9 @@ async fn handle_session_audio(
 /// metrics from the active runner.
 async fn handle_get_diagnostics(state: &AppState) -> GatewayResponse {
     match state.runner.diagnostics().await {
-        Ok(data) => GatewayResponse::Diagnostics { data },
+        Ok(data) => GatewayResponse::Diagnostics {
+            data: Box::new(data),
+        },
         Err(e) => GatewayResponse::Error {
             code: "diagnostics_failed".to_string(),
             message: format!("Failed to fetch diagnostics: {}", e),
@@ -884,6 +886,11 @@ mod tests {
                     compaction_enabled: true,
                     compaction_max_events_threshold: 500,
                     compactions_applied_total: 3,
+                    security_workspace_root: ".".to_string(),
+                    security_forbidden_tool_paths: vec![".git".to_string(), "target".to_string()],
+                    security_deny_by_default_principal_allowlist: false,
+                    security_principal_allowlist_size: 0,
+                    security_allow_public_bind: false,
                     active_sessions: 1,
                 }),
             }
@@ -967,6 +974,11 @@ mod tests {
                 assert!(data
                     .supported_server_responses
                     .contains(&"Diagnostics".to_string()));
+                assert_eq!(data.security_workspace_root, ".");
+                assert_eq!(
+                    data.security_forbidden_tool_paths,
+                    vec![".git".to_string(), "target".to_string()]
+                );
             }
             other => panic!("Expected Diagnostics response, got {:?}", other),
         }

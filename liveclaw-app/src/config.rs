@@ -14,6 +14,10 @@ fn default_true() -> bool {
     true
 }
 
+fn default_false() -> bool {
+    false
+}
+
 fn default_role() -> String {
     "supervised".to_string()
 }
@@ -24,6 +28,14 @@ fn default_rate_limit() -> u32 {
 
 fn default_audit_path() -> String {
     "audit.jsonl".to_string()
+}
+
+fn default_workspace_root() -> String {
+    ".".to_string()
+}
+
+fn default_forbidden_tool_paths() -> Vec<String> {
+    vec![".git".to_string(), "target".to_string()]
 }
 
 fn default_memory_backend() -> String {
@@ -130,6 +142,16 @@ pub struct SecurityConfig {
     pub rate_limit_per_session: u32,
     #[serde(default = "default_audit_path")]
     pub audit_log_path: String,
+    #[serde(default = "default_workspace_root")]
+    pub workspace_root: String,
+    #[serde(default = "default_forbidden_tool_paths")]
+    pub forbidden_tool_paths: Vec<String>,
+    #[serde(default)]
+    pub principal_allowlist: Vec<String>,
+    #[serde(default = "default_false")]
+    pub deny_by_default_principal_allowlist: bool,
+    #[serde(default = "default_false")]
+    pub allow_public_bind: bool,
 }
 
 impl Default for SecurityConfig {
@@ -139,6 +161,11 @@ impl Default for SecurityConfig {
             tool_allowlist: Vec::new(),
             rate_limit_per_session: default_rate_limit(),
             audit_log_path: default_audit_path(),
+            workspace_root: default_workspace_root(),
+            forbidden_tool_paths: default_forbidden_tool_paths(),
+            principal_allowlist: Vec::new(),
+            deny_by_default_principal_allowlist: default_false(),
+            allow_public_bind: default_false(),
         }
     }
 }
@@ -408,6 +435,11 @@ mod tests {
         assert!(cfg.security.tool_allowlist.is_empty());
         assert_eq!(cfg.security.rate_limit_per_session, 100);
         assert_eq!(cfg.security.audit_log_path, "audit.jsonl");
+        assert_eq!(cfg.security.workspace_root, ".");
+        assert_eq!(cfg.security.forbidden_tool_paths, vec![".git", "target"]);
+        assert!(cfg.security.principal_allowlist.is_empty());
+        assert!(!cfg.security.deny_by_default_principal_allowlist);
+        assert!(!cfg.security.allow_public_bind);
 
         // Plugin defaults
         assert!(cfg.plugin.enable_pii_redaction);
@@ -473,6 +505,11 @@ mod tests {
                 tool_allowlist: vec!["read_file".to_string(), "search".to_string()],
                 rate_limit_per_session: 50,
                 audit_log_path: "/tmp/audit.jsonl".to_string(),
+                workspace_root: "/workspace/liveclaw".to_string(),
+                forbidden_tool_paths: vec![".git".to_string(), "target".to_string()],
+                principal_allowlist: vec!["user-1".to_string()],
+                deny_by_default_principal_allowlist: true,
+                allow_public_bind: true,
             },
             plugin: PluginConfig {
                 enable_pii_redaction: false,
@@ -607,6 +644,10 @@ foo = "bar"
         assert_eq!(cfg.voice.model, "gpt-4o-realtime-preview");
         assert_eq!(cfg.security.default_role, "full"); // dev config uses full
         assert_eq!(cfg.security.rate_limit_per_session, 1000);
+        assert_eq!(cfg.security.workspace_root, ".");
+        assert_eq!(cfg.security.forbidden_tool_paths, vec![".git", "target"]);
+        assert!(!cfg.security.deny_by_default_principal_allowlist);
+        assert!(!cfg.security.allow_public_bind);
         assert_eq!(cfg.memory.backend, "in_memory");
         assert_eq!(cfg.memory.recall_limit, 10);
         assert!(!cfg.graph.enable_graph);

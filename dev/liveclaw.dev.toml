@@ -19,6 +19,11 @@ default_role = "full"  # permissive for local dev
 tool_allowlist = []
 rate_limit_per_session = 1000
 audit_log_path = "audit.jsonl"
+workspace_root = "."
+forbidden_tool_paths = [".git", "target"]
+principal_allowlist = []
+deny_by_default_principal_allowlist = false
+allow_public_bind = false
 
 [plugin]
 enable_pii_redaction = true
