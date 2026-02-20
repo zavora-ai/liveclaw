@@ -12,7 +12,7 @@ Status scale: `NOT_STARTED`, `IN_PROGRESS`, `AT_RISK`, `BLOCKED`, `DONE`
 | M2 Secure Multi-Session | IN_PROGRESS | Core Team | 2026-03-27 | `scripts/demo/m2_secure_sessions.sh` | Token auth path implemented; per-session ownership enforced |
 | M3 Tool and Graph Execution | IN_PROGRESS | Core Team | 2026-04-24 | `scripts/demo/m3_tools_graph.sh` | Non-empty toolset; RBAC enforced; graph tools node executes |
 | M4 Memory, Artifacts, Resilience | IN_PROGRESS | Core Team | 2026-05-22 | `scripts/demo/m4_memory_artifacts.sh` | Persistent recall across restarts; artifact persistence; reconnect behavior validated |
-| M5 ZeroClaw Track Parity | NOT_STARTED | Core Team | 2026-06-19 | `scripts/demo/m5_runtime_security.sh` | Runtime modes validated; provider flexibility; security hardening gates pass |
+| M5 ZeroClaw Track Parity | IN_PROGRESS | Core Team | 2026-06-19 | `scripts/demo/m5_runtime_security.sh` | Runtime modes validated; provider flexibility; security hardening gates pass |
 | M6 OpenClaw Track Parity + RC | NOT_STARTED | Core Team | 2026-07-31 | `scripts/demo/m6_release_flow.sh` | Priority channels work; ops surfaces validated; release candidate checklist passes |
 
 ## Sprint 0 Checklist
@@ -87,6 +87,16 @@ Status scale: `NOT_STARTED`, `IN_PROGRESS`, `AT_RISK`, `BLOCKED`, `DONE`
 | Add reliability tests for reconnect recovery and retry exhaustion | DONE | `tests::test_runtime_loop_recovers_from_interrupted_provider_session`, `tests::test_runtime_loop_stops_when_reconnect_budget_exhausted` |
 | Add Sprint 6 checks to M4 demo script | DONE | `scripts/demo/m4_memory_artifacts.sh` now runs compaction + reconnect tests |
 | Keep lifecycle and compaction execution in `adk-runner` orchestration path | IN_PROGRESS | `liveclaw-app/src/runner.rs` already exposes `EventsCompactionConfig`; active gateway path still needs full adoption |
+
+## Sprint 7 Checklist (In Progress)
+
+| Item | Status | Evidence |
+|---|---|---|
+| Add explicit runtime adapter modes (`native`, `docker`) with fail-fast parsing | DONE | `liveclaw-app/src/config.rs` `RuntimeKind` enum and `config::tests::test_runtime_kind_rejects_unknown_value` |
+| Add provider profile matrix with OpenAI-compatible endpoint support | DONE | `liveclaw-app/src/config.rs` `ProvidersConfig`; `liveclaw-app/src/main.rs` `resolve_provider_selection` with `OpenAIRealtimeModel::with_base_url` |
+| Add runtime/provider configuration validation and doctor diagnostics | DONE | `liveclaw-app/src/main.rs` `validate_runtime_and_provider` + `--doctor` command path |
+| Add provider env matrix helper for operators | DONE | `scripts/provider_env_matrix.sh` |
+| Add Sprint 7 checks in M5 demo script | DONE | `scripts/demo/m5_runtime_security.sh` |
 
 ## Notes
 

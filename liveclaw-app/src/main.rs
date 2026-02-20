@@ -27,8 +27,8 @@ use adk_realtime::{RealtimeConfig, RealtimeRunner};
 use adk_telemetry::{init_telemetry, init_with_otlp};
 
 use liveclaw_app::config::{
-    CompactionConfig, LiveClawConfig, ResilienceConfig, SecurityConfig as AppSecurityConfig,
-    VoiceConfig,
+    CompactionConfig, LiveClawConfig, ProviderProfileConfig, ProvidersConfig, ResilienceConfig,
+    RuntimeKind, SecurityConfig as AppSecurityConfig, VoiceConfig,
 };
 use liveclaw_app::storage::{build_memory_service, FileArtifactService};
 use liveclaw_app::tools::build_baseline_tools;
@@ -143,6 +143,22 @@ impl From<&CompactionConfig> for MemoryCompactionPolicy {
             max_events_threshold: value.max_events_threshold,
         }
     }
+}
+
+#[derive(Debug, Clone)]
+enum ProviderKind {
+    OpenAI,
+    OpenAICompatible,
+}
+
+#[derive(Debug, Clone)]
+struct ProviderSelection {
+    kind: ProviderKind,
+    profile_name: String,
+    provider_label: String,
+    api_key: String,
+    default_model: String,
+    base_url: Option<String>,
 }
 
 #[derive(Clone)]
@@ -617,9 +633,8 @@ impl EventHandler for GatewayEventForwarder {
 
 /// Adapter implementing gateway session operations on top of adk-realtime.
 struct RunnerAdapter {
-    provider: String,
-    api_key: String,
-    default_model: String,
+    runtime_kind: RuntimeKind,
+    provider: ProviderSelection,
     default_voice: Option<String>,
     default_instructions: Option<String>,
     tool_security: ToolSecurityConfig,
@@ -635,6 +650,8 @@ struct RunnerAdapter {
 }
 
 struct RunnerAdapterInit {
+    runtime_kind: RuntimeKind,
+    provider: ProviderSelection,
     memory_store: Arc<dyn MemoryService>,
     artifact_service: Option<Arc<dyn ArtifactService>>,
     reconnect_policy: ReconnectPolicy,
@@ -650,9 +667,8 @@ impl RunnerAdapter {
         init: RunnerAdapterInit,
     ) -> Self {
         Self {
-            provider: voice_cfg.provider.clone(),
-            api_key: effective_api_key(&voice_cfg.api_key),
-            default_model: voice_cfg.model.clone(),
+            runtime_kind: init.runtime_kind,
+            provider: init.provider,
             default_voice: voice_cfg.voice.clone(),
             default_instructions: voice_cfg.instructions.clone(),
             tool_security: ToolSecurityConfig::from(security_cfg),
@@ -673,7 +689,7 @@ impl RunnerAdapter {
         cfg: Option<&SessionConfig>,
     ) -> (String, String, Option<String>) {
         let model = non_empty(cfg.and_then(|c| c.model.clone()))
-            .or_else(|| non_empty(Some(self.default_model.clone())))
+            .or_else(|| non_empty(Some(self.provider.default_model.clone())))
             .unwrap_or_else(|| "gpt-4o-realtime-preview-2024-12-17".to_string());
 
         let voice = non_empty(cfg.and_then(|c| c.voice.clone()))
@@ -740,14 +756,7 @@ impl RunnerHandle for RunnerAdapter {
         session_id: &str,
         config: Option<SessionConfig>,
     ) -> Result<String> {
-        if !self.provider.eq_ignore_ascii_case("openai") {
-            bail!(
-                "Unsupported voice provider '{}'. Current runtime supports only 'openai'.",
-                self.provider
-            );
-        }
-
-        if self.api_key.trim().is_empty() {
+        if self.provider.api_key.trim().is_empty() {
             bail!("Missing API key. Set [voice].api_key or LIVECLAW_API_KEY / OPENAI_API_KEY.");
         }
 
@@ -765,13 +774,32 @@ impl RunnerHandle for RunnerAdapter {
         let protected_tools = self.build_protected_tools(user_id, &role)?;
         info!(
             session_id = session_id,
+            runtime_kind = ?self.runtime_kind,
+            provider = %self.provider.provider_label,
+            provider_profile = %self.provider.profile_name,
             role = %role,
             tool_count = protected_tools.len(),
             "Configured baseline toolset for realtime session"
         );
 
         // Build adk-realtime runner for this session.
-        let model = OpenAIRealtimeModel::new(self.api_key.clone(), model_id.clone());
+        let mut model = OpenAIRealtimeModel::new(self.provider.api_key.clone(), model_id.clone());
+        match self.provider.kind {
+            ProviderKind::OpenAI => {
+                if let Some(base_url) = &self.provider.base_url {
+                    model = model.with_base_url(base_url.clone());
+                }
+            }
+            ProviderKind::OpenAICompatible => {
+                let base_url = self.provider.base_url.clone().ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "Provider profile '{}' requires a non-empty WebSocket base_url",
+                        self.provider.profile_name
+                    )
+                })?;
+                model = model.with_base_url(base_url);
+            }
+        }
         let mut realtime_config = RealtimeConfig::default()
             .with_model(model_id)
             .with_text_and_audio()
@@ -955,6 +983,219 @@ fn effective_api_key(configured: &str) -> String {
         .unwrap_or_default()
 }
 
+enum AppCommand {
+    Run { config_path: String },
+    Doctor { config_path: String },
+}
+
+#[derive(Debug, Default)]
+struct DoctorReport {
+    notes: Vec<String>,
+    warnings: Vec<String>,
+}
+
+fn parse_command() -> AppCommand {
+    let mut args = std::env::args().skip(1);
+    match args.next() {
+        Some(flag) if flag == "--doctor" => AppCommand::Doctor {
+            config_path: args.next().unwrap_or_else(|| "liveclaw.toml".to_string()),
+        },
+        Some(config_path) => AppCommand::Run { config_path },
+        None => AppCommand::Run {
+            config_path: "liveclaw.toml".to_string(),
+        },
+    }
+}
+
+fn provider_kind_label(kind: &ProviderKind) -> &'static str {
+    match kind {
+        ProviderKind::OpenAI => "openai",
+        ProviderKind::OpenAICompatible => "openai_compatible",
+    }
+}
+
+fn validate_ws_base_url(base_url: &str, profile_name: &str) -> Result<()> {
+    let normalized = base_url.trim();
+    if !(normalized.starts_with("ws://") || normalized.starts_with("wss://")) {
+        bail!(
+            "Provider profile '{}' base_url must start with ws:// or wss:// (got '{}')",
+            profile_name,
+            base_url
+        );
+    }
+    Ok(())
+}
+
+fn resolve_profile_model(profile: &ProviderProfileConfig, voice: &VoiceConfig) -> String {
+    non_empty(Some(profile.model.clone()))
+        .or_else(|| non_empty(Some(voice.model.clone())))
+        .unwrap_or_else(|| "gpt-4o-realtime-preview-2024-12-17".to_string())
+}
+
+fn resolve_profile_api_key(profile: &ProviderProfileConfig, voice: &VoiceConfig) -> String {
+    if let Some(key) = non_empty(Some(profile.api_key.clone())) {
+        return key;
+    }
+    effective_api_key(&voice.api_key)
+}
+
+fn resolve_profile_base_url(
+    profile: &ProviderProfileConfig,
+    voice: &VoiceConfig,
+) -> Option<String> {
+    non_empty(profile.base_url.clone()).or_else(|| non_empty(voice.base_url.clone()))
+}
+
+fn resolve_provider_selection(
+    voice: &VoiceConfig,
+    providers: &ProvidersConfig,
+) -> Result<ProviderSelection> {
+    let profile = non_empty(Some(providers.active_profile.clone()))
+        .unwrap_or_else(|| "legacy".to_string())
+        .to_lowercase();
+
+    match profile.as_str() {
+        "legacy" => {
+            let provider_value = non_empty(Some(voice.provider.clone()))
+                .unwrap_or_else(|| "openai".to_string())
+                .to_lowercase();
+            let kind = match provider_value.as_str() {
+                "openai" => ProviderKind::OpenAI,
+                "openai_compatible" | "openai-compatible" => ProviderKind::OpenAICompatible,
+                other => {
+                    bail!(
+                        "Unsupported voice provider '{}' for legacy profile. Use openai or openai_compatible.",
+                        other
+                    )
+                }
+            };
+            Ok(ProviderSelection {
+                kind,
+                profile_name: "legacy".to_string(),
+                provider_label: provider_value,
+                api_key: effective_api_key(&voice.api_key),
+                default_model: non_empty(Some(voice.model.clone()))
+                    .unwrap_or_else(|| "gpt-4o-realtime-preview-2024-12-17".to_string()),
+                base_url: non_empty(voice.base_url.clone()),
+            })
+        }
+        "openai" => Ok(ProviderSelection {
+            kind: ProviderKind::OpenAI,
+            profile_name: "openai".to_string(),
+            provider_label: "openai".to_string(),
+            api_key: resolve_profile_api_key(&providers.openai, voice),
+            default_model: resolve_profile_model(&providers.openai, voice),
+            base_url: resolve_profile_base_url(&providers.openai, voice),
+        }),
+        "openai_compatible" => Ok(ProviderSelection {
+            kind: ProviderKind::OpenAICompatible,
+            profile_name: "openai_compatible".to_string(),
+            provider_label: "openai_compatible".to_string(),
+            api_key: resolve_profile_api_key(&providers.openai_compatible, voice),
+            default_model: resolve_profile_model(&providers.openai_compatible, voice),
+            base_url: resolve_profile_base_url(&providers.openai_compatible, voice),
+        }),
+        other => bail!(
+            "Unsupported providers.active_profile '{}'. Use legacy, openai, or openai_compatible.",
+            other
+        ),
+    }
+}
+
+fn validate_runtime_and_provider(
+    config: &LiveClawConfig,
+    require_api_key: bool,
+) -> Result<(ProviderSelection, DoctorReport)> {
+    let provider = resolve_provider_selection(&config.voice, &config.providers)?;
+    let mut report = DoctorReport::default();
+
+    report.notes.push(format!(
+        "runtime.kind={}",
+        match config.runtime.kind {
+            RuntimeKind::Native => "native",
+            RuntimeKind::Docker => "docker",
+        }
+    ));
+    report.notes.push(format!(
+        "provider.profile={} provider.kind={}",
+        provider.profile_name,
+        provider_kind_label(&provider.kind)
+    ));
+    report
+        .notes
+        .push(format!("provider.model={}", provider.default_model));
+
+    if provider.api_key.trim().is_empty() {
+        if require_api_key {
+            bail!(
+                "No API key resolved for provider profile '{}'. Set profile api_key, [voice].api_key, LIVECLAW_API_KEY, or OPENAI_API_KEY.",
+                provider.profile_name
+            );
+        }
+        report.warnings.push(format!(
+            "No API key resolved for provider profile '{}' (doctor mode allows this).",
+            provider.profile_name
+        ));
+    }
+
+    if provider.default_model.trim().is_empty() {
+        bail!(
+            "No model resolved for provider profile '{}'. Set profile model or [voice].model.",
+            provider.profile_name
+        );
+    }
+
+    if let Some(base_url) = &provider.base_url {
+        validate_ws_base_url(base_url, &provider.profile_name)?;
+    }
+
+    if matches!(provider.kind, ProviderKind::OpenAICompatible) && provider.base_url.is_none() {
+        bail!(
+            "Provider profile '{}' requires base_url for OpenAI-compatible endpoints.",
+            provider.profile_name
+        );
+    }
+
+    if matches!(config.runtime.kind, RuntimeKind::Docker) {
+        if config.runtime.docker_image.trim().is_empty() {
+            bail!("runtime.docker_image must be set when runtime.kind is docker");
+        }
+        report.warnings.push(
+            "runtime.kind=docker currently uses embedded runtime compatibility mode (container bridge is planned in a later sprint)".to_string(),
+        );
+        report.notes.push(format!(
+            "runtime.docker_image={}",
+            config.runtime.docker_image
+        ));
+    }
+
+    Ok((provider, report))
+}
+
+fn print_doctor_report(config_path: &str, provider: &ProviderSelection, report: &DoctorReport) {
+    println!("LiveClaw doctor report for '{}'", config_path);
+    println!(
+        "provider: profile={} kind={} model={} base_url={}",
+        provider.profile_name,
+        provider_kind_label(&provider.kind),
+        provider.default_model,
+        provider
+            .base_url
+            .clone()
+            .unwrap_or_else(|| "<default>".to_string())
+    );
+    for note in &report.notes {
+        println!("note: {}", note);
+    }
+    if report.warnings.is_empty() {
+        println!("warnings: none");
+    } else {
+        for warning in &report.warnings {
+            println!("warning: {}", warning);
+        }
+    }
+}
+
 fn base64_encode(input: &[u8]) -> String {
     const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
@@ -987,12 +1228,19 @@ fn base64_encode(input: &[u8]) -> String {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // Parse config path from CLI args (first arg) or default to "liveclaw.toml"
-    let config_path = std::env::args()
-        .nth(1)
-        .unwrap_or_else(|| "liveclaw.toml".to_string());
+    let command = parse_command();
+    let config_path = match &command {
+        AppCommand::Run { config_path } | AppCommand::Doctor { config_path } => config_path,
+    };
 
-    let config = LiveClawConfig::load(&config_path)?;
+    let config = LiveClawConfig::load(config_path)?;
+    let require_api_key = matches!(command, AppCommand::Run { .. });
+    let (provider, doctor_report) = validate_runtime_and_provider(&config, require_api_key)?;
+
+    if matches!(command, AppCommand::Doctor { .. }) {
+        print_doctor_report(config_path, &provider, &doctor_report);
+        return Ok(());
+    }
 
     // Initialize telemetry
     if config.telemetry.otlp_enabled {
@@ -1001,6 +1249,12 @@ async fn main() -> Result<()> {
         init_telemetry("liveclaw").ok();
     }
     info!("LiveClaw starting with config from '{}'", config_path);
+    for note in &doctor_report.notes {
+        info!(diagnostic = %note, "Configuration diagnostic");
+    }
+    for warning_note in &doctor_report.warnings {
+        warn!(diagnostic = %warning_note, "Configuration warning");
+    }
 
     // Gateway output channels consumed by background routing tasks.
     let (gw_audio_tx, gw_audio_rx) = mpsc::channel::<SessionAudioOutput>(256);
@@ -1041,6 +1295,8 @@ async fn main() -> Result<()> {
         &config.voice,
         &config.security,
         RunnerAdapterInit {
+            runtime_kind: config.runtime.kind.clone(),
+            provider,
             memory_store,
             artifact_service,
             reconnect_policy: ReconnectPolicy::from(&config.resilience),
@@ -1081,6 +1337,7 @@ mod tests {
             provider: "openai".to_string(),
             api_key: "test-key".to_string(),
             model: "gpt-4o-realtime-preview-2024-12-17".to_string(),
+            base_url: None,
             voice: Some("alloy".to_string()),
             instructions: Some("test".to_string()),
             audio_format: liveclaw_app::config::AudioFormat::Pcm16_24kHz,
@@ -1102,6 +1359,15 @@ mod tests {
             &voice_cfg,
             &security_cfg,
             RunnerAdapterInit {
+                runtime_kind: RuntimeKind::Native,
+                provider: ProviderSelection {
+                    kind: ProviderKind::OpenAI,
+                    profile_name: "legacy".to_string(),
+                    provider_label: "openai".to_string(),
+                    api_key: "test-key".to_string(),
+                    default_model: "gpt-4o-realtime-preview-2024-12-17".to_string(),
+                    base_url: None,
+                },
                 memory_store,
                 artifact_service: None,
                 reconnect_policy: ReconnectPolicy::from(&ResilienceConfig::default()),
@@ -1485,5 +1751,119 @@ mod tests {
 
         assert_eq!(runtime.run_calls.load(Ordering::SeqCst), 1);
         assert_eq!(runtime.connect_calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn test_resolve_provider_selection_legacy_openai() {
+        let voice = VoiceConfig {
+            provider: "openai".to_string(),
+            api_key: "legacy-key".to_string(),
+            model: "gpt-4o-realtime-preview-2024-12-17".to_string(),
+            base_url: None,
+            voice: Some("alloy".to_string()),
+            instructions: Some("test".to_string()),
+            audio_format: liveclaw_app::config::AudioFormat::Pcm16_24kHz,
+        };
+        let providers = ProvidersConfig::default();
+
+        let resolved = resolve_provider_selection(&voice, &providers).unwrap();
+        assert_eq!(resolved.profile_name, "legacy");
+        assert_eq!(resolved.provider_label, "openai");
+        assert_eq!(resolved.default_model, "gpt-4o-realtime-preview-2024-12-17");
+        assert_eq!(resolved.api_key, "legacy-key");
+        assert!(matches!(resolved.kind, ProviderKind::OpenAI));
+    }
+
+    #[test]
+    fn test_resolve_provider_selection_openai_compatible_profile() {
+        let voice = VoiceConfig {
+            provider: "openai".to_string(),
+            api_key: "fallback-key".to_string(),
+            model: "fallback-model".to_string(),
+            base_url: None,
+            voice: Some("alloy".to_string()),
+            instructions: Some("test".to_string()),
+            audio_format: liveclaw_app::config::AudioFormat::Pcm16_24kHz,
+        };
+        let providers = ProvidersConfig {
+            active_profile: "openai_compatible".to_string(),
+            openai: ProviderProfileConfig::default(),
+            openai_compatible: ProviderProfileConfig {
+                enabled: true,
+                api_key: "compat-key".to_string(),
+                model: "gpt-4o-realtime-preview-2024-12-17".to_string(),
+                base_url: Some("wss://realtime.proxy.local/v1/realtime".to_string()),
+            },
+        };
+
+        let resolved = resolve_provider_selection(&voice, &providers).unwrap();
+        assert_eq!(resolved.profile_name, "openai_compatible");
+        assert_eq!(resolved.provider_label, "openai_compatible");
+        assert_eq!(resolved.api_key, "compat-key");
+        assert_eq!(
+            resolved.base_url.as_deref(),
+            Some("wss://realtime.proxy.local/v1/realtime")
+        );
+        assert!(matches!(resolved.kind, ProviderKind::OpenAICompatible));
+    }
+
+    #[test]
+    fn test_validate_runtime_and_provider_rejects_missing_compat_base_url() {
+        let cfg = LiveClawConfig {
+            voice: VoiceConfig {
+                provider: "openai".to_string(),
+                api_key: "legacy-key".to_string(),
+                model: "gpt-4o-realtime-preview-2024-12-17".to_string(),
+                base_url: None,
+                voice: Some("alloy".to_string()),
+                instructions: Some("test".to_string()),
+                audio_format: liveclaw_app::config::AudioFormat::Pcm16_24kHz,
+            },
+            providers: ProvidersConfig {
+                active_profile: "openai_compatible".to_string(),
+                openai: ProviderProfileConfig::default(),
+                openai_compatible: ProviderProfileConfig {
+                    enabled: true,
+                    api_key: "compat-key".to_string(),
+                    model: "gpt-4o-realtime-preview-2024-12-17".to_string(),
+                    base_url: None,
+                },
+            },
+            ..LiveClawConfig::default()
+        };
+
+        let err = validate_runtime_and_provider(&cfg, true).unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("requires base_url for OpenAI-compatible endpoints"));
+    }
+
+    #[test]
+    fn test_validate_runtime_and_provider_rejects_non_ws_base_url() {
+        let cfg = LiveClawConfig {
+            voice: VoiceConfig {
+                provider: "openai".to_string(),
+                api_key: "legacy-key".to_string(),
+                model: "gpt-4o-realtime-preview-2024-12-17".to_string(),
+                base_url: None,
+                voice: Some("alloy".to_string()),
+                instructions: Some("test".to_string()),
+                audio_format: liveclaw_app::config::AudioFormat::Pcm16_24kHz,
+            },
+            providers: ProvidersConfig {
+                active_profile: "openai".to_string(),
+                openai: ProviderProfileConfig {
+                    enabled: true,
+                    api_key: "openai-key".to_string(),
+                    model: "gpt-4o-realtime-preview-2024-12-17".to_string(),
+                    base_url: Some("https://api.openai.com/v1/realtime".to_string()),
+                },
+                openai_compatible: ProviderProfileConfig::default(),
+            },
+            ..LiveClawConfig::default()
+        };
+
+        let err = validate_runtime_and_provider(&cfg, true).unwrap_err();
+        assert!(err.to_string().contains("must start with ws:// or wss://"));
     }
 }

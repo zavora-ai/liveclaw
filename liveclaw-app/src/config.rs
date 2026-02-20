@@ -66,6 +66,14 @@ fn default_reconnect_max_backoff_ms() -> u64 {
     4_000
 }
 
+fn default_runtime_docker_image() -> String {
+    "zavoraai/liveclaw-runtime:latest".to_string()
+}
+
+fn default_provider_profile() -> String {
+    "legacy".to_string()
+}
+
 // ── AudioFormat enum ────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
@@ -105,6 +113,7 @@ pub struct VoiceConfig {
     pub api_key: String,
     #[serde(default)]
     pub model: String,
+    pub base_url: Option<String>,
     pub voice: Option<String>,
     pub instructions: Option<String>,
     #[serde(default)]
@@ -239,6 +248,62 @@ impl Default for PairingConfig {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum RuntimeKind {
+    #[default]
+    Native,
+    Docker,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct RuntimeConfig {
+    #[serde(default)]
+    pub kind: RuntimeKind,
+    #[serde(default = "default_runtime_docker_image")]
+    pub docker_image: String,
+}
+
+impl Default for RuntimeConfig {
+    fn default() -> Self {
+        Self {
+            kind: RuntimeKind::Native,
+            docker_image: default_runtime_docker_image(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct ProviderProfileConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub api_key: String,
+    #[serde(default)]
+    pub model: String,
+    pub base_url: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ProvidersConfig {
+    #[serde(default = "default_provider_profile")]
+    pub active_profile: String,
+    #[serde(default)]
+    pub openai: ProviderProfileConfig,
+    #[serde(default)]
+    pub openai_compatible: ProviderProfileConfig,
+}
+
+impl Default for ProvidersConfig {
+    fn default() -> Self {
+        Self {
+            active_profile: default_provider_profile(),
+            openai: ProviderProfileConfig::default(),
+            openai_compatible: ProviderProfileConfig::default(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ResilienceConfig {
     #[serde(default = "default_true")]
@@ -291,6 +356,10 @@ pub struct LiveClawConfig {
     #[serde(default)]
     pub pairing: PairingConfig,
     #[serde(default)]
+    pub runtime: RuntimeConfig,
+    #[serde(default)]
+    pub providers: ProvidersConfig,
+    #[serde(default)]
     pub resilience: ResilienceConfig,
     #[serde(default)]
     pub telemetry: TelemetryConfig,
@@ -330,6 +399,7 @@ mod tests {
         assert_eq!(cfg.voice.provider, "");
         assert_eq!(cfg.voice.api_key, "");
         assert_eq!(cfg.voice.audio_format, AudioFormat::Pcm16_24kHz);
+        assert_eq!(cfg.voice.base_url, None);
         assert_eq!(cfg.voice.voice, None);
         assert_eq!(cfg.voice.instructions, None);
 
@@ -364,6 +434,13 @@ mod tests {
         assert_eq!(cfg.pairing.max_attempts, 5);
         assert_eq!(cfg.pairing.lockout_duration_secs, 300);
 
+        // Runtime/provider defaults
+        assert_eq!(cfg.runtime.kind, RuntimeKind::Native);
+        assert_eq!(cfg.runtime.docker_image, "zavoraai/liveclaw-runtime:latest");
+        assert_eq!(cfg.providers.active_profile, "legacy");
+        assert!(!cfg.providers.openai.enabled);
+        assert!(!cfg.providers.openai_compatible.enabled);
+
         // Resilience defaults
         assert!(cfg.resilience.enable_reconnect);
         assert_eq!(cfg.resilience.max_reconnect_attempts, 5);
@@ -386,6 +463,7 @@ mod tests {
                 provider: "openai".to_string(),
                 api_key: "sk-test".to_string(),
                 model: "gpt-4o".to_string(),
+                base_url: Some("wss://api.openai.com/v1/realtime".to_string()),
                 voice: Some("nova".to_string()),
                 instructions: Some("Be helpful.".to_string()),
                 audio_format: AudioFormat::Pcm16_16kHz,
@@ -421,6 +499,25 @@ mod tests {
                 max_attempts: 3,
                 lockout_duration_secs: 600,
             },
+            runtime: RuntimeConfig {
+                kind: RuntimeKind::Docker,
+                docker_image: "local/liveclaw-runtime:test".to_string(),
+            },
+            providers: ProvidersConfig {
+                active_profile: "openai_compatible".to_string(),
+                openai: ProviderProfileConfig {
+                    enabled: true,
+                    api_key: "sk-openai".to_string(),
+                    model: "gpt-4o-realtime-preview".to_string(),
+                    base_url: None,
+                },
+                openai_compatible: ProviderProfileConfig {
+                    enabled: true,
+                    api_key: "compat-key".to_string(),
+                    model: "gpt-4o-realtime-preview".to_string(),
+                    base_url: Some("wss://example.com/realtime".to_string()),
+                },
+            },
             resilience: ResilienceConfig {
                 enable_reconnect: false,
                 max_reconnect_attempts: 7,
@@ -453,6 +550,8 @@ port = 9999
         assert_eq!(cfg.memory.recall_limit, 10);
         assert!(!cfg.graph.enable_graph);
         assert_eq!(cfg.pairing.max_attempts, 5);
+        assert_eq!(cfg.runtime.kind, RuntimeKind::Native);
+        assert_eq!(cfg.providers.active_profile, "legacy");
         assert!(cfg.resilience.enable_reconnect);
         assert!(!cfg.telemetry.otlp_enabled);
     }
@@ -516,6 +615,8 @@ foo = "bar"
         assert_eq!(cfg.compaction.max_events_threshold, 500);
         assert!(!cfg.artifact.enable_artifacts);
         assert_eq!(cfg.pairing.max_attempts, 5);
+        assert_eq!(cfg.runtime.kind, RuntimeKind::Native);
+        assert_eq!(cfg.providers.active_profile, "legacy");
         assert!(cfg.resilience.enable_reconnect);
         assert_eq!(cfg.resilience.max_reconnect_attempts, 5);
         assert_eq!(cfg.resilience.initial_backoff_ms, 250);
@@ -549,5 +650,15 @@ foo = "bar"
                 toml::from_str(&toml_str).expect("deserialize audio format");
             assert_eq!(w, deserialized);
         }
+    }
+
+    #[test]
+    fn test_runtime_kind_rejects_unknown_value() {
+        let toml_str = r#"
+[runtime]
+kind = "invalid"
+"#;
+        let result = LiveClawConfig::from_toml(toml_str);
+        assert!(result.is_err());
     }
 }

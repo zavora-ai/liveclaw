@@ -10,6 +10,7 @@ require_pairing = false  # disabled for local dev
 provider = "openai"
 api_key = ""  # set via LIVECLAW_API_KEY env var or fill in here
 model = "gpt-4o-realtime-preview"
+base_url = "wss://api.openai.com/v1/realtime"
 voice = "alloy"
 instructions = "You are a helpful voice assistant for development testing."
 
@@ -43,6 +44,25 @@ storage_path = "./artifacts"
 [pairing]
 max_attempts = 5
 lockout_duration_secs = 300
+
+[runtime]
+kind = "native"  # native | docker
+docker_image = "zavoraai/liveclaw-runtime:latest"
+
+[providers]
+active_profile = "legacy"  # legacy | openai | openai_compatible
+
+[providers.openai]
+enabled = false
+api_key = ""
+model = ""
+base_url = ""
+
+[providers.openai_compatible]
+enabled = false
+api_key = ""
+model = ""
+base_url = ""
 
 [resilience]
 enable_reconnect = true

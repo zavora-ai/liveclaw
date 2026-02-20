@@ -70,10 +70,22 @@ Key sections:
 | `[compaction]` | Transcript compaction toggle and memory threshold |
 | `[artifact]` | Artifact persistence toggle and storage path |
 | `[pairing]` | Max attempts, lockout duration |
+| `[runtime]` | Runtime mode (`native`/`docker`) and runtime image metadata |
+| `[providers]` | Active provider profile and profile-specific endpoint/API settings |
 | `[resilience]` | Provider reconnect policy (attempts and backoff) |
 | `[telemetry]` | OTLP export toggle |
 
 Missing fields use documented defaults. Unknown fields are ignored.
+
+Provider and runtime diagnostics:
+
+```bash
+# Validate runtime/provider config without starting the gateway
+cargo run -p liveclaw-app -- --doctor dev/liveclaw.dev.toml
+
+# Show provider env var availability matrix
+./scripts/provider_env_matrix.sh
+```
 
 ## Development
 
