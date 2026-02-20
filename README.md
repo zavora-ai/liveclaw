@@ -88,6 +88,31 @@ cargo clippy
 cargo fmt --check
 ```
 
+## Browser WS Client
+
+LiveClaw includes a reusable browser WebSocket client for pairing, auth,
+session control, and SessionAudio chunk streaming.
+
+```bash
+cd /Users/jameskaranja/Developer/projects/liveclaw
+./scripts/ws_client.sh
+```
+
+Default URL opened in the browser:
+- `http://127.0.0.1:18080/index.html`
+
+Optional host/port override:
+
+```bash
+./scripts/ws_client.sh 127.0.0.1 19090
+```
+
+Run without auto-opening a browser tab:
+
+```bash
+OPEN_BROWSER=0 ./scripts/ws_client.sh
+```
+
 ## Documentation
 
 - [Design Document](docs/design.md) — architecture, data flows, component interfaces

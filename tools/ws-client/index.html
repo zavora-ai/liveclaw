@@ -1,0 +1,750 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>LiveClaw WS Client</title>
+    <style>
+      :root {
+        --bg: #f2efe8;
+        --panel: #fffdf8;
+        --ink: #1c1f2a;
+        --muted: #5f6677;
+        --line: #d9d2c4;
+        --accent: #007f6f;
+        --accent-soft: #d9f3ef;
+        --warn: #b54b3a;
+        --ok: #2f6f45;
+        --out: #0a4b8f;
+        --in: #264025;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        min-height: 100vh;
+        font-family: "IBM Plex Sans", "Avenir Next", "Helvetica Neue", sans-serif;
+        color: var(--ink);
+        background:
+          radial-gradient(circle at 10% -10%, #d0ebe5 0%, transparent 35%),
+          radial-gradient(circle at 90% 0%, #ffdcb8 0%, transparent 30%),
+          linear-gradient(160deg, #f7f4ed 0%, #ece6d9 100%);
+      }
+
+      .shell {
+        max-width: 1200px;
+        margin: 0 auto;
+        padding: 24px 18px 36px;
+      }
+
+      .hero {
+        display: grid;
+        gap: 6px;
+        margin-bottom: 14px;
+      }
+
+      .title {
+        font-size: clamp(1.4rem, 2.4vw, 2rem);
+        margin: 0;
+        letter-spacing: 0.02em;
+      }
+
+      .subtitle {
+        margin: 0;
+        color: var(--muted);
+        font-size: 0.95rem;
+      }
+
+      .card {
+        border: 1px solid var(--line);
+        background: var(--panel);
+        border-radius: 12px;
+        box-shadow: 0 8px 26px rgba(38, 32, 20, 0.07);
+      }
+
+      .status-bar {
+        display: grid;
+        grid-template-columns: 1fr auto auto auto;
+        gap: 10px;
+        align-items: center;
+        padding: 14px;
+        margin-bottom: 12px;
+      }
+
+      .status-pill {
+        justify-self: start;
+        border-radius: 999px;
+        padding: 6px 12px;
+        font-weight: 600;
+        font-size: 0.85rem;
+        border: 1px solid transparent;
+        background: #eceaf2;
+      }
+
+      .status-pill.connected {
+        color: var(--ok);
+        background: #dff2e6;
+        border-color: #b8ddc7;
+      }
+
+      .status-pill.connecting {
+        color: #7a5b00;
+        background: #fff2cc;
+        border-color: #e3c66f;
+      }
+
+      .status-pill.closed,
+      .status-pill.error {
+        color: var(--warn);
+        background: #f8dfdc;
+        border-color: #e8b9b2;
+      }
+
+      .layout {
+        display: grid;
+        grid-template-columns: repeat(12, minmax(0, 1fr));
+        gap: 12px;
+      }
+
+      .span-6 {
+        grid-column: span 6;
+      }
+
+      .span-12 {
+        grid-column: span 12;
+      }
+
+      h2 {
+        margin: 0 0 12px;
+        font-size: 1rem;
+      }
+
+      .panel {
+        padding: 14px;
+      }
+
+      .field-grid {
+        display: grid;
+        gap: 10px;
+      }
+
+      .field-row {
+        display: grid;
+        gap: 8px;
+        grid-template-columns: 1fr auto;
+      }
+
+      .field-row.compact {
+        grid-template-columns: repeat(2, 1fr);
+      }
+
+      .field-stack {
+        display: grid;
+        gap: 6px;
+      }
+
+      label {
+        font-size: 0.83rem;
+        color: var(--muted);
+      }
+
+      input,
+      select,
+      textarea,
+      button {
+        font: inherit;
+      }
+
+      input,
+      select,
+      textarea {
+        width: 100%;
+        border: 1px solid #cfc7b9;
+        background: #fff;
+        border-radius: 9px;
+        padding: 9px 10px;
+        color: var(--ink);
+      }
+
+      textarea {
+        min-height: 130px;
+        resize: vertical;
+        font-family: "JetBrains Mono", "Menlo", "Consolas", monospace;
+        font-size: 0.88rem;
+      }
+
+      button {
+        border: 1px solid transparent;
+        border-radius: 9px;
+        padding: 8px 12px;
+        cursor: pointer;
+        font-weight: 600;
+      }
+
+      button.primary {
+        background: var(--accent);
+        color: #fff;
+      }
+
+      button.primary:hover {
+        filter: brightness(1.05);
+      }
+
+      button.soft {
+        background: var(--accent-soft);
+        color: #175950;
+      }
+
+      button.muted {
+        background: #ede6db;
+        color: #534f45;
+      }
+
+      button.warn {
+        background: #f6dfdc;
+        color: #7f2d22;
+      }
+
+      button:disabled {
+        cursor: not-allowed;
+        opacity: 0.58;
+      }
+
+      .hint {
+        margin: 4px 0 0;
+        color: var(--muted);
+        font-size: 0.8rem;
+      }
+
+      .log {
+        background: #1b1c23;
+        color: #e9ecf3;
+        border-radius: 10px;
+        padding: 12px;
+        min-height: 260px;
+        max-height: 44vh;
+        overflow: auto;
+        font-family: "JetBrains Mono", "Menlo", "Consolas", monospace;
+        font-size: 0.82rem;
+        line-height: 1.45;
+      }
+
+      .line {
+        margin: 0 0 6px;
+        white-space: pre-wrap;
+        word-break: break-word;
+      }
+
+      .line.system {
+        color: #d4d0f6;
+      }
+
+      .line.out {
+        color: #9fc9ff;
+      }
+
+      .line.in {
+        color: #b2f0c4;
+      }
+
+      .line.error {
+        color: #ffc2ba;
+      }
+
+      .badge {
+        padding: 5px 10px;
+        border: 1px solid #d5cdbf;
+        border-radius: 999px;
+        font-size: 0.8rem;
+        background: #f5f2ea;
+      }
+
+      @media (max-width: 920px) {
+        .status-bar {
+          grid-template-columns: 1fr;
+        }
+
+        .span-6 {
+          grid-column: span 12;
+        }
+
+        .field-row,
+        .field-row.compact {
+          grid-template-columns: 1fr;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <main class="shell">
+      <header class="hero">
+        <h1 class="title">LiveClaw Browser WebSocket Client</h1>
+        <p class="subtitle">
+          Reusable control and audio test console for pairing, session lifecycle, and SessionAudio traffic.
+        </p>
+      </header>
+
+      <section class="card status-bar">
+        <span id="statusPill" class="status-pill closed">closed</span>
+        <span class="badge" id="sessionBadge">session: none</span>
+        <span class="badge" id="tokenBadge">token: none</span>
+        <button id="clearLog" class="muted">Clear Log</button>
+      </section>
+
+      <section class="layout">
+        <article class="card panel span-6">
+          <h2>Connection and Session</h2>
+          <div class="field-grid">
+            <div class="field-row">
+              <div class="field-stack">
+                <label for="wsUrl">WebSocket URL</label>
+                <input id="wsUrl" value="ws://127.0.0.1:8420/ws" />
+              </div>
+              <button id="connectBtn" class="primary">Connect</button>
+            </div>
+            <div class="field-row">
+              <div class="field-stack">
+                <label for="pairCode">Pairing Code</label>
+                <input id="pairCode" placeholder="e.g. 755810" />
+              </div>
+              <button id="pairBtn" class="soft">Send Pair</button>
+            </div>
+            <div class="field-row">
+              <div class="field-stack">
+                <label for="tokenInput">Token</label>
+                <input id="tokenInput" placeholder="auto-filled from PairSuccess" />
+              </div>
+              <button id="authBtn" class="soft">Authenticate</button>
+            </div>
+            <div class="field-row compact">
+              <div class="field-stack">
+                <label for="roleSelect">Role</label>
+                <select id="roleSelect">
+                  <option value="">(default)</option>
+                  <option value="readonly">readonly</option>
+                  <option value="supervised">supervised</option>
+                  <option value="full">full</option>
+                </select>
+              </div>
+              <div class="field-stack">
+                <label for="graphToggle">Enable Graph</label>
+                <select id="graphToggle">
+                  <option value="">(default)</option>
+                  <option value="true">true</option>
+                  <option value="false">false</option>
+                </select>
+              </div>
+            </div>
+            <div class="field-row compact">
+              <div class="field-stack">
+                <label for="modelInput">Model (optional)</label>
+                <input id="modelInput" placeholder="e.g. gpt-4o-realtime-preview" />
+              </div>
+              <div class="field-stack">
+                <label for="voiceInput">Voice (optional)</label>
+                <input id="voiceInput" placeholder="e.g. alloy" />
+              </div>
+            </div>
+            <div class="field-row">
+              <div class="field-stack">
+                <label for="sessionId">Session ID</label>
+                <input id="sessionId" placeholder="auto-filled from SessionCreated" />
+              </div>
+              <button id="createSessionBtn" class="primary">Create Session</button>
+            </div>
+            <div class="field-row">
+              <button id="pingBtn" class="muted">Ping</button>
+              <button id="terminateBtn" class="warn">Terminate Session</button>
+            </div>
+          </div>
+        </article>
+
+        <article class="card panel span-6">
+          <h2>Audio Test</h2>
+          <div class="field-grid">
+            <div class="field-row">
+              <div class="field-stack">
+                <label for="audioB64">Single Chunk Base64 Audio</label>
+                <input id="audioB64" value="AQID" />
+              </div>
+              <button id="sendB64Btn" class="soft">Send Chunk</button>
+            </div>
+            <div class="field-stack">
+              <label for="audioFile">Upload Audio/PCM File</label>
+              <input id="audioFile" type="file" />
+            </div>
+            <div class="field-row compact">
+              <div class="field-stack">
+                <label for="chunkSize">Chunk Bytes</label>
+                <input id="chunkSize" type="number" min="256" step="256" value="9600" />
+              </div>
+              <div class="field-stack">
+                <label for="chunkDelay">Delay ms</label>
+                <input id="chunkDelay" type="number" min="0" step="10" value="120" />
+              </div>
+            </div>
+            <div class="field-row">
+              <button id="sendFileBtn" class="primary">Send File as SessionAudio Chunks</button>
+              <span id="audioProgress" class="badge">idle</span>
+            </div>
+            <p class="hint">
+              Tip: for real provider decoding, pre-convert to PCM16 mono 24kHz before upload.
+            </p>
+          </div>
+        </article>
+
+        <article class="card panel span-12">
+          <h2>Raw JSON Message</h2>
+          <div class="field-grid">
+            <textarea id="rawJson" spellcheck="false">{"type":"Ping"}</textarea>
+            <div class="field-row">
+              <button id="sendRawBtn" class="primary">Send JSON</button>
+              <button id="disconnectBtn" class="muted">Disconnect</button>
+            </div>
+          </div>
+        </article>
+
+        <article class="card panel span-12">
+          <h2>Traffic Log</h2>
+          <div id="log" class="log" aria-live="polite"></div>
+        </article>
+      </section>
+    </main>
+
+    <script>
+      (() => {
+        const $ = (id) => document.getElementById(id);
+
+        const els = {
+          statusPill: $("statusPill"),
+          sessionBadge: $("sessionBadge"),
+          tokenBadge: $("tokenBadge"),
+          wsUrl: $("wsUrl"),
+          connectBtn: $("connectBtn"),
+          disconnectBtn: $("disconnectBtn"),
+          clearLog: $("clearLog"),
+          pairCode: $("pairCode"),
+          pairBtn: $("pairBtn"),
+          tokenInput: $("tokenInput"),
+          authBtn: $("authBtn"),
+          roleSelect: $("roleSelect"),
+          graphToggle: $("graphToggle"),
+          modelInput: $("modelInput"),
+          voiceInput: $("voiceInput"),
+          createSessionBtn: $("createSessionBtn"),
+          sessionId: $("sessionId"),
+          pingBtn: $("pingBtn"),
+          terminateBtn: $("terminateBtn"),
+          audioB64: $("audioB64"),
+          sendB64Btn: $("sendB64Btn"),
+          audioFile: $("audioFile"),
+          chunkSize: $("chunkSize"),
+          chunkDelay: $("chunkDelay"),
+          sendFileBtn: $("sendFileBtn"),
+          audioProgress: $("audioProgress"),
+          rawJson: $("rawJson"),
+          sendRawBtn: $("sendRawBtn"),
+          log: $("log"),
+        };
+
+        const keys = {
+          wsUrl: "liveclaw.ws.url",
+          token: "liveclaw.ws.token",
+          sessionId: "liveclaw.ws.session_id",
+        };
+
+        let ws = null;
+
+        const now = () => new Date().toLocaleTimeString();
+
+        const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+        function log(kind, text) {
+          const line = document.createElement("div");
+          line.className = `line ${kind}`;
+          line.textContent = `[${now()}] ${text}`;
+          els.log.appendChild(line);
+          els.log.scrollTop = els.log.scrollHeight;
+        }
+
+        function setStatus(state, details = "") {
+          els.statusPill.className = `status-pill ${state}`;
+          els.statusPill.textContent = details ? `${state} - ${details}` : state;
+        }
+
+        function updateBadges() {
+          const sid = els.sessionId.value.trim();
+          const tok = els.tokenInput.value.trim();
+          els.sessionBadge.textContent = sid ? `session: ${sid}` : "session: none";
+          els.tokenBadge.textContent = tok ? `token: ${tok.slice(0, 12)}...` : "token: none";
+        }
+
+        function savePrefs() {
+          localStorage.setItem(keys.wsUrl, els.wsUrl.value.trim());
+          localStorage.setItem(keys.token, els.tokenInput.value.trim());
+          localStorage.setItem(keys.sessionId, els.sessionId.value.trim());
+        }
+
+        function loadPrefs() {
+          const url = localStorage.getItem(keys.wsUrl);
+          const token = localStorage.getItem(keys.token);
+          const sid = localStorage.getItem(keys.sessionId);
+          if (url) els.wsUrl.value = url;
+          if (token) els.tokenInput.value = token;
+          if (sid) els.sessionId.value = sid;
+          updateBadges();
+        }
+
+        function requireOpenSocket() {
+          if (!ws || ws.readyState !== WebSocket.OPEN) {
+            log("error", "Socket is not open. Connect first.");
+            return false;
+          }
+          return true;
+        }
+
+        function sendObject(message) {
+          if (!requireOpenSocket()) return;
+          const serialized = JSON.stringify(message);
+          ws.send(serialized);
+          log("out", serialized);
+        }
+
+        function parseJson(text) {
+          try {
+            return JSON.parse(text);
+          } catch (err) {
+            log("error", `Invalid JSON: ${err.message}`);
+            return null;
+          }
+        }
+
+        function connect() {
+          const url = els.wsUrl.value.trim();
+          if (!url) {
+            log("error", "Enter a WebSocket URL first.");
+            return;
+          }
+
+          if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) {
+            ws.close(1000, "Reconnect requested");
+          }
+
+          setStatus("connecting");
+          ws = new WebSocket(url);
+
+          ws.onopen = () => {
+            setStatus("connected");
+            log("system", `Connected to ${url}`);
+            savePrefs();
+          };
+
+          ws.onclose = (event) => {
+            const reason = event.reason || "no reason";
+            setStatus("closed", `${event.code}`);
+            log("system", `Socket closed (${event.code}) - ${reason}`);
+          };
+
+          ws.onerror = () => {
+            setStatus("error");
+            log("error", "WebSocket error.");
+          };
+
+          ws.onmessage = (event) => {
+            const text = String(event.data);
+            log("in", text);
+
+            const parsed = parseJson(text);
+            if (!parsed || typeof parsed !== "object") return;
+
+            if (parsed.type === "PairSuccess" && parsed.token) {
+              els.tokenInput.value = parsed.token;
+              savePrefs();
+              updateBadges();
+            }
+
+            if (parsed.type === "SessionCreated" && parsed.session_id) {
+              els.sessionId.value = parsed.session_id;
+              savePrefs();
+              updateBadges();
+            }
+          };
+        }
+
+        function disconnect() {
+          if (!ws) return;
+          ws.close(1000, "Closed by user");
+        }
+
+        function buildCreateSessionMessage() {
+          const cfg = {};
+          const role = els.roleSelect.value;
+          const model = els.modelInput.value.trim();
+          const voice = els.voiceInput.value.trim();
+          const graph = els.graphToggle.value;
+
+          if (role) cfg.role = role;
+          if (model) cfg.model = model;
+          if (voice) cfg.voice = voice;
+          if (graph === "true") cfg.enable_graph = true;
+          if (graph === "false") cfg.enable_graph = false;
+
+          return {
+            type: "CreateSession",
+            config: Object.keys(cfg).length > 0 ? cfg : null,
+          };
+        }
+
+        function bytesToBase64(bytes) {
+          let binary = "";
+          for (let i = 0; i < bytes.length; i += 1) {
+            binary += String.fromCharCode(bytes[i]);
+          }
+          return btoa(binary);
+        }
+
+        async function sendFileAsAudioChunks() {
+          if (!requireOpenSocket()) return;
+
+          const sid = els.sessionId.value.trim();
+          if (!sid) {
+            log("error", "Session ID required to send audio.");
+            return;
+          }
+
+          const file = els.audioFile.files[0];
+          if (!file) {
+            log("error", "Select a file first.");
+            return;
+          }
+
+          const chunkSize = Number(els.chunkSize.value) || 9600;
+          const delayMs = Number(els.chunkDelay.value) || 0;
+
+          if (chunkSize <= 0) {
+            log("error", "Chunk size must be positive.");
+            return;
+          }
+
+          const bytes = new Uint8Array(await file.arrayBuffer());
+          const totalChunks = Math.max(1, Math.ceil(bytes.length / chunkSize));
+
+          log(
+            "system",
+            `Streaming ${file.name} (${bytes.length} bytes) in ${totalChunks} chunk(s), chunk=${chunkSize}, delay=${delayMs}ms`
+          );
+
+          els.sendFileBtn.disabled = true;
+          try {
+            for (let idx = 0; idx < totalChunks; idx += 1) {
+              const start = idx * chunkSize;
+              const end = Math.min(start + chunkSize, bytes.length);
+              const chunk = bytes.subarray(start, end);
+              const audioB64 = bytesToBase64(chunk);
+              sendObject({
+                type: "SessionAudio",
+                session_id: sid,
+                audio: audioB64,
+              });
+              els.audioProgress.textContent = `${idx + 1}/${totalChunks}`;
+              if (delayMs > 0) await sleep(delayMs);
+            }
+            els.audioProgress.textContent = "done";
+          } finally {
+            els.sendFileBtn.disabled = false;
+          }
+        }
+
+        els.connectBtn.addEventListener("click", connect);
+        els.disconnectBtn.addEventListener("click", disconnect);
+
+        els.pairBtn.addEventListener("click", () => {
+          const code = els.pairCode.value.trim();
+          if (!code) {
+            log("error", "Pairing code is empty.");
+            return;
+          }
+          sendObject({ type: "Pair", code });
+        });
+
+        els.authBtn.addEventListener("click", () => {
+          const token = els.tokenInput.value.trim();
+          if (!token) {
+            log("error", "Token is empty.");
+            return;
+          }
+          sendObject({ type: "Authenticate", token });
+          savePrefs();
+          updateBadges();
+        });
+
+        els.createSessionBtn.addEventListener("click", () => {
+          sendObject(buildCreateSessionMessage());
+        });
+
+        els.pingBtn.addEventListener("click", () => {
+          sendObject({ type: "Ping" });
+        });
+
+        els.terminateBtn.addEventListener("click", () => {
+          const sid = els.sessionId.value.trim();
+          if (!sid) {
+            log("error", "Session ID is empty.");
+            return;
+          }
+          sendObject({ type: "TerminateSession", session_id: sid });
+        });
+
+        els.sendB64Btn.addEventListener("click", () => {
+          const sid = els.sessionId.value.trim();
+          const audio = els.audioB64.value.trim();
+          if (!sid) {
+            log("error", "Session ID is empty.");
+            return;
+          }
+          if (!audio) {
+            log("error", "Base64 audio payload is empty.");
+            return;
+          }
+          sendObject({ type: "SessionAudio", session_id: sid, audio });
+        });
+
+        els.sendFileBtn.addEventListener("click", () => {
+          sendFileAsAudioChunks().catch((err) => {
+            log("error", `Audio stream failed: ${err.message}`);
+          });
+        });
+
+        els.sendRawBtn.addEventListener("click", () => {
+          const obj = parseJson(els.rawJson.value);
+          if (obj) sendObject(obj);
+        });
+
+        els.rawJson.addEventListener("keydown", (event) => {
+          if ((event.ctrlKey || event.metaKey) && event.key === "Enter") {
+            event.preventDefault();
+            els.sendRawBtn.click();
+          }
+        });
+
+        els.clearLog.addEventListener("click", () => {
+          els.log.innerHTML = "";
+        });
+
+        [els.wsUrl, els.tokenInput, els.sessionId].forEach((el) => {
+          el.addEventListener("input", () => {
+            savePrefs();
+            updateBadges();
+          });
+        });
+
+        loadPrefs();
+        setStatus("closed");
+        log("system", "Ready. Connect, Pair/Auth, then CreateSession.");
+      })();
+    </script>
+  </body>
+</html>
