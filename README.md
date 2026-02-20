@@ -114,7 +114,7 @@ cargo fmt --check
 
 LiveClaw includes a reusable browser WebSocket client for pairing, auth,
 session control, and SessionAudio chunk streaming.
-It syncs message templates from `GetDiagnostics` and shows runtime + security badges so protocol changes stay visible in the client per sprint.
+It syncs message templates from `GetDiagnostics` and shows runtime + security + gateway-health badges so protocol changes stay visible in the client per sprint.
 
 ```bash
 cd /Users/jameskaranja/Developer/projects/liveclaw
@@ -151,6 +151,7 @@ Clients connect via WebSocket and exchange JSON messages:
 { "type": "CreateSession", "config": null }
 { "type": "SessionAudio", "session_id": "...", "audio": "<base64>" }
 { "type": "TerminateSession", "session_id": "..." }
+{ "type": "GetGatewayHealth" }
 { "type": "GetDiagnostics" }
 { "type": "Ping" }
 
@@ -159,6 +160,7 @@ Clients connect via WebSocket and exchange JSON messages:
 { "type": "SessionCreated", "session_id": "..." }
 { "type": "AudioOutput", "session_id": "...", "audio": "<base64>" }
 { "type": "TranscriptUpdate", "session_id": "...", "text": "...", "is_final": true }
+{ "type": "GatewayHealth", "data": { "uptime_seconds": 123, "active_sessions": 1, "require_pairing": true } }
 { "type": "Diagnostics", "data": { "...": "runtime/provider/reconnect/compaction snapshot", "protocol_version": "...", "supported_client_messages": ["..."] } }
 { "type": "Pong" }
 ```

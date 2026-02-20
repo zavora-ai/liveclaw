@@ -13,7 +13,7 @@ Status scale: `NOT_STARTED`, `IN_PROGRESS`, `AT_RISK`, `BLOCKED`, `DONE`
 | M3 Tool and Graph Execution | IN_PROGRESS | Core Team | 2026-04-24 | `scripts/demo/m3_tools_graph.sh` | Non-empty toolset; RBAC enforced; graph tools node executes |
 | M4 Memory, Artifacts, Resilience | IN_PROGRESS | Core Team | 2026-05-22 | `scripts/demo/m4_memory_artifacts.sh` | Persistent recall across restarts; artifact persistence; reconnect behavior validated |
 | M5 ZeroClaw Track Parity | IN_PROGRESS | Core Team | 2026-06-19 | `scripts/demo/m5_runtime_security.sh` | Runtime modes validated; provider flexibility; security hardening gates pass |
-| M6 OpenClaw Track Parity + RC | NOT_STARTED | Core Team | 2026-07-31 | `scripts/demo/m6_release_flow.sh` | Priority channels work; ops surfaces validated; release candidate checklist passes |
+| M6 OpenClaw Track Parity + RC | IN_PROGRESS | Core Team | 2026-07-31 | `scripts/demo/m6_release_flow.sh` | Priority channels work; ops surfaces validated; release candidate checklist passes |
 
 ## Sprint 0 Checklist
 
@@ -109,6 +109,14 @@ Status scale: `NOT_STARTED`, `IN_PROGRESS`, `AT_RISK`, `BLOCKED`, `DONE`
 | Block public gateway bind unless explicit security override is set | DONE | `liveclaw-app/src/main.rs` `validate_runtime_and_provider` public bind checks + override warning test |
 | Expose security posture in diagnostics and keep browser client aligned | DONE | `liveclaw-gateway/src/protocol.rs` security diagnostics fields + `tools/ws-client/index.html` security badge updates |
 | Extend M5 parity script with Sprint 8 security checks | DONE | `scripts/demo/m5_runtime_security.sh` includes public bind and allowlist tests |
+
+## Sprint 9 Checklist (In Progress)
+
+| Item | Status | Evidence |
+|---|---|---|
+| Add unauthenticated gateway health WS command for operator checks | DONE | `liveclaw-gateway/src/protocol.rs` `GetGatewayHealth` + `GatewayHealth`; `liveclaw-gateway/src/server.rs` health handler |
+| Keep browser WS client aligned with gateway health surfaces | DONE | `tools/ws-client/index.html` adds Gateway Health action and `gw` badge |
+| Replace M6 placeholder demo with executable ops-surface checks | DONE | `scripts/demo/m6_release_flow.sh` now runs targeted protocol/server tests |
 
 ## Notes
 

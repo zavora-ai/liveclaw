@@ -24,6 +24,7 @@ pub enum GatewayMessage {
         session_id: SessionId,
         audio: String,
     },
+    GetGatewayHealth,
     GetDiagnostics,
     Ping,
 }
@@ -58,6 +59,9 @@ pub enum GatewayResponse {
         session_id: SessionId,
         text: String,
         is_final: bool,
+    },
+    GatewayHealth {
+        data: GatewayHealth,
     },
     Diagnostics {
         data: Box<RuntimeDiagnostics>,
@@ -108,6 +112,16 @@ pub struct RuntimeDiagnostics {
     pub active_sessions: usize,
 }
 
+/// Gateway runtime health snapshot for operator release checks.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct GatewayHealth {
+    pub protocol_version: String,
+    pub uptime_seconds: u64,
+    pub require_pairing: bool,
+    pub active_sessions: usize,
+    pub active_ws_bindings: usize,
+}
+
 /// Return supported client->gateway message type tags.
 pub fn supported_client_message_types() -> Vec<String> {
     vec![
@@ -116,6 +130,7 @@ pub fn supported_client_message_types() -> Vec<String> {
         "CreateSession".to_string(),
         "TerminateSession".to_string(),
         "SessionAudio".to_string(),
+        "GetGatewayHealth".to_string(),
         "GetDiagnostics".to_string(),
         "Ping".to_string(),
     ]
@@ -132,6 +147,7 @@ pub fn supported_server_response_types() -> Vec<String> {
         "AudioAccepted".to_string(),
         "AudioOutput".to_string(),
         "TranscriptUpdate".to_string(),
+        "GatewayHealth".to_string(),
         "Diagnostics".to_string(),
         "Error".to_string(),
         "Pong".to_string(),
@@ -226,6 +242,15 @@ mod tests {
         let parsed: GatewayMessage = serde_json::from_str(&json).unwrap();
         assert_eq!(msg, parsed);
         assert_eq!(json, r#"{"type":"GetDiagnostics"}"#);
+    }
+
+    #[test]
+    fn test_gateway_message_get_gateway_health() {
+        let msg = GatewayMessage::GetGatewayHealth;
+        let json = serde_json::to_string(&msg).unwrap();
+        let parsed: GatewayMessage = serde_json::from_str(&json).unwrap();
+        assert_eq!(msg, parsed);
+        assert_eq!(json, r#"{"type":"GetGatewayHealth"}"#);
     }
 
     // --- GatewayResponse serialization tests ---
@@ -358,11 +383,29 @@ mod tests {
     }
 
     #[test]
+    fn test_gateway_response_gateway_health() {
+        let resp = GatewayResponse::GatewayHealth {
+            data: GatewayHealth {
+                protocol_version: PROTOCOL_VERSION.to_string(),
+                uptime_seconds: 12,
+                require_pairing: true,
+                active_sessions: 2,
+                active_ws_bindings: 1,
+            },
+        };
+        let json = serde_json::to_string(&resp).unwrap();
+        let parsed: GatewayResponse = serde_json::from_str(&json).unwrap();
+        assert_eq!(resp, parsed);
+    }
+
+    #[test]
     fn test_supported_protocol_message_lists_include_diagnostics_path() {
         let client_types = supported_client_message_types();
         let server_types = supported_server_response_types();
         assert!(client_types.contains(&"GetDiagnostics".to_string()));
+        assert!(client_types.contains(&"GetGatewayHealth".to_string()));
         assert!(server_types.contains(&"Diagnostics".to_string()));
+        assert!(server_types.contains(&"GatewayHealth".to_string()));
     }
 
     #[test]

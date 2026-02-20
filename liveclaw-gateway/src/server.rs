@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Instant;
 
 use async_trait::async_trait;
 use axum::extract::ws::{Message, WebSocket};
@@ -14,7 +15,10 @@ use tokio::sync::{mpsc, RwLock};
 use tracing::{error, info, warn};
 
 use crate::pairing::PairingGuard;
-use crate::protocol::{GatewayMessage, GatewayResponse, RuntimeDiagnostics, SessionConfig};
+use crate::protocol::{
+    GatewayHealth, GatewayMessage, GatewayResponse, RuntimeDiagnostics, SessionConfig,
+    PROTOCOL_VERSION,
+};
 
 // ---------------------------------------------------------------------------
 // RunnerHandle trait — abstracts the Runner interface so the gateway crate
@@ -93,6 +97,7 @@ impl Default for GatewayConfig {
 struct AppState {
     pairing: Arc<PairingGuard>,
     runner: Arc<dyn RunnerHandle>,
+    started_at: Instant,
     audio_senders: Arc<RwLock<HashMap<String, mpsc::Sender<Vec<u8>>>>>,
     /// Stable principal owner for each session ID (supports token-authenticated
     /// reconnect/resume across different WebSocket connections).
@@ -184,6 +189,7 @@ impl Gateway {
         let state = AppState {
             pairing: self.pairing,
             runner: self.runner,
+            started_at: Instant::now(),
             audio_senders: self.audio_senders,
             session_owners: Arc::new(RwLock::new(HashMap::new())),
             ws_response_senders: ws_response_senders.clone(),
@@ -387,6 +393,8 @@ async fn handle_message(
         GatewayMessage::Pair { code } => handle_pair(&code, state, conn),
 
         GatewayMessage::Authenticate { token } => handle_authenticate(&token, state, conn),
+
+        GatewayMessage::GetGatewayHealth => handle_get_gateway_health(state).await,
 
         GatewayMessage::CreateSession { config } => {
             if !conn.authenticated {
@@ -616,6 +624,23 @@ async fn handle_get_diagnostics(state: &AppState) -> GatewayResponse {
         Err(e) => GatewayResponse::Error {
             code: "diagnostics_failed".to_string(),
             message: format!("Failed to fetch diagnostics: {}", e),
+        },
+    }
+}
+
+/// Handle GetGatewayHealth — returns operational gateway metrics without
+/// requiring session auth.
+async fn handle_get_gateway_health(state: &AppState) -> GatewayResponse {
+    let active_sessions = state.session_owners.read().await.len();
+    let active_ws_bindings = state.ws_response_senders.read().await.len();
+    let require_pairing = !state.pairing.is_authenticated("");
+    GatewayResponse::GatewayHealth {
+        data: GatewayHealth {
+            protocol_version: PROTOCOL_VERSION.to_string(),
+            uptime_seconds: state.started_at.elapsed().as_secs(),
+            require_pairing,
+            active_sessions,
+            active_ws_bindings,
         },
     }
 }
@@ -901,6 +926,7 @@ mod tests {
         AppState {
             pairing: Arc::new(PairingGuard::new(require_pairing, &[])),
             runner: Arc::new(runner),
+            started_at: Instant::now(),
             audio_senders: Arc::new(RwLock::new(HashMap::new())),
             session_owners: Arc::new(RwLock::new(HashMap::new())),
             ws_response_senders: Arc::new(RwLock::new(HashMap::new())),
@@ -981,6 +1007,25 @@ mod tests {
                 );
             }
             other => panic!("Expected Diagnostics response, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_get_gateway_health_works_without_auth() {
+        let state = make_state(MockRunner::ok(), true);
+        let mut conn = unauthed_conn();
+        let ws_tx = dummy_ws_tx();
+        let resp =
+            handle_message(GatewayMessage::GetGatewayHealth, &state, &mut conn, &ws_tx).await;
+
+        match resp {
+            GatewayResponse::GatewayHealth { data } => {
+                assert_eq!(data.protocol_version, crate::protocol::PROTOCOL_VERSION);
+                assert!(data.require_pairing);
+                assert_eq!(data.active_sessions, 0);
+                assert_eq!(data.active_ws_bindings, 0);
+            }
+            other => panic!("Expected GatewayHealth response, got {:?}", other),
         }
     }
 

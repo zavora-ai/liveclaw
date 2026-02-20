@@ -67,7 +67,7 @@
 
       .status-bar {
         display: grid;
-        grid-template-columns: 1fr auto auto auto auto auto;
+        grid-template-columns: 1fr auto auto auto auto auto auto;
         gap: 10px;
         align-items: center;
         padding: 14px;
@@ -293,6 +293,7 @@
         <span class="badge" id="tokenBadge">token: none</span>
         <span class="badge" id="diagBadge">diag: n/a</span>
         <span class="badge" id="secBadge">sec: n/a</span>
+        <span class="badge" id="healthBadge">gw: n/a</span>
         <button id="clearLog" class="muted">Clear Log</button>
       </section>
 
@@ -359,6 +360,7 @@
             </div>
             <div class="field-row">
               <button id="pingBtn" class="muted">Ping</button>
+              <button id="healthBtn" class="muted">Gateway Health</button>
               <button id="diagnosticsBtn" class="soft">Get Diagnostics</button>
               <button id="terminateBtn" class="warn">Terminate Session</button>
             </div>
@@ -407,6 +409,7 @@
                 <label for="templateType">Message Template</label>
                 <select id="templateType">
                   <option value="Ping">Ping</option>
+                  <option value="GetGatewayHealth">GetGatewayHealth</option>
                   <option value="GetDiagnostics">GetDiagnostics</option>
                   <option value="CreateSession">CreateSession</option>
                   <option value="TerminateSession">TerminateSession</option>
@@ -443,6 +446,7 @@
           tokenBadge: $("tokenBadge"),
           diagBadge: $("diagBadge"),
           secBadge: $("secBadge"),
+          healthBadge: $("healthBadge"),
           wsUrl: $("wsUrl"),
           connectBtn: $("connectBtn"),
           disconnectBtn: $("disconnectBtn"),
@@ -458,6 +462,7 @@
           createSessionBtn: $("createSessionBtn"),
           sessionId: $("sessionId"),
           pingBtn: $("pingBtn"),
+          healthBtn: $("healthBtn"),
           diagnosticsBtn: $("diagnosticsBtn"),
           terminateBtn: $("terminateBtn"),
           audioB64: $("audioB64"),
@@ -582,6 +587,8 @@
               };
             case "GetDiagnostics":
               return { type: "GetDiagnostics" };
+            case "GetGatewayHealth":
+              return { type: "GetGatewayHealth" };
             case "Ping":
             default:
               return { type: "Ping" };
@@ -655,6 +662,14 @@
                 );
               }
               syncTemplateOptions(d.supported_client_messages);
+            }
+
+            if (parsed.type === "GatewayHealth" && parsed.data) {
+              const h = parsed.data;
+              const pairing = h.require_pairing ? "pair" : "open";
+              const up = Number(h.uptime_seconds || 0);
+              const sessions = Number(h.active_sessions || 0);
+              els.healthBadge.textContent = `gw: up=${up}s s=${sessions} ${pairing}`;
             }
           };
         }
@@ -772,6 +787,10 @@
 
         els.pingBtn.addEventListener("click", () => {
           sendObject({ type: "Ping" });
+        });
+
+        els.healthBtn.addEventListener("click", () => {
+          sendObject({ type: "GetGatewayHealth" });
         });
 
         els.diagnosticsBtn.addEventListener("click", () => {
