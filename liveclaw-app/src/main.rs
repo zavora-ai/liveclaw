@@ -11,10 +11,13 @@ use tokio::sync::{mpsc, RwLock};
 use tokio::task::JoinHandle;
 use tracing::{info, warn};
 
+use adk_artifact::{ArtifactService, SaveRequest};
 use adk_auth::{AccessControl, AuthMiddleware, FileAuditSink, Permission, Role};
 use adk_core::{
-    CallbackContext, Content, EventActions, MemoryEntry, ReadonlyContext, Tool, ToolContext,
+    CallbackContext, Content, EventActions, MemoryEntry as CoreMemoryEntry, Part, ReadonlyContext,
+    Tool, ToolContext,
 };
+use adk_memory::MemoryService;
 use adk_realtime::config::ToolDefinition;
 use adk_realtime::error::RealtimeError;
 use adk_realtime::events::ToolCall;
@@ -24,6 +27,7 @@ use adk_realtime::{RealtimeConfig, RealtimeRunner};
 use adk_telemetry::{init_telemetry, init_with_otlp};
 
 use liveclaw_app::config::{LiveClawConfig, SecurityConfig as AppSecurityConfig, VoiceConfig};
+use liveclaw_app::storage::{build_memory_service, FileArtifactService};
 use liveclaw_app::tools::build_baseline_tools;
 use liveclaw_gateway::pairing::PairingGuard;
 use liveclaw_gateway::protocol::SessionConfig;
@@ -35,6 +39,7 @@ use liveclaw_gateway::server::{
 struct RealtimeSession {
     runner: Arc<RealtimeRunner>,
     run_task: JoinHandle<()>,
+    user_id: String,
 }
 
 #[derive(Clone)]
@@ -167,7 +172,7 @@ impl ToolContext for ToolInvocationContext {
         *self.actions.lock().expect("tool actions mutex poisoned") = actions;
     }
 
-    async fn search_memory(&self, _query: &str) -> adk_core::Result<Vec<MemoryEntry>> {
+    async fn search_memory(&self, _query: &str) -> adk_core::Result<Vec<CoreMemoryEntry>> {
         Ok(Vec::new())
     }
 }
@@ -206,8 +211,103 @@ impl ToolHandler for AdkToolHandler {
 /// Event handler that forwards realtime outputs with the owning session ID.
 struct GatewayEventForwarder {
     session_id: String,
+    user_id: String,
+    memory_store: Arc<dyn MemoryService>,
+    session_memory_entries: Arc<RwLock<HashMap<String, Vec<adk_memory::MemoryEntry>>>>,
+    artifact_service: Option<Arc<dyn ArtifactService>>,
+    audio_sequence: AtomicU64,
+    transcript_sequence: AtomicU64,
     audio_tx: mpsc::Sender<SessionAudioOutput>,
     transcript_tx: mpsc::Sender<SessionTranscriptOutput>,
+}
+
+impl GatewayEventForwarder {
+    async fn persist_transcript_memory(&self, transcript: &str) {
+        let entry = adk_memory::MemoryEntry {
+            content: Content::new("assistant").with_text(transcript),
+            author: "assistant".to_string(),
+            timestamp: chrono::Utc::now(),
+        };
+
+        let session_entries = {
+            let mut guard = self.session_memory_entries.write().await;
+            let entries = guard.entry(self.session_id.clone()).or_default();
+            entries.push(entry);
+            entries.clone()
+        };
+
+        if let Err(e) = self
+            .memory_store
+            .add_session("liveclaw", &self.user_id, &self.session_id, session_entries)
+            .await
+        {
+            warn!(
+                session_id = %self.session_id,
+                user_id = %self.user_id,
+                error = %e,
+                "Failed to persist transcript memory"
+            );
+        }
+    }
+
+    async fn persist_transcript_artifact(&self, transcript: &str) {
+        let Some(service) = &self.artifact_service else {
+            return;
+        };
+        let index = self.transcript_sequence.fetch_add(1, Ordering::SeqCst) + 1;
+        let file_name = format!("transcript-{index:06}.txt");
+
+        if let Err(e) = service
+            .save(SaveRequest {
+                app_name: "liveclaw".to_string(),
+                user_id: self.user_id.clone(),
+                session_id: self.session_id.clone(),
+                file_name,
+                part: Part::Text {
+                    text: transcript.to_string(),
+                },
+                version: None,
+            })
+            .await
+        {
+            warn!(
+                session_id = %self.session_id,
+                user_id = %self.user_id,
+                error = %e,
+                "Failed to persist transcript artifact"
+            );
+        }
+    }
+
+    async fn persist_audio_artifact(&self, audio: &[u8]) {
+        let Some(service) = &self.artifact_service else {
+            return;
+        };
+        let index = self.audio_sequence.fetch_add(1, Ordering::SeqCst) + 1;
+        let file_name = format!("audio-{index:06}.pcm");
+
+        if let Err(e) = service
+            .save(SaveRequest {
+                app_name: "liveclaw".to_string(),
+                user_id: self.user_id.clone(),
+                session_id: self.session_id.clone(),
+                file_name,
+                part: Part::InlineData {
+                    mime_type: "audio/pcm".to_string(),
+                    data: audio.to_vec(),
+                },
+                version: None,
+            })
+            .await
+        {
+            warn!(
+                session_id = %self.session_id,
+                user_id = %self.user_id,
+                error = %e,
+                "Failed to persist audio artifact"
+            );
+        }
+    }
 }
 
 #[async_trait]
@@ -227,6 +327,7 @@ impl EventHandler for GatewayEventForwarder {
                 "Gateway audio output channel is closed"
             );
         }
+        self.persist_audio_artifact(audio).await;
         Ok(())
     }
 
@@ -246,6 +347,8 @@ impl EventHandler for GatewayEventForwarder {
                 "Gateway transcript output channel is closed"
             );
         }
+        self.persist_transcript_memory(transcript).await;
+        self.persist_transcript_artifact(transcript).await;
         Ok(())
     }
 }
@@ -259,6 +362,9 @@ struct RunnerAdapter {
     default_instructions: Option<String>,
     tool_security: ToolSecurityConfig,
     tool_metrics: Arc<ToolExecutionMetrics>,
+    memory_store: Arc<dyn MemoryService>,
+    session_memory_entries: Arc<RwLock<HashMap<String, Vec<adk_memory::MemoryEntry>>>>,
+    artifact_service: Option<Arc<dyn ArtifactService>>,
     sessions: Arc<RwLock<HashMap<String, RealtimeSession>>>,
     audio_tx: mpsc::Sender<SessionAudioOutput>,
     transcript_tx: mpsc::Sender<SessionTranscriptOutput>,
@@ -268,6 +374,8 @@ impl RunnerAdapter {
     fn new(
         voice_cfg: &VoiceConfig,
         security_cfg: &AppSecurityConfig,
+        memory_store: Arc<dyn MemoryService>,
+        artifact_service: Option<Arc<dyn ArtifactService>>,
         audio_tx: mpsc::Sender<SessionAudioOutput>,
         transcript_tx: mpsc::Sender<SessionTranscriptOutput>,
     ) -> Self {
@@ -279,6 +387,9 @@ impl RunnerAdapter {
             default_instructions: voice_cfg.instructions.clone(),
             tool_security: ToolSecurityConfig::from(security_cfg),
             tool_metrics: Arc::new(ToolExecutionMetrics::default()),
+            memory_store,
+            session_memory_entries: Arc::new(RwLock::new(HashMap::new())),
+            artifact_service,
             sessions: Arc::new(RwLock::new(HashMap::new())),
             audio_tx,
             transcript_tx,
@@ -404,6 +515,12 @@ impl RunnerHandle for RunnerAdapter {
             .config(realtime_config)
             .event_handler(GatewayEventForwarder {
                 session_id: session_id.to_string(),
+                user_id: user_id.to_string(),
+                memory_store: self.memory_store.clone(),
+                session_memory_entries: self.session_memory_entries.clone(),
+                artifact_service: self.artifact_service.clone(),
+                audio_sequence: AtomicU64::new(0),
+                transcript_sequence: AtomicU64::new(0),
                 audio_tx: self.audio_tx.clone(),
                 transcript_tx: self.transcript_tx.clone(),
             });
@@ -450,7 +567,14 @@ impl RunnerHandle for RunnerAdapter {
             bail!("Session '{}' already exists", session_id);
         }
 
-        sessions.insert(session_id.to_string(), RealtimeSession { runner, run_task });
+        sessions.insert(
+            session_id.to_string(),
+            RealtimeSession {
+                runner,
+                run_task,
+                user_id: user_id.to_string(),
+            },
+        );
 
         Ok(session_id.to_string())
     }
@@ -458,12 +582,54 @@ impl RunnerHandle for RunnerAdapter {
     async fn terminate_session(&self, session_id: &str) -> Result<()> {
         let session = { self.sessions.write().await.remove(session_id) };
 
-        let Some(RealtimeSession { runner, run_task }) = session else {
+        let Some(RealtimeSession {
+            runner,
+            run_task,
+            user_id,
+        }) = session
+        else {
             bail!("Session '{}' not found", session_id);
         };
 
         if let Err(e) = runner.close().await {
             warn!(session_id = session_id, error = %e, "Failed to close realtime session cleanly");
+        }
+
+        if let Some(mut entries) = self.session_memory_entries.write().await.remove(session_id) {
+            let summary = entries
+                .iter()
+                .filter_map(|entry| {
+                    entry
+                        .content
+                        .parts
+                        .iter()
+                        .filter_map(|part| part.text().map(str::to_string))
+                        .next()
+                })
+                .collect::<Vec<_>>()
+                .join(" ");
+
+            if !summary.trim().is_empty() {
+                entries.push(adk_memory::MemoryEntry {
+                    content: Content::new("assistant")
+                        .with_text(format!("session_summary: {}", summary)),
+                    author: "system".to_string(),
+                    timestamp: chrono::Utc::now(),
+                });
+            }
+
+            if let Err(e) = self
+                .memory_store
+                .add_session("liveclaw", &user_id, session_id, entries)
+                .await
+            {
+                warn!(
+                    session_id = session_id,
+                    user_id = %user_id,
+                    error = %e,
+                    "Failed to persist session memory summary on terminate"
+                );
+            }
         }
 
         run_task.abort();
@@ -582,9 +748,30 @@ async fn main() -> Result<()> {
         port: config.gateway.port,
     };
 
+    let memory_store = build_memory_service(&config.memory.backend).with_context(|| {
+        format!(
+            "Failed to initialize memory backend '{}'",
+            config.memory.backend
+        )
+    })?;
+    let artifact_service: Option<Arc<dyn ArtifactService>> = if config.artifact.enable_artifacts {
+        Some(Arc::new(
+            FileArtifactService::new(&config.artifact.storage_path).with_context(|| {
+                format!(
+                    "Failed to initialize artifact storage '{}'",
+                    config.artifact.storage_path
+                )
+            })?,
+        ))
+    } else {
+        None
+    };
+
     let runner_handle: Arc<dyn RunnerHandle> = Arc::new(RunnerAdapter::new(
         &config.voice,
         &config.security,
+        memory_store,
+        artifact_service,
         gw_audio_tx,
         gw_transcript_tx,
     ));
@@ -608,7 +795,10 @@ async fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use adk_artifact::ListRequest;
+    use adk_memory::SearchRequest;
     use liveclaw_app::config::SecurityConfig as AppSecurityConfig;
+    use liveclaw_app::storage::FileArtifactService;
 
     fn test_adapter(default_role: &str, allowlist: Vec<&str>) -> RunnerAdapter {
         let voice_cfg = VoiceConfig {
@@ -629,8 +819,17 @@ mod tests {
 
         let (audio_tx, _audio_rx) = mpsc::channel(4);
         let (transcript_tx, _transcript_rx) = mpsc::channel(4);
+        let memory_store: Arc<dyn MemoryService> =
+            Arc::new(adk_memory::InMemoryMemoryService::new());
 
-        RunnerAdapter::new(&voice_cfg, &security_cfg, audio_tx, transcript_tx)
+        RunnerAdapter::new(
+            &voice_cfg,
+            &security_cfg,
+            memory_store,
+            None,
+            audio_tx,
+            transcript_tx,
+        )
     }
 
     #[test]
@@ -644,9 +843,17 @@ mod tests {
     async fn test_gateway_event_forwarder_tags_audio_and_transcript() {
         let (audio_tx, mut audio_rx) = mpsc::channel(4);
         let (transcript_tx, mut transcript_rx) = mpsc::channel(4);
+        let memory_store: Arc<dyn MemoryService> =
+            Arc::new(adk_memory::InMemoryMemoryService::new());
 
         let handler = GatewayEventForwarder {
             session_id: "sess-42".to_string(),
+            user_id: "user-42".to_string(),
+            memory_store,
+            session_memory_entries: Arc::new(RwLock::new(HashMap::new())),
+            artifact_service: None,
+            audio_sequence: AtomicU64::new(0),
+            transcript_sequence: AtomicU64::new(0),
             audio_tx,
             transcript_tx,
         };
@@ -662,6 +869,89 @@ mod tests {
         assert_eq!(transcript.session_id, "sess-42");
         assert_eq!(transcript.text, "hello");
         assert!(!transcript.is_final);
+    }
+
+    #[tokio::test]
+    async fn test_gateway_event_forwarder_persists_memory_and_artifacts() {
+        let (audio_tx, mut audio_rx) = mpsc::channel(4);
+        let (transcript_tx, mut transcript_rx) = mpsc::channel(4);
+
+        let artifact_root = std::env::temp_dir().join(format!(
+            "liveclaw-artifacts-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let memory_file = std::env::temp_dir().join(format!(
+            "liveclaw-memory-{}-{}.json",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+
+        let memory_store =
+            build_memory_service(&format!("file:{}", memory_file.display())).unwrap();
+        let artifact_service: Arc<dyn ArtifactService> =
+            Arc::new(FileArtifactService::new(&artifact_root).unwrap());
+
+        let handler = GatewayEventForwarder {
+            session_id: "sess-art-1".to_string(),
+            user_id: "user-art-1".to_string(),
+            memory_store: memory_store.clone(),
+            session_memory_entries: Arc::new(RwLock::new(HashMap::new())),
+            artifact_service: Some(artifact_service.clone()),
+            audio_sequence: AtomicU64::new(0),
+            transcript_sequence: AtomicU64::new(0),
+            audio_tx,
+            transcript_tx,
+        };
+
+        handler.on_audio(&[7, 8, 9], "item-a").await.unwrap();
+        handler
+            .on_transcript("favorite_color is blue", "item-b")
+            .await
+            .unwrap();
+
+        let _ = audio_rx.recv().await.unwrap();
+        let _ = transcript_rx.recv().await.unwrap();
+
+        let memories = memory_store
+            .search(SearchRequest {
+                query: "favorite_color".to_string(),
+                user_id: "user-art-1".to_string(),
+                app_name: "liveclaw".to_string(),
+            })
+            .await
+            .unwrap()
+            .memories;
+        assert!(!memories.is_empty(), "expected persisted memory entries");
+
+        let listed = artifact_service
+            .list(ListRequest {
+                app_name: "liveclaw".to_string(),
+                user_id: "user-art-1".to_string(),
+                session_id: "sess-art-1".to_string(),
+            })
+            .await
+            .unwrap()
+            .file_names;
+        assert!(
+            listed.iter().any(|name| name.starts_with("transcript-")),
+            "expected transcript artifacts in {:?}",
+            listed
+        );
+        assert!(
+            listed.iter().any(|name| name.starts_with("audio-")),
+            "expected audio artifacts in {:?}",
+            listed
+        );
+
+        let _ = std::fs::remove_file(memory_file);
+        let _ = std::fs::remove_dir_all(artifact_root);
     }
 
     #[test]

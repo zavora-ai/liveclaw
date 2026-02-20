@@ -5,4 +5,5 @@ pub mod memory;
 pub mod plugins;
 pub mod runner;
 pub mod security;
+pub mod storage;
 pub mod tools;

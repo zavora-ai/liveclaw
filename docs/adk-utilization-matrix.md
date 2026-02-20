@@ -38,5 +38,5 @@ Track ADK-Rust crate/API usage for each roadmap milestone and explicitly documen
 | Gap ID | Area | Current Blocker | Proposed Approach | Owner | Due |
 |---|---|---|---|---|---|
 | ADK-GAP-001 | Voice session wiring | CLOSED in Sprint 1: Session audio now forwards through `adk-realtime::RealtimeRunner`, with callback outputs tagged by true session IDs | Maintain this path as the only audio pipeline; add session-ownership hardening in M2 | Core Runtime | M1 |
-| ADK-GAP-002 | Graph tools node | Tool node is stubbed | Implement `adk-graph` node execution over pending tool calls | TBD | M3 |
-| ADK-GAP-003 | Plugin parity | Config toggles/rate-limit plugin incomplete | Complete `adk-plugin` hook mapping and config gating | TBD | M4 |
+| ADK-GAP-002 | Graph tools node | CLOSED in Sprint 4: graph tools node now drains pending calls into deterministic state updates, with supervised interrupts covered by tests | Keep tool-loop behavior on `adk-graph` nodes and wire full runtime orchestration incrementally | Core Runtime | M4 |
+| ADK-GAP-003 | Plugin parity | CLOSED in Sprint 4: config-gated plugin assembly and per-session rate-limit plugin path implemented | Keep lifecycle hook wiring on `adk-plugin::PluginManager`; avoid bespoke plugin execution paths | Platform | M4 |

@@ -11,7 +11,7 @@ Status scale: `NOT_STARTED`, `IN_PROGRESS`, `AT_RISK`, `BLOCKED`, `DONE`
 | M1 Voice E2E | IN_PROGRESS | Core Team | 2026-03-13 | `scripts/demo/m1_voice_e2e.sh` | SessionAudio reaches live runtime; session IDs propagate end-to-end |
 | M2 Secure Multi-Session | IN_PROGRESS | Core Team | 2026-03-27 | `scripts/demo/m2_secure_sessions.sh` | Token auth path implemented; per-session ownership enforced |
 | M3 Tool and Graph Execution | IN_PROGRESS | Core Team | 2026-04-24 | `scripts/demo/m3_tools_graph.sh` | Non-empty toolset; RBAC enforced; graph tools node executes |
-| M4 Memory, Artifacts, Resilience | NOT_STARTED | Core Team | 2026-05-22 | `scripts/demo/m4_memory_artifacts.sh` | Persistent recall across restarts; artifact persistence; reconnect behavior validated |
+| M4 Memory, Artifacts, Resilience | IN_PROGRESS | Core Team | 2026-05-22 | `scripts/demo/m4_memory_artifacts.sh` | Persistent recall across restarts; artifact persistence; reconnect behavior validated |
 | M5 ZeroClaw Track Parity | NOT_STARTED | Core Team | 2026-06-19 | `scripts/demo/m5_runtime_security.sh` | Runtime modes validated; provider flexibility; security hardening gates pass |
 | M6 OpenClaw Track Parity + RC | NOT_STARTED | Core Team | 2026-07-31 | `scripts/demo/m6_release_flow.sh` | Priority channels work; ops surfaces validated; release candidate checklist passes |
 
@@ -67,6 +67,16 @@ Status scale: `NOT_STARTED`, `IN_PROGRESS`, `AT_RISK`, `BLOCKED`, `DONE`
 | Respect plugin toggles for PII redaction and memory autosave | DONE | `liveclaw-app/src/plugins.rs` `PluginRuntimeConfig` + conditional plugin assembly in `build_plugin_manager()` |
 | Add rate-limiting plugin path in PluginManager | DONE | `liveclaw-app/src/plugins.rs` `build_rate_limit_plugin()` with per-session enforcement |
 | Add Sprint 4 demo checks | DONE | `scripts/demo/s4_graph_plugin_completeness.sh` |
+
+## Sprint 5 Checklist (In Progress)
+
+| Item | Status | Evidence |
+|---|---|---|
+| Add durable file-backed memory backend option | DONE | `liveclaw-app/src/storage.rs` `FileMemoryService` + `build_memory_service()` (`file` and `file:/path`) |
+| Persist transcript memories across callback events and on session close | DONE | `liveclaw-app/src/main.rs` `GatewayEventForwarder::persist_transcript_memory` + terminate summary persistence |
+| Add file-backed artifact service via ADK artifact contracts | DONE | `liveclaw-app/src/storage.rs` `FileArtifactService` implements `adk_artifact::ArtifactService` |
+| Persist transcript and audio artifacts from realtime callbacks | DONE | `liveclaw-app/src/main.rs` `persist_transcript_artifact` + `persist_audio_artifact` |
+| Add M4 demo checks for memory/artifact persistence | DONE | `scripts/demo/m4_memory_artifacts.sh` |
 
 ## Notes
 
