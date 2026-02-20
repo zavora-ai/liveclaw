@@ -56,6 +56,17 @@ Status scale: `NOT_STARTED`, `IN_PROGRESS`, `AT_RISK`, `BLOCKED`, `DONE`
 | Add explicit tool execution metrics (count/failures/duration) | DONE | `liveclaw-app/src/main.rs` `ToolExecutionMetrics` and structured logs |
 | Add M3 demo checks | DONE | `scripts/demo/m3_tools_graph.sh` |
 
+## Sprint 4 Checklist (In Progress)
+
+| Item | Status | Evidence |
+|---|---|---|
+| Implement graph tools-node state transition behavior | DONE | `liveclaw-app/src/graph.rs` `execute_pending_tool_calls()` drains `pending_tool_calls` into `tool_results` |
+| Keep deterministic conditional routing for tool loop | DONE | `liveclaw-app/src/graph.rs` `has_pending_tool_calls()` used by `conditional_edge` |
+| Validate supervised interrupt-before flow on tools node | DONE | `liveclaw-app/src/graph.rs` tests `supervised_tools_node_interrupts_before_execution` and `non_supervised_tools_node_executes_pending_calls` |
+| Respect plugin toggles for PII redaction and memory autosave | DONE | `liveclaw-app/src/plugins.rs` `PluginRuntimeConfig` + conditional plugin assembly in `build_plugin_manager()` |
+| Add rate-limiting plugin path in PluginManager | DONE | `liveclaw-app/src/plugins.rs` `build_rate_limit_plugin()` with per-session enforcement |
+| Add Sprint 4 demo checks | DONE | `scripts/demo/s4_graph_plugin_completeness.sh` |
+
 ## Notes
 
 1. Update this file at each sprint close with status transitions and links to commit SHAs.

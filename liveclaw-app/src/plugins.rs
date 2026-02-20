@@ -9,6 +9,25 @@ use std::sync::Arc;
 use adk_memory::{MemoryEntry, MemoryService};
 use adk_plugin::{Plugin, PluginConfig, PluginManager};
 
+use crate::security::RateLimiter;
+
+#[derive(Debug, Clone)]
+pub struct PluginRuntimeConfig {
+    pub enable_pii_redaction: bool,
+    pub enable_memory_autosave: bool,
+    pub rate_limit_per_session: u32,
+}
+
+impl Default for PluginRuntimeConfig {
+    fn default() -> Self {
+        Self {
+            enable_pii_redaction: true,
+            enable_memory_autosave: true,
+            rate_limit_per_session: 100,
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // PII patterns
 // ---------------------------------------------------------------------------
@@ -146,21 +165,51 @@ pub fn build_guardrail_plugin(blocked_keywords: Vec<String>) -> Plugin {
     })
 }
 
+/// Rate Limit Plugin — throttles user message turns per session.
+pub fn build_rate_limit_plugin(rate_limiter: Arc<RateLimiter>) -> Plugin {
+    Plugin::new(PluginConfig {
+        name: "rate_limit".to_string(),
+        on_user_message: Some(Box::new(move |ctx, _message| {
+            let limiter = rate_limiter.clone();
+            Box::pin(async move {
+                if limiter.check_and_increment(ctx.session_id()) {
+                    Ok(None)
+                } else {
+                    Err(adk_core::AdkError::Agent(format!(
+                        "Rate limit exceeded for session {}",
+                        ctx.session_id()
+                    )))
+                }
+            })
+        })),
+        ..Default::default()
+    })
+}
+
 // ---------------------------------------------------------------------------
 // Plugin manager assembly
 // ---------------------------------------------------------------------------
 
 /// Assembles all LiveClaw plugins into a [`PluginManager`].
 pub fn build_plugin_manager(
+    runtime_cfg: &PluginRuntimeConfig,
     memory_store: Arc<dyn MemoryService>,
     pii_patterns: Vec<regex::Regex>,
     blocked_keywords: Vec<String>,
 ) -> PluginManager {
-    let plugins = vec![
-        build_pii_redaction_plugin(pii_patterns),
-        build_memory_autosave_plugin(memory_store),
-        build_guardrail_plugin(blocked_keywords),
-    ];
+    let mut plugins = vec![build_rate_limit_plugin(Arc::new(RateLimiter::new(
+        runtime_cfg.rate_limit_per_session.max(1),
+    )))];
+
+    if runtime_cfg.enable_pii_redaction {
+        plugins.push(build_pii_redaction_plugin(pii_patterns));
+    }
+
+    if runtime_cfg.enable_memory_autosave {
+        plugins.push(build_memory_autosave_plugin(memory_store));
+    }
+
+    plugins.push(build_guardrail_plugin(blocked_keywords));
     PluginManager::new(plugins)
 }
 
@@ -171,6 +220,14 @@ pub fn build_plugin_manager(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    use adk_core::{
+        Agent, CallbackContext, Content, Event, EventStream, InvocationContext, ReadonlyContext,
+        RunConfig, Session, State as CoreState,
+    };
+    use async_trait::async_trait;
 
     // === build_pii_patterns tests ===
 
@@ -321,5 +378,271 @@ mod tests {
     #[test]
     fn guardrail_empty_message_passes() {
         assert!(!is_blocked(&["hack"], ""));
+    }
+
+    #[derive(Default)]
+    struct TestState;
+
+    impl CoreState for TestState {
+        fn get(&self, _key: &str) -> Option<serde_json::Value> {
+            None
+        }
+
+        fn set(&mut self, _key: String, _value: serde_json::Value) {}
+
+        fn all(&self) -> HashMap<String, serde_json::Value> {
+            HashMap::new()
+        }
+    }
+
+    struct TestSession {
+        id: String,
+        state: TestState,
+    }
+
+    impl TestSession {
+        fn new(id: &str) -> Self {
+            Self {
+                id: id.to_string(),
+                state: TestState,
+            }
+        }
+    }
+
+    impl Session for TestSession {
+        fn id(&self) -> &str {
+            &self.id
+        }
+
+        fn app_name(&self) -> &str {
+            "liveclaw"
+        }
+
+        fn user_id(&self) -> &str {
+            "user-1"
+        }
+
+        fn state(&self) -> &dyn CoreState {
+            &self.state
+        }
+
+        fn conversation_history(&self) -> Vec<Content> {
+            Vec::new()
+        }
+    }
+
+    struct NoopAgent;
+
+    #[async_trait]
+    impl Agent for NoopAgent {
+        fn name(&self) -> &str {
+            "noop"
+        }
+
+        fn description(&self) -> &str {
+            "noop"
+        }
+
+        fn sub_agents(&self) -> &[Arc<dyn Agent>] {
+            &[]
+        }
+
+        async fn run(&self, _ctx: Arc<dyn InvocationContext>) -> adk_core::Result<EventStream> {
+            panic!("NoopAgent::run should not be called in plugin tests")
+        }
+    }
+
+    struct TestInvocationContext {
+        invocation_id: String,
+        content: Content,
+        run_config: RunConfig,
+        session: TestSession,
+        ended: AtomicBool,
+    }
+
+    impl TestInvocationContext {
+        fn new(session_id: &str) -> Self {
+            Self {
+                invocation_id: "inv-test".to_string(),
+                content: Content::new("user").with_text("hello"),
+                run_config: RunConfig::default(),
+                session: TestSession::new(session_id),
+                ended: AtomicBool::new(false),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl ReadonlyContext for TestInvocationContext {
+        fn invocation_id(&self) -> &str {
+            &self.invocation_id
+        }
+
+        fn agent_name(&self) -> &str {
+            "test-agent"
+        }
+
+        fn user_id(&self) -> &str {
+            "user-1"
+        }
+
+        fn app_name(&self) -> &str {
+            "liveclaw"
+        }
+
+        fn session_id(&self) -> &str {
+            self.session.id()
+        }
+
+        fn branch(&self) -> &str {
+            ""
+        }
+
+        fn user_content(&self) -> &Content {
+            &self.content
+        }
+    }
+
+    #[async_trait]
+    impl CallbackContext for TestInvocationContext {
+        fn artifacts(&self) -> Option<Arc<dyn adk_core::Artifacts>> {
+            None
+        }
+    }
+
+    #[async_trait]
+    impl InvocationContext for TestInvocationContext {
+        fn agent(&self) -> Arc<dyn Agent> {
+            Arc::new(NoopAgent)
+        }
+
+        fn memory(&self) -> Option<Arc<dyn adk_core::Memory>> {
+            None
+        }
+
+        fn session(&self) -> &dyn Session {
+            &self.session
+        }
+
+        fn run_config(&self) -> &RunConfig {
+            &self.run_config
+        }
+
+        fn end_invocation(&self) {
+            self.ended.store(true, Ordering::SeqCst);
+        }
+
+        fn ended(&self) -> bool {
+            self.ended.load(Ordering::SeqCst)
+        }
+    }
+
+    fn test_memory_store() -> Arc<dyn MemoryService> {
+        Arc::new(adk_memory::InMemoryMemoryService::new())
+    }
+
+    #[test]
+    fn plugin_manager_respects_toggle_flags() {
+        let manager = build_plugin_manager(
+            &PluginRuntimeConfig {
+                enable_pii_redaction: true,
+                enable_memory_autosave: true,
+                rate_limit_per_session: 5,
+            },
+            test_memory_store(),
+            build_pii_patterns(),
+            vec![],
+        );
+
+        assert_eq!(
+            manager.plugin_names(),
+            vec!["rate_limit", "pii_redactor", "memory_autosave", "guardrail"]
+        );
+    }
+
+    #[test]
+    fn plugin_manager_can_disable_optional_plugins() {
+        let manager = build_plugin_manager(
+            &PluginRuntimeConfig {
+                enable_pii_redaction: false,
+                enable_memory_autosave: false,
+                rate_limit_per_session: 5,
+            },
+            test_memory_store(),
+            build_pii_patterns(),
+            vec![],
+        );
+
+        assert_eq!(manager.plugin_names(), vec!["rate_limit", "guardrail"]);
+    }
+
+    #[tokio::test]
+    async fn pii_redaction_toggle_controls_on_event_behavior() {
+        let ctx = Arc::new(TestInvocationContext::new("session-a")) as Arc<dyn InvocationContext>;
+        let mut event = Event::new("inv-1");
+        event.set_content(Content::new("assistant").with_text("Reach me at alice@example.com"));
+
+        let with_pii = build_plugin_manager(
+            &PluginRuntimeConfig {
+                enable_pii_redaction: true,
+                enable_memory_autosave: false,
+                rate_limit_per_session: 5,
+            },
+            test_memory_store(),
+            build_pii_patterns(),
+            vec![],
+        );
+        let modified = with_pii
+            .run_on_event(ctx.clone(), event.clone())
+            .await
+            .expect("plugin manager should run");
+        let modified_text = modified
+            .and_then(|e| e.content().cloned())
+            .and_then(|c| c.parts.first().and_then(|p| p.text().map(str::to_string)))
+            .expect("pii-enabled manager should redact content");
+        assert!(modified_text.contains("[REDACTED]"));
+
+        let without_pii = build_plugin_manager(
+            &PluginRuntimeConfig {
+                enable_pii_redaction: false,
+                enable_memory_autosave: false,
+                rate_limit_per_session: 5,
+            },
+            test_memory_store(),
+            build_pii_patterns(),
+            vec![],
+        );
+        let passthrough = without_pii
+            .run_on_event(ctx, event)
+            .await
+            .expect("plugin manager should run");
+        assert!(passthrough.is_none());
+    }
+
+    #[tokio::test]
+    async fn rate_limit_plugin_blocks_after_limit() {
+        let manager = build_plugin_manager(
+            &PluginRuntimeConfig {
+                enable_pii_redaction: false,
+                enable_memory_autosave: false,
+                rate_limit_per_session: 1,
+            },
+            test_memory_store(),
+            build_pii_patterns(),
+            vec![],
+        );
+        let ctx =
+            Arc::new(TestInvocationContext::new("session-limit")) as Arc<dyn InvocationContext>;
+
+        let first = manager
+            .run_on_user_message(ctx.clone(), Content::new("user").with_text("first"))
+            .await;
+        assert!(first.is_ok());
+
+        let second = manager
+            .run_on_user_message(ctx, Content::new("user").with_text("second"))
+            .await;
+        let err = second.expect_err("second message should be rate limited");
+        assert!(err.to_string().contains("Rate limit exceeded"));
     }
 }
