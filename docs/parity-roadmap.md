@@ -48,6 +48,7 @@ Cadence: 2-week sprints (with Sprint 0 as a 1-week stabilization sprint)
 4. Every merged slice must be releasable behind config or feature flags if incomplete.
 5. No subsystem reimplementation is allowed when equivalent ADK capability exists.
 6. Every sprint close must publish an ADK usage delta note.
+7. Every gateway-facing milestone demo must include operator validation with the reusable browser WS client (`scripts/ws_client.sh`).
 
 ## Milestone Ladder (Demonstrable Outcomes)
 
@@ -273,6 +274,10 @@ Demo gate:
    - crate/APIs exercised
    - custom wrappers involved
    - known ADK gaps (if any)
+4. Standard operator client for manual checks:
+   - Launch with `scripts/ws_client.sh`.
+   - Use `tools/ws-client/index.html` to pair/auth/create sessions, stream SessionAudio, and inspect live gateway responses.
+   - Capture manual verification notes (pair/auth/session/audio round-trip) alongside demo script output.
 
 ## Metrics and Acceptance Targets
 

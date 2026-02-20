@@ -23,6 +23,7 @@ Status scale: `NOT_STARTED`, `IN_PROGRESS`, `AT_RISK`, `BLOCKED`, `DONE`
 | Deterministic quality gate script | DONE | `scripts/run_quality_gate.sh` with logs in `output/adk-quality/` |
 | CI ADK sibling strategy | DONE | `.github/workflows/ci.yml` uses `zavora-ai/adk-rust` and sibling symlink |
 | Demo harness skeleton | DONE | `scripts/demo/run_all.sh` + `m0` through `m6` scripts |
+| Reusable browser WS operator client | DONE | `scripts/ws_client.sh` serves `tools/ws-client/index.html` for pair/auth/session/audio validation |
 | Parity board with M0-M6 acceptance | DONE | This document |
 | P0/P1 defects tracked with owners | DONE | `docs/m0-defect-register.md` |
 
@@ -71,3 +72,4 @@ Status scale: `NOT_STARTED`, `IN_PROGRESS`, `AT_RISK`, `BLOCKED`, `DONE`
 
 1. Update this file at each sprint close with status transitions and links to commit SHAs.
 2. Mark a milestone `DONE` only when demo script passes and quality gate is green.
+3. For gateway-facing milestones, include browser client evidence from `scripts/ws_client.sh` in sprint close notes.
