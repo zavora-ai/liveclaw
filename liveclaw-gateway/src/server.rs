@@ -868,6 +868,9 @@ mod tests {
             match &self.diagnostics_err {
                 Some(e) => Err(anyhow::anyhow!("{}", e)),
                 None => Ok(RuntimeDiagnostics {
+                    protocol_version: crate::protocol::PROTOCOL_VERSION.to_string(),
+                    supported_client_messages: crate::protocol::supported_client_message_types(),
+                    supported_server_responses: crate::protocol::supported_server_response_types(),
                     runtime_kind: "native".to_string(),
                     provider_profile: "legacy".to_string(),
                     provider_kind: "openai".to_string(),
@@ -957,6 +960,13 @@ mod tests {
                 assert_eq!(data.runtime_kind, "native");
                 assert_eq!(data.provider_profile, "legacy");
                 assert_eq!(data.compactions_applied_total, 3);
+                assert_eq!(data.protocol_version, crate::protocol::PROTOCOL_VERSION);
+                assert!(data
+                    .supported_client_messages
+                    .contains(&"GetDiagnostics".to_string()));
+                assert!(data
+                    .supported_server_responses
+                    .contains(&"Diagnostics".to_string()));
             }
             other => panic!("Expected Diagnostics response, got {:?}", other),
         }

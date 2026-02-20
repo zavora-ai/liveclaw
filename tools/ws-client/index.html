@@ -401,6 +401,22 @@
         <article class="card panel span-12">
           <h2>Raw JSON Message</h2>
           <div class="field-grid">
+            <div class="field-row compact">
+              <div class="field-stack">
+                <label for="templateType">Message Template</label>
+                <select id="templateType">
+                  <option value="Ping">Ping</option>
+                  <option value="GetDiagnostics">GetDiagnostics</option>
+                  <option value="CreateSession">CreateSession</option>
+                  <option value="TerminateSession">TerminateSession</option>
+                  <option value="SessionAudio">SessionAudio</option>
+                </select>
+              </div>
+              <div class="field-stack">
+                <label>&nbsp;</label>
+                <button id="loadTemplateBtn" class="soft">Load Template</button>
+              </div>
+            </div>
             <textarea id="rawJson" spellcheck="false">{"type":"Ping"}</textarea>
             <div class="field-row">
               <button id="sendRawBtn" class="primary">Send JSON</button>
@@ -451,6 +467,8 @@
           audioProgress: $("audioProgress"),
           rawJson: $("rawJson"),
           sendRawBtn: $("sendRawBtn"),
+          templateType: $("templateType"),
+          loadTemplateBtn: $("loadTemplateBtn"),
           log: $("log"),
         };
 
@@ -526,6 +544,48 @@
           }
         }
 
+        function syncTemplateOptions(types) {
+          if (!Array.isArray(types) || types.length === 0) return;
+          const prev = els.templateType.value;
+          els.templateType.innerHTML = "";
+          for (const t of types) {
+            const opt = document.createElement("option");
+            opt.value = t;
+            opt.textContent = t;
+            els.templateType.appendChild(opt);
+          }
+          if ([...types].includes(prev)) {
+            els.templateType.value = prev;
+          }
+        }
+
+        function templateForType(type) {
+          const sid = els.sessionId.value.trim() || "<SESSION_ID>";
+          const token = els.tokenInput.value.trim() || "<TOKEN>";
+          const code = els.pairCode.value.trim() || "<PAIRING_CODE>";
+          switch (type) {
+            case "Pair":
+              return { type: "Pair", code };
+            case "Authenticate":
+              return { type: "Authenticate", token };
+            case "CreateSession":
+              return buildCreateSessionMessage();
+            case "TerminateSession":
+              return { type: "TerminateSession", session_id: sid };
+            case "SessionAudio":
+              return {
+                type: "SessionAudio",
+                session_id: sid,
+                audio: els.audioB64.value.trim() || "AQID",
+              };
+            case "GetDiagnostics":
+              return { type: "GetDiagnostics" };
+            case "Ping":
+            default:
+              return { type: "Ping" };
+          }
+        }
+
         function connect() {
           const url = els.wsUrl.value.trim();
           if (!url) {
@@ -581,6 +641,7 @@
               const compactions = Number(d.compactions_applied_total || 0);
               const reconnects = Number(d.reconnect_attempts_total || 0);
               els.diagBadge.textContent = `diag: rc=${reconnects} cp=${compactions}`;
+              syncTemplateOptions(d.supported_client_messages);
             }
           };
         }
@@ -736,6 +797,12 @@
         els.sendRawBtn.addEventListener("click", () => {
           const obj = parseJson(els.rawJson.value);
           if (obj) sendObject(obj);
+        });
+
+        els.loadTemplateBtn.addEventListener("click", () => {
+          const type = els.templateType.value;
+          const template = templateForType(type);
+          els.rawJson.value = JSON.stringify(template, null, 2);
         });
 
         els.rawJson.addEventListener("keydown", (event) => {

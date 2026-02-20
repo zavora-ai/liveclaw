@@ -33,7 +33,10 @@ use liveclaw_app::config::{
 use liveclaw_app::storage::{build_memory_service, FileArtifactService};
 use liveclaw_app::tools::build_baseline_tools;
 use liveclaw_gateway::pairing::PairingGuard;
-use liveclaw_gateway::protocol::{RuntimeDiagnostics, SessionConfig};
+use liveclaw_gateway::protocol::{
+    supported_client_message_types, supported_server_response_types, RuntimeDiagnostics,
+    SessionConfig, PROTOCOL_VERSION,
+};
 use liveclaw_gateway::server::{
     Gateway, GatewayConfig, RunnerHandle, SessionAudioOutput, SessionTranscriptOutput,
 };
@@ -987,6 +990,9 @@ impl RunnerHandle for RunnerAdapter {
         let active_sessions = self.sessions.read().await.len();
 
         Ok(RuntimeDiagnostics {
+            protocol_version: PROTOCOL_VERSION.to_string(),
+            supported_client_messages: supported_client_message_types(),
+            supported_server_responses: supported_server_response_types(),
             runtime_kind: runtime_kind_label(&self.runtime_kind).to_string(),
             provider_profile: self.provider.profile_name.clone(),
             provider_kind: provider_kind_label(&self.provider.kind).to_string(),
@@ -1243,6 +1249,7 @@ fn validate_runtime_and_provider(
 
 fn print_doctor_report(config_path: &str, provider: &ProviderSelection, report: &DoctorReport) {
     println!("LiveClaw doctor report for '{}'", config_path);
+    println!("protocol: {}", PROTOCOL_VERSION);
     println!(
         "provider: profile={} kind={} model={} base_url={}",
         provider.profile_name,
@@ -1840,6 +1847,13 @@ mod tests {
         assert_eq!(diagnostics.runtime_kind, "native");
         assert_eq!(diagnostics.provider_profile, "legacy");
         assert_eq!(diagnostics.provider_kind, "openai");
+        assert_eq!(diagnostics.protocol_version, PROTOCOL_VERSION);
+        assert!(diagnostics
+            .supported_client_messages
+            .contains(&"GetDiagnostics".to_string()));
+        assert!(diagnostics
+            .supported_server_responses
+            .contains(&"Diagnostics".to_string()));
         assert_eq!(
             diagnostics.provider_model,
             "gpt-4o-realtime-preview-2024-12-17"

@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 
 /// Type alias for session identifiers.
 pub type SessionId = String;
+pub const PROTOCOL_VERSION: &str = "2026-02-20";
 
 /// Messages sent from the client to the Gateway.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -83,6 +84,9 @@ pub struct SessionConfig {
 /// Runtime and feature diagnostics for operator validation.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct RuntimeDiagnostics {
+    pub protocol_version: String,
+    pub supported_client_messages: Vec<String>,
+    pub supported_server_responses: Vec<String>,
     pub runtime_kind: String,
     pub provider_profile: String,
     pub provider_kind: String,
@@ -97,6 +101,36 @@ pub struct RuntimeDiagnostics {
     pub compaction_max_events_threshold: usize,
     pub compactions_applied_total: u64,
     pub active_sessions: usize,
+}
+
+/// Return supported client->gateway message type tags.
+pub fn supported_client_message_types() -> Vec<String> {
+    vec![
+        "Pair".to_string(),
+        "Authenticate".to_string(),
+        "CreateSession".to_string(),
+        "TerminateSession".to_string(),
+        "SessionAudio".to_string(),
+        "GetDiagnostics".to_string(),
+        "Ping".to_string(),
+    ]
+}
+
+/// Return supported gateway->client response type tags.
+pub fn supported_server_response_types() -> Vec<String> {
+    vec![
+        "PairSuccess".to_string(),
+        "Authenticated".to_string(),
+        "PairFailure".to_string(),
+        "SessionCreated".to_string(),
+        "SessionTerminated".to_string(),
+        "AudioAccepted".to_string(),
+        "AudioOutput".to_string(),
+        "TranscriptUpdate".to_string(),
+        "Diagnostics".to_string(),
+        "Error".to_string(),
+        "Pong".to_string(),
+    ]
 }
 
 #[cfg(test)]
@@ -289,6 +323,9 @@ mod tests {
     fn test_gateway_response_diagnostics() {
         let resp = GatewayResponse::Diagnostics {
             data: RuntimeDiagnostics {
+                protocol_version: PROTOCOL_VERSION.to_string(),
+                supported_client_messages: supported_client_message_types(),
+                supported_server_responses: supported_server_response_types(),
                 runtime_kind: "native".into(),
                 provider_profile: "legacy".into(),
                 provider_kind: "openai".into(),
@@ -308,6 +345,14 @@ mod tests {
         let json = serde_json::to_string(&resp).unwrap();
         let parsed: GatewayResponse = serde_json::from_str(&json).unwrap();
         assert_eq!(resp, parsed);
+    }
+
+    #[test]
+    fn test_supported_protocol_message_lists_include_diagnostics_path() {
+        let client_types = supported_client_message_types();
+        let server_types = supported_server_response_types();
+        assert!(client_types.contains(&"GetDiagnostics".to_string()));
+        assert!(server_types.contains(&"Diagnostics".to_string()));
     }
 
     #[test]

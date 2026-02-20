@@ -97,6 +97,7 @@ Status scale: `NOT_STARTED`, `IN_PROGRESS`, `AT_RISK`, `BLOCKED`, `DONE`
 | Add runtime/provider configuration validation and doctor diagnostics | DONE | `liveclaw-app/src/main.rs` `validate_runtime_and_provider` + `--doctor` command path |
 | Add provider env matrix helper for operators | DONE | `scripts/provider_env_matrix.sh` |
 | Expose live diagnostics via gateway for WS client validation | DONE | `liveclaw-gateway/src/protocol.rs` `GetDiagnostics` / `Diagnostics`; `liveclaw-gateway/src/server.rs` handler and tests |
+| Keep browser client aligned with protocol via server-advertised message capabilities | DONE | `RuntimeDiagnostics.supported_client_messages` consumed by `tools/ws-client/index.html` template sync |
 | Add Sprint 7 checks in M5 demo script | DONE | `scripts/demo/m5_runtime_security.sh` |
 
 ## Notes
