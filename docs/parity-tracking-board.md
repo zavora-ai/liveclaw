@@ -78,6 +78,16 @@ Status scale: `NOT_STARTED`, `IN_PROGRESS`, `AT_RISK`, `BLOCKED`, `DONE`
 | Persist transcript and audio artifacts from realtime callbacks | DONE | `liveclaw-app/src/main.rs` `persist_transcript_artifact` + `persist_audio_artifact` |
 | Add M4 demo checks for memory/artifact persistence | DONE | `scripts/demo/m4_memory_artifacts.sh` |
 
+## Sprint 6 Checklist (In Progress)
+
+| Item | Status | Evidence |
+|---|---|---|
+| Implement reconnect/backoff policy for interrupted provider sessions | DONE | `liveclaw-app/src/main.rs` `ReconnectPolicy`, `reconnect_with_backoff()`, `spawn_runtime_loop()` |
+| Enable config-driven memory compaction behavior | DONE | `liveclaw-app/src/main.rs` `MemoryCompactionPolicy` + `compact_memory_entries()` applied in transcript persistence path |
+| Add reliability tests for reconnect recovery and retry exhaustion | DONE | `tests::test_runtime_loop_recovers_from_interrupted_provider_session`, `tests::test_runtime_loop_stops_when_reconnect_budget_exhausted` |
+| Add Sprint 6 checks to M4 demo script | DONE | `scripts/demo/m4_memory_artifacts.sh` now runs compaction + reconnect tests |
+| Keep lifecycle and compaction execution in `adk-runner` orchestration path | IN_PROGRESS | `liveclaw-app/src/runner.rs` already exposes `EventsCompactionConfig`; active gateway path still needs full adoption |
+
 ## Notes
 
 1. Update this file at each sprint close with status transitions and links to commit SHAs.

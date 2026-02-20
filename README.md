@@ -67,7 +67,10 @@ Key sections:
 | `[plugin]` | PII redaction, memory auto-save, blocked keywords |
 | `[memory]` | Backend type, recall limit |
 | `[graph]` | Enable graph orchestration, recursion limit |
+| `[compaction]` | Transcript compaction toggle and memory threshold |
+| `[artifact]` | Artifact persistence toggle and storage path |
 | `[pairing]` | Max attempts, lockout duration |
+| `[resilience]` | Provider reconnect policy (attempts and backoff) |
 | `[telemetry]` | OTLP export toggle |
 
 Missing fields use documented defaults. Unknown fields are ignored.

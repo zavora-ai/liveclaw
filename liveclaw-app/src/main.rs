@@ -1,7 +1,7 @@
 //! LiveClaw entry point — wires ADK-Rust realtime sessions to the gateway.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -26,7 +26,10 @@ use adk_realtime::runner::{EventHandler, ToolHandler};
 use adk_realtime::{RealtimeConfig, RealtimeRunner};
 use adk_telemetry::{init_telemetry, init_with_otlp};
 
-use liveclaw_app::config::{LiveClawConfig, SecurityConfig as AppSecurityConfig, VoiceConfig};
+use liveclaw_app::config::{
+    CompactionConfig, LiveClawConfig, ResilienceConfig, SecurityConfig as AppSecurityConfig,
+    VoiceConfig,
+};
 use liveclaw_app::storage::{build_memory_service, FileArtifactService};
 use liveclaw_app::tools::build_baseline_tools;
 use liveclaw_gateway::pairing::PairingGuard;
@@ -37,9 +40,109 @@ use liveclaw_gateway::server::{
 
 /// A connected realtime session and its background event loop task.
 struct RealtimeSession {
-    runner: Arc<RealtimeRunner>,
+    runtime: Arc<dyn SessionRuntime>,
     run_task: JoinHandle<()>,
     user_id: String,
+    shutdown: Arc<AtomicBool>,
+}
+
+#[async_trait]
+trait SessionRuntime: Send + Sync {
+    async fn connect(&self) -> Result<()>;
+    async fn run(&self) -> Result<()>;
+    async fn close(&self) -> Result<()>;
+    async fn send_audio_base64(&self, audio_base64: &str) -> Result<()>;
+}
+
+struct RealtimeRunnerRuntime {
+    runner: Arc<RealtimeRunner>,
+}
+
+impl RealtimeRunnerRuntime {
+    fn new(runner: Arc<RealtimeRunner>) -> Self {
+        Self { runner }
+    }
+}
+
+#[async_trait]
+impl SessionRuntime for RealtimeRunnerRuntime {
+    async fn connect(&self) -> Result<()> {
+        self.runner
+            .connect()
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to connect realtime session: {}", e))
+    }
+
+    async fn run(&self) -> Result<()> {
+        self.runner
+            .run()
+            .await
+            .map_err(|e| anyhow::anyhow!("Realtime runner loop ended: {}", e))
+    }
+
+    async fn close(&self) -> Result<()> {
+        self.runner
+            .close()
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to close realtime session cleanly: {}", e))
+    }
+
+    async fn send_audio_base64(&self, audio_base64: &str) -> Result<()> {
+        self.runner
+            .send_audio(audio_base64)
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to send audio to realtime provider: {}", e))
+    }
+}
+
+#[derive(Clone)]
+struct ReconnectPolicy {
+    enable_reconnect: bool,
+    max_attempts: u32,
+    initial_backoff: Duration,
+    max_backoff: Duration,
+}
+
+impl From<&ResilienceConfig> for ReconnectPolicy {
+    fn from(value: &ResilienceConfig) -> Self {
+        let initial_backoff_ms = value.initial_backoff_ms.max(1);
+        let max_backoff_ms = value.max_backoff_ms.max(initial_backoff_ms);
+        Self {
+            enable_reconnect: value.enable_reconnect,
+            max_attempts: value.max_reconnect_attempts,
+            initial_backoff: Duration::from_millis(initial_backoff_ms),
+            max_backoff: Duration::from_millis(max_backoff_ms),
+        }
+    }
+}
+
+impl ReconnectPolicy {
+    fn backoff_for_attempt(&self, attempt: u32) -> Duration {
+        if attempt == 0 {
+            return Duration::from_millis(0);
+        }
+
+        let exponent = attempt.saturating_sub(1).min(16);
+        let multiplier = 1u128 << exponent;
+        let backoff_ms = self.initial_backoff.as_millis().saturating_mul(multiplier);
+        let bounded_ms = backoff_ms.min(self.max_backoff.as_millis());
+        Duration::from_millis(bounded_ms as u64)
+    }
+}
+
+#[derive(Clone)]
+struct MemoryCompactionPolicy {
+    enabled: bool,
+    max_events_threshold: usize,
+}
+
+impl From<&CompactionConfig> for MemoryCompactionPolicy {
+    fn from(value: &CompactionConfig) -> Self {
+        Self {
+            enabled: value.enable_compaction,
+            max_events_threshold: value.max_events_threshold,
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -208,6 +311,153 @@ impl ToolHandler for AdkToolHandler {
     }
 }
 
+fn compact_memory_entries(
+    entries: &mut Vec<adk_memory::MemoryEntry>,
+    max_events_threshold: usize,
+) -> bool {
+    if max_events_threshold < 2 || entries.len() <= max_events_threshold {
+        return false;
+    }
+
+    let keep_recent = std::cmp::max(1, max_events_threshold / 2);
+    let compact_count = entries.len().saturating_sub(keep_recent);
+    if compact_count == 0 {
+        return false;
+    }
+
+    let mut summary_chunks = Vec::new();
+    for entry in entries.iter().take(compact_count) {
+        if let Some(text) = entry
+            .content
+            .parts
+            .iter()
+            .find_map(|part| part.text().map(str::trim))
+            .filter(|text| !text.is_empty())
+        {
+            summary_chunks.push(text.to_string());
+        }
+    }
+
+    let mut summary_text = if summary_chunks.is_empty() {
+        format!("compaction_summary: compacted {} events", compact_count)
+    } else {
+        format!("compaction_summary: {}", summary_chunks.join(" "))
+    };
+    if summary_text.len() > 4_096 {
+        summary_text.truncate(4_096);
+    }
+
+    let summary_entry = adk_memory::MemoryEntry {
+        content: Content::new("system").with_text(summary_text),
+        author: "system".to_string(),
+        timestamp: chrono::Utc::now(),
+    };
+
+    let mut compacted_entries = Vec::with_capacity(1 + keep_recent);
+    compacted_entries.push(summary_entry);
+    compacted_entries.extend(entries.iter().skip(compact_count).cloned());
+    *entries = compacted_entries;
+    true
+}
+
+async fn reconnect_with_backoff(
+    session_id: &str,
+    runtime: Arc<dyn SessionRuntime>,
+    shutdown: Arc<AtomicBool>,
+    policy: &ReconnectPolicy,
+) -> bool {
+    if !policy.enable_reconnect || policy.max_attempts == 0 {
+        return false;
+    }
+
+    for attempt in 1..=policy.max_attempts {
+        if shutdown.load(Ordering::SeqCst) {
+            return false;
+        }
+
+        let backoff = policy.backoff_for_attempt(attempt);
+        warn!(
+            session_id = session_id,
+            attempt = attempt,
+            max_attempts = policy.max_attempts,
+            backoff_ms = backoff.as_millis(),
+            "Attempting realtime reconnect"
+        );
+        tokio::time::sleep(backoff).await;
+
+        if shutdown.load(Ordering::SeqCst) {
+            return false;
+        }
+
+        match runtime.connect().await {
+            Ok(()) => {
+                info!(
+                    session_id = session_id,
+                    attempt = attempt,
+                    "Realtime reconnect succeeded"
+                );
+                return true;
+            }
+            Err(e) => {
+                warn!(
+                    session_id = session_id,
+                    attempt = attempt,
+                    max_attempts = policy.max_attempts,
+                    error = %e,
+                    "Realtime reconnect attempt failed"
+                );
+            }
+        }
+    }
+
+    warn!(
+        session_id = session_id,
+        max_attempts = policy.max_attempts,
+        "Realtime reconnect budget exhausted"
+    );
+    false
+}
+
+fn spawn_runtime_loop(
+    session_id: String,
+    runtime: Arc<dyn SessionRuntime>,
+    shutdown: Arc<AtomicBool>,
+    reconnect_policy: ReconnectPolicy,
+) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        loop {
+            if shutdown.load(Ordering::SeqCst) {
+                break;
+            }
+
+            match runtime.run().await {
+                Ok(()) => {
+                    info!(session_id = %session_id, "Realtime runner loop closed");
+                    break;
+                }
+                Err(e) => {
+                    warn!(
+                        session_id = %session_id,
+                        error = %e,
+                        "Realtime runner loop ended with error"
+                    );
+
+                    let recovered = reconnect_with_backoff(
+                        &session_id,
+                        runtime.clone(),
+                        shutdown.clone(),
+                        &reconnect_policy,
+                    )
+                    .await;
+                    if !recovered {
+                        break;
+                    }
+                }
+            }
+        }
+    })
+}
+
 /// Event handler that forwards realtime outputs with the owning session ID.
 struct GatewayEventForwarder {
     session_id: String,
@@ -215,6 +465,7 @@ struct GatewayEventForwarder {
     memory_store: Arc<dyn MemoryService>,
     session_memory_entries: Arc<RwLock<HashMap<String, Vec<adk_memory::MemoryEntry>>>>,
     artifact_service: Option<Arc<dyn ArtifactService>>,
+    memory_compaction: MemoryCompactionPolicy,
     audio_sequence: AtomicU64,
     transcript_sequence: AtomicU64,
     audio_tx: mpsc::Sender<SessionAudioOutput>,
@@ -233,6 +484,17 @@ impl GatewayEventForwarder {
             let mut guard = self.session_memory_entries.write().await;
             let entries = guard.entry(self.session_id.clone()).or_default();
             entries.push(entry);
+
+            if self.memory_compaction.enabled
+                && compact_memory_entries(entries, self.memory_compaction.max_events_threshold)
+            {
+                info!(
+                    session_id = %self.session_id,
+                    threshold = self.memory_compaction.max_events_threshold,
+                    entry_count = entries.len(),
+                    "Applied transcript memory compaction"
+                );
+            }
             entries.clone()
         };
 
@@ -365,7 +627,18 @@ struct RunnerAdapter {
     memory_store: Arc<dyn MemoryService>,
     session_memory_entries: Arc<RwLock<HashMap<String, Vec<adk_memory::MemoryEntry>>>>,
     artifact_service: Option<Arc<dyn ArtifactService>>,
+    reconnect_policy: ReconnectPolicy,
+    memory_compaction_policy: MemoryCompactionPolicy,
     sessions: Arc<RwLock<HashMap<String, RealtimeSession>>>,
+    audio_tx: mpsc::Sender<SessionAudioOutput>,
+    transcript_tx: mpsc::Sender<SessionTranscriptOutput>,
+}
+
+struct RunnerAdapterInit {
+    memory_store: Arc<dyn MemoryService>,
+    artifact_service: Option<Arc<dyn ArtifactService>>,
+    reconnect_policy: ReconnectPolicy,
+    memory_compaction_policy: MemoryCompactionPolicy,
     audio_tx: mpsc::Sender<SessionAudioOutput>,
     transcript_tx: mpsc::Sender<SessionTranscriptOutput>,
 }
@@ -374,10 +647,7 @@ impl RunnerAdapter {
     fn new(
         voice_cfg: &VoiceConfig,
         security_cfg: &AppSecurityConfig,
-        memory_store: Arc<dyn MemoryService>,
-        artifact_service: Option<Arc<dyn ArtifactService>>,
-        audio_tx: mpsc::Sender<SessionAudioOutput>,
-        transcript_tx: mpsc::Sender<SessionTranscriptOutput>,
+        init: RunnerAdapterInit,
     ) -> Self {
         Self {
             provider: voice_cfg.provider.clone(),
@@ -387,12 +657,14 @@ impl RunnerAdapter {
             default_instructions: voice_cfg.instructions.clone(),
             tool_security: ToolSecurityConfig::from(security_cfg),
             tool_metrics: Arc::new(ToolExecutionMetrics::default()),
-            memory_store,
+            memory_store: init.memory_store,
             session_memory_entries: Arc::new(RwLock::new(HashMap::new())),
-            artifact_service,
+            artifact_service: init.artifact_service,
+            reconnect_policy: init.reconnect_policy,
+            memory_compaction_policy: init.memory_compaction_policy,
             sessions: Arc::new(RwLock::new(HashMap::new())),
-            audio_tx,
-            transcript_tx,
+            audio_tx: init.audio_tx,
+            transcript_tx: init.transcript_tx,
         }
     }
 
@@ -519,6 +791,7 @@ impl RunnerHandle for RunnerAdapter {
                 memory_store: self.memory_store.clone(),
                 session_memory_entries: self.session_memory_entries.clone(),
                 artifact_service: self.artifact_service.clone(),
+                memory_compaction: self.memory_compaction_policy.clone(),
                 audio_sequence: AtomicU64::new(0),
                 transcript_sequence: AtomicU64::new(0),
                 audio_tx: self.audio_tx.clone(),
@@ -546,23 +819,19 @@ impl RunnerHandle for RunnerAdapter {
                 .map_err(|e| anyhow::anyhow!("Failed to build realtime runner: {}", e))?,
         );
 
-        runner
-            .connect()
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to connect realtime session: {}", e))?;
-
-        let run_runner = runner.clone();
-        let sid = session_id.to_string();
-        let run_task = tokio::spawn(async move {
-            match run_runner.run().await {
-                Ok(()) => info!(session_id = %sid, "Realtime runner loop closed"),
-                Err(e) => warn!(session_id = %sid, error = %e, "Realtime runner loop ended"),
-            }
-        });
+        let runtime: Arc<dyn SessionRuntime> = Arc::new(RealtimeRunnerRuntime::new(runner));
+        runtime.connect().await?;
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let run_task = spawn_runtime_loop(
+            session_id.to_string(),
+            runtime.clone(),
+            shutdown.clone(),
+            self.reconnect_policy.clone(),
+        );
 
         let mut sessions = self.sessions.write().await;
         if sessions.contains_key(session_id) {
-            let _ = runner.close().await;
+            let _ = runtime.close().await;
             run_task.abort();
             bail!("Session '{}' already exists", session_id);
         }
@@ -570,9 +839,10 @@ impl RunnerHandle for RunnerAdapter {
         sessions.insert(
             session_id.to_string(),
             RealtimeSession {
-                runner,
+                runtime,
                 run_task,
                 user_id: user_id.to_string(),
+                shutdown,
             },
         );
 
@@ -583,15 +853,18 @@ impl RunnerHandle for RunnerAdapter {
         let session = { self.sessions.write().await.remove(session_id) };
 
         let Some(RealtimeSession {
-            runner,
+            runtime,
             run_task,
             user_id,
+            shutdown,
         }) = session
         else {
             bail!("Session '{}' not found", session_id);
         };
 
-        if let Err(e) = runner.close().await {
+        shutdown.store(true, Ordering::SeqCst);
+
+        if let Err(e) = runtime.close().await {
             warn!(session_id = session_id, error = %e, "Failed to close realtime session cleanly");
         }
 
@@ -643,17 +916,14 @@ impl RunnerHandle for RunnerAdapter {
             bail!("Audio payload is empty");
         }
 
-        let runner = {
+        let runtime = {
             let sessions = self.sessions.read().await;
-            sessions.get(session_id).map(|s| s.runner.clone())
+            sessions.get(session_id).map(|s| s.runtime.clone())
         }
         .ok_or_else(|| anyhow::anyhow!("Session '{}' not found", session_id))?;
 
         let audio_b64 = base64_encode(audio);
-        runner
-            .send_audio(&audio_b64)
-            .await
-            .context("Failed to send audio to realtime provider")
+        runtime.send_audio_base64(&audio_b64).await
     }
 }
 
@@ -770,10 +1040,14 @@ async fn main() -> Result<()> {
     let runner_handle: Arc<dyn RunnerHandle> = Arc::new(RunnerAdapter::new(
         &config.voice,
         &config.security,
-        memory_store,
-        artifact_service,
-        gw_audio_tx,
-        gw_transcript_tx,
+        RunnerAdapterInit {
+            memory_store,
+            artifact_service,
+            reconnect_policy: ReconnectPolicy::from(&config.resilience),
+            memory_compaction_policy: MemoryCompactionPolicy::from(&config.compaction),
+            audio_tx: gw_audio_tx,
+            transcript_tx: gw_transcript_tx,
+        },
     ));
 
     let gateway = Gateway::with_output_channels(
@@ -799,6 +1073,8 @@ mod tests {
     use adk_memory::SearchRequest;
     use liveclaw_app::config::SecurityConfig as AppSecurityConfig;
     use liveclaw_app::storage::FileArtifactService;
+    use std::collections::VecDeque;
+    use std::sync::atomic::AtomicUsize;
 
     fn test_adapter(default_role: &str, allowlist: Vec<&str>) -> RunnerAdapter {
         let voice_cfg = VoiceConfig {
@@ -825,10 +1101,14 @@ mod tests {
         RunnerAdapter::new(
             &voice_cfg,
             &security_cfg,
-            memory_store,
-            None,
-            audio_tx,
-            transcript_tx,
+            RunnerAdapterInit {
+                memory_store,
+                artifact_service: None,
+                reconnect_policy: ReconnectPolicy::from(&ResilienceConfig::default()),
+                memory_compaction_policy: MemoryCompactionPolicy::from(&CompactionConfig::default()),
+                audio_tx,
+                transcript_tx,
+            },
         )
     }
 
@@ -852,6 +1132,10 @@ mod tests {
             memory_store,
             session_memory_entries: Arc::new(RwLock::new(HashMap::new())),
             artifact_service: None,
+            memory_compaction: MemoryCompactionPolicy {
+                enabled: false,
+                max_events_threshold: 500,
+            },
             audio_sequence: AtomicU64::new(0),
             transcript_sequence: AtomicU64::new(0),
             audio_tx,
@@ -904,6 +1188,10 @@ mod tests {
             memory_store: memory_store.clone(),
             session_memory_entries: Arc::new(RwLock::new(HashMap::new())),
             artifact_service: Some(artifact_service.clone()),
+            memory_compaction: MemoryCompactionPolicy {
+                enabled: false,
+                max_events_threshold: 500,
+            },
             audio_sequence: AtomicU64::new(0),
             transcript_sequence: AtomicU64::new(0),
             audio_tx,
@@ -1021,5 +1309,181 @@ mod tests {
         let (total, failed, _duration) = metrics.snapshot();
         assert_eq!(total, 1);
         assert_eq!(failed, 0);
+    }
+
+    #[test]
+    fn test_reconnect_policy_backoff_caps_at_max() {
+        let policy = ReconnectPolicy {
+            enable_reconnect: true,
+            max_attempts: 5,
+            initial_backoff: Duration::from_millis(50),
+            max_backoff: Duration::from_millis(300),
+        };
+
+        assert_eq!(policy.backoff_for_attempt(1), Duration::from_millis(50));
+        assert_eq!(policy.backoff_for_attempt(2), Duration::from_millis(100));
+        assert_eq!(policy.backoff_for_attempt(3), Duration::from_millis(200));
+        assert_eq!(policy.backoff_for_attempt(4), Duration::from_millis(300));
+        assert_eq!(policy.backoff_for_attempt(5), Duration::from_millis(300));
+    }
+
+    fn memory_entry(text: &str) -> adk_memory::MemoryEntry {
+        adk_memory::MemoryEntry {
+            content: Content::new("assistant").with_text(text),
+            author: "assistant".to_string(),
+            timestamp: chrono::Utc::now(),
+        }
+    }
+
+    #[test]
+    fn test_compact_memory_entries_reduces_history_when_threshold_exceeded() {
+        let mut entries = vec![
+            memory_entry("alpha one"),
+            memory_entry("beta two"),
+            memory_entry("gamma three"),
+            memory_entry("delta four"),
+            memory_entry("epsilon five"),
+            memory_entry("zeta six"),
+        ];
+
+        let compacted = compact_memory_entries(&mut entries, 4);
+        assert!(compacted);
+        assert_eq!(entries.len(), 3);
+        assert_eq!(entries[0].author, "system");
+        let summary = entries[0]
+            .content
+            .parts
+            .iter()
+            .find_map(Part::text)
+            .unwrap_or_default();
+        assert!(summary.contains("compaction_summary"));
+        assert!(summary.contains("alpha one"));
+    }
+
+    #[derive(Clone, Copy)]
+    enum ScriptedResult {
+        Ok,
+        Err(&'static str),
+    }
+
+    #[derive(Default)]
+    struct MockSessionRuntime {
+        run_results: Mutex<VecDeque<ScriptedResult>>,
+        connect_results: Mutex<VecDeque<ScriptedResult>>,
+        close_calls: AtomicUsize,
+        run_calls: AtomicUsize,
+        connect_calls: AtomicUsize,
+    }
+
+    impl MockSessionRuntime {
+        fn with_scripts(
+            run_results: Vec<ScriptedResult>,
+            connect_results: Vec<ScriptedResult>,
+        ) -> Self {
+            Self {
+                run_results: Mutex::new(VecDeque::from(run_results)),
+                connect_results: Mutex::new(VecDeque::from(connect_results)),
+                close_calls: AtomicUsize::new(0),
+                run_calls: AtomicUsize::new(0),
+                connect_calls: AtomicUsize::new(0),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl SessionRuntime for MockSessionRuntime {
+        async fn connect(&self) -> Result<()> {
+            self.connect_calls.fetch_add(1, Ordering::SeqCst);
+            let outcome = self
+                .connect_results
+                .lock()
+                .expect("connect script lock poisoned")
+                .pop_front()
+                .unwrap_or(ScriptedResult::Ok);
+            match outcome {
+                ScriptedResult::Ok => Ok(()),
+                ScriptedResult::Err(msg) => Err(anyhow::anyhow!(msg)),
+            }
+        }
+
+        async fn run(&self) -> Result<()> {
+            self.run_calls.fetch_add(1, Ordering::SeqCst);
+            let outcome = self
+                .run_results
+                .lock()
+                .expect("run script lock poisoned")
+                .pop_front()
+                .unwrap_or(ScriptedResult::Ok);
+            match outcome {
+                ScriptedResult::Ok => Ok(()),
+                ScriptedResult::Err(msg) => Err(anyhow::anyhow!(msg)),
+            }
+        }
+
+        async fn close(&self) -> Result<()> {
+            self.close_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+
+        async fn send_audio_base64(&self, _audio_base64: &str) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn test_runtime_loop_recovers_from_interrupted_provider_session() {
+        let runtime = Arc::new(MockSessionRuntime::with_scripts(
+            vec![ScriptedResult::Err("provider drop"), ScriptedResult::Ok],
+            vec![ScriptedResult::Ok],
+        ));
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let policy = ReconnectPolicy {
+            enable_reconnect: true,
+            max_attempts: 3,
+            initial_backoff: Duration::from_millis(1),
+            max_backoff: Duration::from_millis(2),
+        };
+
+        let handle = spawn_runtime_loop(
+            "sess-recover".to_string(),
+            runtime.clone(),
+            shutdown,
+            policy,
+        );
+        tokio::time::timeout(Duration::from_millis(200), handle)
+            .await
+            .expect("runtime loop should complete")
+            .expect("runtime task should not panic");
+
+        assert_eq!(runtime.run_calls.load(Ordering::SeqCst), 2);
+        assert_eq!(runtime.connect_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn test_runtime_loop_stops_when_reconnect_budget_exhausted() {
+        let runtime = Arc::new(MockSessionRuntime::with_scripts(
+            vec![ScriptedResult::Err("provider drop")],
+            vec![
+                ScriptedResult::Err("connect fail 1"),
+                ScriptedResult::Err("connect fail 2"),
+            ],
+        ));
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let policy = ReconnectPolicy {
+            enable_reconnect: true,
+            max_attempts: 2,
+            initial_backoff: Duration::from_millis(1),
+            max_backoff: Duration::from_millis(1),
+        };
+
+        let handle =
+            spawn_runtime_loop("sess-budget".to_string(), runtime.clone(), shutdown, policy);
+        tokio::time::timeout(Duration::from_millis(200), handle)
+            .await
+            .expect("runtime loop should complete")
+            .expect("runtime task should not panic");
+
+        assert_eq!(runtime.run_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(runtime.connect_calls.load(Ordering::SeqCst), 2);
     }
 }

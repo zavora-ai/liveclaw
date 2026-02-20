@@ -44,5 +44,11 @@ storage_path = "./artifacts"
 max_attempts = 5
 lockout_duration_secs = 300
 
+[resilience]
+enable_reconnect = true
+max_reconnect_attempts = 5
+initial_backoff_ms = 250
+max_backoff_ms = 4000
+
 [telemetry]
 otlp_enabled = false

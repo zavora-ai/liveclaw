@@ -54,6 +54,18 @@ fn default_lockout_secs() -> u64 {
     300
 }
 
+fn default_reconnect_max_attempts() -> u32 {
+    5
+}
+
+fn default_reconnect_initial_backoff_ms() -> u64 {
+    250
+}
+
+fn default_reconnect_max_backoff_ms() -> u64 {
+    4_000
+}
+
 // ── AudioFormat enum ────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
@@ -227,6 +239,29 @@ impl Default for PairingConfig {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ResilienceConfig {
+    #[serde(default = "default_true")]
+    pub enable_reconnect: bool,
+    #[serde(default = "default_reconnect_max_attempts")]
+    pub max_reconnect_attempts: u32,
+    #[serde(default = "default_reconnect_initial_backoff_ms")]
+    pub initial_backoff_ms: u64,
+    #[serde(default = "default_reconnect_max_backoff_ms")]
+    pub max_backoff_ms: u64,
+}
+
+impl Default for ResilienceConfig {
+    fn default() -> Self {
+        Self {
+            enable_reconnect: default_true(),
+            max_reconnect_attempts: default_reconnect_max_attempts(),
+            initial_backoff_ms: default_reconnect_initial_backoff_ms(),
+            max_backoff_ms: default_reconnect_max_backoff_ms(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 pub struct TelemetryConfig {
     #[serde(default)]
@@ -255,6 +290,8 @@ pub struct LiveClawConfig {
     pub artifact: ArtifactConfig,
     #[serde(default)]
     pub pairing: PairingConfig,
+    #[serde(default)]
+    pub resilience: ResilienceConfig,
     #[serde(default)]
     pub telemetry: TelemetryConfig,
 }
@@ -327,6 +364,12 @@ mod tests {
         assert_eq!(cfg.pairing.max_attempts, 5);
         assert_eq!(cfg.pairing.lockout_duration_secs, 300);
 
+        // Resilience defaults
+        assert!(cfg.resilience.enable_reconnect);
+        assert_eq!(cfg.resilience.max_reconnect_attempts, 5);
+        assert_eq!(cfg.resilience.initial_backoff_ms, 250);
+        assert_eq!(cfg.resilience.max_backoff_ms, 4_000);
+
         // Telemetry defaults
         assert!(!cfg.telemetry.otlp_enabled);
     }
@@ -378,6 +421,12 @@ mod tests {
                 max_attempts: 3,
                 lockout_duration_secs: 600,
             },
+            resilience: ResilienceConfig {
+                enable_reconnect: false,
+                max_reconnect_attempts: 7,
+                initial_backoff_ms: 100,
+                max_backoff_ms: 2_000,
+            },
             telemetry: TelemetryConfig { otlp_enabled: true },
         };
 
@@ -404,6 +453,7 @@ port = 9999
         assert_eq!(cfg.memory.recall_limit, 10);
         assert!(!cfg.graph.enable_graph);
         assert_eq!(cfg.pairing.max_attempts, 5);
+        assert!(cfg.resilience.enable_reconnect);
         assert!(!cfg.telemetry.otlp_enabled);
     }
 
@@ -466,6 +516,10 @@ foo = "bar"
         assert_eq!(cfg.compaction.max_events_threshold, 500);
         assert!(!cfg.artifact.enable_artifacts);
         assert_eq!(cfg.pairing.max_attempts, 5);
+        assert!(cfg.resilience.enable_reconnect);
+        assert_eq!(cfg.resilience.max_reconnect_attempts, 5);
+        assert_eq!(cfg.resilience.initial_backoff_ms, 250);
+        assert_eq!(cfg.resilience.max_backoff_ms, 4_000);
         assert!(!cfg.telemetry.otlp_enabled);
     }
 
