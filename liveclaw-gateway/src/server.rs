@@ -16,8 +16,8 @@ use tracing::{error, info, warn};
 
 use crate::pairing::PairingGuard;
 use crate::protocol::{
-    GatewayHealth, GatewayMessage, GatewayResponse, RuntimeDiagnostics, SessionConfig,
-    PROTOCOL_VERSION,
+    GatewayHealth, GatewayMessage, GatewayResponse, PriorityNotice, RuntimeDiagnostics,
+    SessionConfig, PROTOCOL_VERSION,
 };
 
 // ---------------------------------------------------------------------------
@@ -105,6 +105,9 @@ struct AppState {
     /// Per-session senders for forwarding GatewayResponse messages (AudioOutput,
     /// TranscriptUpdate) back to the WebSocket connection that owns the session.
     ws_response_senders: Arc<RwLock<HashMap<String, mpsc::Sender<GatewayResponse>>>>,
+    /// Per-session senders for forwarding priority control-plane responses
+    /// (PriorityNotice) with precedence over standard channel traffic.
+    ws_priority_senders: Arc<RwLock<HashMap<String, mpsc::Sender<GatewayResponse>>>>,
 }
 
 // ---------------------------------------------------------------------------
@@ -185,6 +188,8 @@ impl Gateway {
     pub async fn start(self) -> anyhow::Result<()> {
         let ws_response_senders: Arc<RwLock<HashMap<String, mpsc::Sender<GatewayResponse>>>> =
             Arc::new(RwLock::new(HashMap::new()));
+        let ws_priority_senders: Arc<RwLock<HashMap<String, mpsc::Sender<GatewayResponse>>>> =
+            Arc::new(RwLock::new(HashMap::new()));
 
         let state = AppState {
             pairing: self.pairing,
@@ -193,6 +198,7 @@ impl Gateway {
             audio_senders: self.audio_senders,
             session_owners: Arc::new(RwLock::new(HashMap::new())),
             ws_response_senders: ws_response_senders.clone(),
+            ws_priority_senders,
         };
 
         // Spawn background task to consume audio output and route to WebSocket clients
@@ -316,11 +322,22 @@ async fn handle_ws(mut ws: WebSocket, state: AppState) {
         conn.principal_id = Some("anonymous".to_string());
     }
 
-    // Per-connection channel for receiving server-pushed responses
-    let (ws_tx, mut ws_rx) = mpsc::channel::<GatewayResponse>(256);
+    // Per-connection channels for server-pushed responses.
+    let (ws_standard_tx, mut ws_standard_rx) = mpsc::channel::<GatewayResponse>(256);
+    let (ws_priority_tx, mut ws_priority_rx) = mpsc::channel::<GatewayResponse>(64);
 
     loop {
         tokio::select! {
+            biased;
+
+            // Priority channel traffic is always processed before standard
+            // channel traffic and incoming client frames.
+            Some(resp) = ws_priority_rx.recv() => {
+                if send_response(&mut ws, &resp).await.is_err() {
+                    break;
+                }
+            }
+
             // Client → Server: incoming WebSocket messages
             msg_result = recv_message(&mut ws) => {
                 let msg_result = match msg_result {
@@ -346,14 +363,21 @@ async fn handle_ws(mut ws: WebSocket, state: AppState) {
                     }
                 };
 
-                let resp = handle_message(gateway_msg, &state, &mut conn, &ws_tx).await;
+                let resp = handle_message(
+                    gateway_msg,
+                    &state,
+                    &mut conn,
+                    &ws_standard_tx,
+                    &ws_priority_tx,
+                )
+                .await;
                 if send_response(&mut ws, &resp).await.is_err() {
                     break;
                 }
             }
 
             // Server → Client: forwarded AudioOutput / TranscriptUpdate responses
-            Some(resp) = ws_rx.recv() => {
+            Some(resp) = ws_standard_rx.recv() => {
                 if send_response(&mut ws, &resp).await.is_err() {
                     break;
                 }
@@ -364,8 +388,10 @@ async fn handle_ws(mut ws: WebSocket, state: AppState) {
     // Cleanup: remove ws_response_senders for all sessions owned by this connection
     {
         let mut senders = state.ws_response_senders.write().await;
+        let mut priority_senders = state.ws_priority_senders.write().await;
         for session_id in &conn.owned_sessions {
             senders.remove(session_id);
+            priority_senders.remove(session_id);
         }
     }
 
@@ -386,6 +412,7 @@ async fn handle_message(
     state: &AppState,
     conn: &mut ConnectionState,
     ws_tx: &mpsc::Sender<GatewayResponse>,
+    ws_priority_tx: &mpsc::Sender<GatewayResponse>,
 ) -> GatewayResponse {
     match msg {
         GatewayMessage::Ping => GatewayResponse::Pong,
@@ -394,13 +421,20 @@ async fn handle_message(
 
         GatewayMessage::Authenticate { token } => handle_authenticate(&token, state, conn),
 
+        GatewayMessage::PriorityProbe => {
+            if !conn.authenticated {
+                return auth_required_error();
+            }
+            handle_priority_probe(conn, ws_tx, ws_priority_tx).await
+        }
+
         GatewayMessage::GetGatewayHealth => handle_get_gateway_health(state).await,
 
         GatewayMessage::CreateSession { config } => {
             if !conn.authenticated {
                 return auth_required_error();
             }
-            handle_create_session(config, state, conn, ws_tx).await
+            handle_create_session(config, state, conn, ws_tx, ws_priority_tx).await
         }
 
         GatewayMessage::TerminateSession { session_id } => {
@@ -414,7 +448,7 @@ async fn handle_message(
             if !conn.authenticated {
                 return auth_required_error();
             }
-            handle_session_audio(&session_id, &audio, state, conn, ws_tx).await
+            handle_session_audio(&session_id, &audio, state, conn, ws_tx, ws_priority_tx).await
         }
 
         GatewayMessage::GetDiagnostics => {
@@ -498,6 +532,7 @@ async fn handle_create_session(
     state: &AppState,
     conn: &mut ConnectionState,
     ws_tx: &mpsc::Sender<GatewayResponse>,
+    ws_priority_tx: &mpsc::Sender<GatewayResponse>,
 ) -> GatewayResponse {
     let principal_id = conn
         .principal_id
@@ -524,6 +559,11 @@ async fn handle_create_session(
                 .write()
                 .await
                 .insert(sid.clone(), ws_tx.clone());
+            state
+                .ws_priority_senders
+                .write()
+                .await
+                .insert(sid.clone(), ws_priority_tx.clone());
             if !conn.owned_sessions.contains(&sid) {
                 conn.owned_sessions.push(sid.clone());
             }
@@ -546,7 +586,7 @@ async fn handle_terminate_session(
     state: &AppState,
     conn: &mut ConnectionState,
 ) -> GatewayResponse {
-    if let Err(resp) = authorize_session_access(session_id, state, conn, None).await {
+    if let Err(resp) = authorize_session_access(session_id, state, conn, None, None).await {
         return resp;
     }
 
@@ -554,6 +594,8 @@ async fn handle_terminate_session(
     state.audio_senders.write().await.remove(session_id);
     // Remove ws_response_sender for this session
     state.ws_response_senders.write().await.remove(session_id);
+    // Remove priority sender for this session
+    state.ws_priority_senders.write().await.remove(session_id);
     // Remove stable session owner
     state.session_owners.write().await.remove(session_id);
     // Remove from owned sessions
@@ -580,8 +622,11 @@ async fn handle_session_audio(
     state: &AppState,
     conn: &mut ConnectionState,
     ws_tx: &mpsc::Sender<GatewayResponse>,
+    ws_priority_tx: &mpsc::Sender<GatewayResponse>,
 ) -> GatewayResponse {
-    if let Err(resp) = authorize_session_access(session_id, state, conn, Some(ws_tx)).await {
+    if let Err(resp) =
+        authorize_session_access(session_id, state, conn, Some(ws_tx), Some(ws_priority_tx)).await
+    {
         return resp;
     }
 
@@ -633,6 +678,7 @@ async fn handle_get_diagnostics(state: &AppState) -> GatewayResponse {
 async fn handle_get_gateway_health(state: &AppState) -> GatewayResponse {
     let active_sessions = state.session_owners.read().await.len();
     let active_ws_bindings = state.ws_response_senders.read().await.len();
+    let active_priority_bindings = state.ws_priority_senders.read().await.len();
     let require_pairing = !state.pairing.is_authenticated("");
     GatewayResponse::GatewayHealth {
         data: GatewayHealth {
@@ -641,7 +687,48 @@ async fn handle_get_gateway_health(state: &AppState) -> GatewayResponse {
             require_pairing,
             active_sessions,
             active_ws_bindings,
+            active_priority_bindings,
         },
+    }
+}
+
+/// Handle PriorityProbe — enqueues one standard-plane event and one
+/// priority-plane notice so operators can validate channel precedence.
+async fn handle_priority_probe(
+    conn: &ConnectionState,
+    ws_tx: &mpsc::Sender<GatewayResponse>,
+    ws_priority_tx: &mpsc::Sender<GatewayResponse>,
+) -> GatewayResponse {
+    let session_id = conn
+        .owned_sessions
+        .last()
+        .cloned()
+        .unwrap_or_else(|| "priority-probe".to_string());
+
+    let queued_standard = ws_tx
+        .send(GatewayResponse::TranscriptUpdate {
+            session_id: session_id.clone(),
+            text: "priority_probe_standard".to_string(),
+            is_final: false,
+        })
+        .await
+        .is_ok();
+
+    let queued_priority = ws_priority_tx
+        .send(GatewayResponse::PriorityNotice {
+            data: PriorityNotice {
+                level: "info".to_string(),
+                code: "priority_probe".to_string(),
+                message: "Priority channel is active".to_string(),
+                session_id: Some(session_id),
+            },
+        })
+        .await
+        .is_ok();
+
+    GatewayResponse::PriorityProbeAccepted {
+        queued_standard,
+        queued_priority,
     }
 }
 
@@ -662,6 +749,7 @@ async fn authorize_session_access(
     state: &AppState,
     conn: &mut ConnectionState,
     ws_tx: Option<&mpsc::Sender<GatewayResponse>>,
+    ws_priority_tx: Option<&mpsc::Sender<GatewayResponse>>,
 ) -> Result<(), GatewayResponse> {
     let Some(principal_id) = conn.principal_id.as_deref() else {
         return Err(auth_required_error());
@@ -671,6 +759,13 @@ async fn authorize_session_access(
         if let Some(sender) = ws_tx {
             state
                 .ws_response_senders
+                .write()
+                .await
+                .insert(session_id.to_string(), sender.clone());
+        }
+        if let Some(sender) = ws_priority_tx {
+            state
+                .ws_priority_senders
                 .write()
                 .await
                 .insert(session_id.to_string(), sender.clone());
@@ -689,6 +784,13 @@ async fn authorize_session_access(
             if let Some(sender) = ws_tx {
                 state
                     .ws_response_senders
+                    .write()
+                    .await
+                    .insert(session_id.to_string(), sender.clone());
+            }
+            if let Some(sender) = ws_priority_tx {
+                state
+                    .ws_priority_senders
                     .write()
                     .await
                     .insert(session_id.to_string(), sender.clone());
@@ -930,6 +1032,7 @@ mod tests {
             audio_senders: Arc::new(RwLock::new(HashMap::new())),
             session_owners: Arc::new(RwLock::new(HashMap::new())),
             ws_response_senders: Arc::new(RwLock::new(HashMap::new())),
+            ws_priority_senders: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -946,10 +1049,12 @@ mod tests {
         ConnectionState::new()
     }
 
-    /// Create a dummy ws_tx for tests that don't need to inspect forwarded responses.
-    fn dummy_ws_tx() -> mpsc::Sender<GatewayResponse> {
-        let (tx, _rx) = mpsc::channel(16);
-        tx
+    /// Create dummy standard/priority ws senders for tests that don't need to
+    /// inspect forwarded responses.
+    fn dummy_ws_txs() -> (mpsc::Sender<GatewayResponse>, mpsc::Sender<GatewayResponse>) {
+        let (standard_tx, _standard_rx) = mpsc::channel(16);
+        let (priority_tx, _priority_rx) = mpsc::channel(16);
+        (standard_tx, priority_tx)
     }
 
     // --- Ping/Pong ---
@@ -958,8 +1063,15 @@ mod tests {
     async fn test_ping_returns_pong() {
         let state = make_state(MockRunner::ok(), true);
         let mut conn = unauthed_conn();
-        let ws_tx = dummy_ws_tx();
-        let resp = handle_message(GatewayMessage::Ping, &state, &mut conn, &ws_tx).await;
+        let (ws_tx, ws_priority_tx) = dummy_ws_txs();
+        let resp = handle_message(
+            GatewayMessage::Ping,
+            &state,
+            &mut conn,
+            &ws_tx,
+            &ws_priority_tx,
+        )
+        .await;
         assert_eq!(resp, GatewayResponse::Pong);
     }
 
@@ -967,9 +1079,16 @@ mod tests {
     async fn test_ping_works_without_auth() {
         let state = make_state(MockRunner::ok(), true);
         let mut conn = unauthed_conn();
-        let ws_tx = dummy_ws_tx();
+        let (ws_tx, ws_priority_tx) = dummy_ws_txs();
         assert!(!conn.authenticated);
-        let resp = handle_message(GatewayMessage::Ping, &state, &mut conn, &ws_tx).await;
+        let resp = handle_message(
+            GatewayMessage::Ping,
+            &state,
+            &mut conn,
+            &ws_tx,
+            &ws_priority_tx,
+        )
+        .await;
         assert_eq!(resp, GatewayResponse::Pong);
     }
 
@@ -977,8 +1096,15 @@ mod tests {
     async fn test_get_diagnostics_requires_auth() {
         let state = make_state(MockRunner::ok(), true);
         let mut conn = unauthed_conn();
-        let ws_tx = dummy_ws_tx();
-        let resp = handle_message(GatewayMessage::GetDiagnostics, &state, &mut conn, &ws_tx).await;
+        let (ws_tx, ws_priority_tx) = dummy_ws_txs();
+        let resp = handle_message(
+            GatewayMessage::GetDiagnostics,
+            &state,
+            &mut conn,
+            &ws_tx,
+            &ws_priority_tx,
+        )
+        .await;
         assert_eq!(resp, auth_required_error());
     }
 
@@ -986,8 +1112,15 @@ mod tests {
     async fn test_get_diagnostics_success() {
         let state = make_state(MockRunner::ok(), true);
         let mut conn = authed_conn();
-        let ws_tx = dummy_ws_tx();
-        let resp = handle_message(GatewayMessage::GetDiagnostics, &state, &mut conn, &ws_tx).await;
+        let (ws_tx, ws_priority_tx) = dummy_ws_txs();
+        let resp = handle_message(
+            GatewayMessage::GetDiagnostics,
+            &state,
+            &mut conn,
+            &ws_tx,
+            &ws_priority_tx,
+        )
+        .await;
         match resp {
             GatewayResponse::Diagnostics { data } => {
                 assert_eq!(data.runtime_kind, "native");
@@ -1014,9 +1147,15 @@ mod tests {
     async fn test_get_gateway_health_works_without_auth() {
         let state = make_state(MockRunner::ok(), true);
         let mut conn = unauthed_conn();
-        let ws_tx = dummy_ws_tx();
-        let resp =
-            handle_message(GatewayMessage::GetGatewayHealth, &state, &mut conn, &ws_tx).await;
+        let (ws_tx, ws_priority_tx) = dummy_ws_txs();
+        let resp = handle_message(
+            GatewayMessage::GetGatewayHealth,
+            &state,
+            &mut conn,
+            &ws_tx,
+            &ws_priority_tx,
+        )
+        .await;
 
         match resp {
             GatewayResponse::GatewayHealth { data } => {
@@ -1024,8 +1163,73 @@ mod tests {
                 assert!(data.require_pairing);
                 assert_eq!(data.active_sessions, 0);
                 assert_eq!(data.active_ws_bindings, 0);
+                assert_eq!(data.active_priority_bindings, 0);
             }
             other => panic!("Expected GatewayHealth response, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_priority_probe_requires_auth() {
+        let state = make_state(MockRunner::ok(), true);
+        let mut conn = unauthed_conn();
+        let (ws_tx, ws_priority_tx) = dummy_ws_txs();
+        let resp = handle_message(
+            GatewayMessage::PriorityProbe,
+            &state,
+            &mut conn,
+            &ws_tx,
+            &ws_priority_tx,
+        )
+        .await;
+        assert_eq!(resp, auth_required_error());
+    }
+
+    #[tokio::test]
+    async fn test_priority_probe_enqueues_priority_and_standard_messages() {
+        let state = make_state(MockRunner::ok(), false);
+        let mut conn = authed_conn();
+        conn.owned_sessions.push("sess-priority".to_string());
+        let (ws_tx, mut ws_rx) = mpsc::channel(16);
+        let (ws_priority_tx, mut ws_priority_rx) = mpsc::channel(16);
+
+        let resp = handle_message(
+            GatewayMessage::PriorityProbe,
+            &state,
+            &mut conn,
+            &ws_tx,
+            &ws_priority_tx,
+        )
+        .await;
+        match resp {
+            GatewayResponse::PriorityProbeAccepted {
+                queued_standard,
+                queued_priority,
+            } => {
+                assert!(queued_standard);
+                assert!(queued_priority);
+            }
+            other => panic!("Expected PriorityProbeAccepted, got {:?}", other),
+        }
+
+        let priority = ws_priority_rx.recv().await.expect("priority notice");
+        match priority {
+            GatewayResponse::PriorityNotice { data } => {
+                assert_eq!(data.code, "priority_probe");
+                assert_eq!(data.session_id.as_deref(), Some("sess-priority"));
+            }
+            other => panic!("Expected PriorityNotice, got {:?}", other),
+        }
+
+        let standard = ws_rx.recv().await.expect("standard response");
+        match standard {
+            GatewayResponse::TranscriptUpdate {
+                session_id, text, ..
+            } => {
+                assert_eq!(session_id, "sess-priority");
+                assert_eq!(text, "priority_probe_standard");
+            }
+            other => panic!("Expected TranscriptUpdate, got {:?}", other),
         }
     }
 
@@ -1035,12 +1239,13 @@ mod tests {
     async fn test_create_session_requires_auth() {
         let state = make_state(MockRunner::ok(), true);
         let mut conn = unauthed_conn();
-        let ws_tx = dummy_ws_tx();
+        let (ws_tx, ws_priority_tx) = dummy_ws_txs();
         let resp = handle_message(
             GatewayMessage::CreateSession { config: None },
             &state,
             &mut conn,
             &ws_tx,
+            &ws_priority_tx,
         )
         .await;
         match resp {
@@ -1053,7 +1258,7 @@ mod tests {
     async fn test_terminate_session_requires_auth() {
         let state = make_state(MockRunner::ok(), true);
         let mut conn = unauthed_conn();
-        let ws_tx = dummy_ws_tx();
+        let (ws_tx, ws_priority_tx) = dummy_ws_txs();
         let resp = handle_message(
             GatewayMessage::TerminateSession {
                 session_id: "s1".into(),
@@ -1061,6 +1266,7 @@ mod tests {
             &state,
             &mut conn,
             &ws_tx,
+            &ws_priority_tx,
         )
         .await;
         match resp {
@@ -1073,7 +1279,7 @@ mod tests {
     async fn test_session_audio_requires_auth() {
         let state = make_state(MockRunner::ok(), true);
         let mut conn = unauthed_conn();
-        let ws_tx = dummy_ws_tx();
+        let (ws_tx, ws_priority_tx) = dummy_ws_txs();
         let resp = handle_message(
             GatewayMessage::SessionAudio {
                 session_id: "s1".into(),
@@ -1082,6 +1288,7 @@ mod tests {
             &state,
             &mut conn,
             &ws_tx,
+            &ws_priority_tx,
         )
         .await;
         match resp {
@@ -1096,10 +1303,17 @@ mod tests {
     async fn test_pair_success_authenticates_connection() {
         let state = make_state(MockRunner::ok(), true);
         let mut conn = unauthed_conn();
-        let ws_tx = dummy_ws_tx();
+        let (ws_tx, ws_priority_tx) = dummy_ws_txs();
         let code = state.pairing.pairing_code().unwrap();
 
-        let resp = handle_message(GatewayMessage::Pair { code }, &state, &mut conn, &ws_tx).await;
+        let resp = handle_message(
+            GatewayMessage::Pair { code },
+            &state,
+            &mut conn,
+            &ws_tx,
+            &ws_priority_tx,
+        )
+        .await;
         match resp {
             GatewayResponse::PairSuccess { token } => {
                 assert!(!token.is_empty());
@@ -1113,7 +1327,7 @@ mod tests {
     async fn test_pair_wrong_code_fails() {
         let state = make_state(MockRunner::ok(), true);
         let mut conn = unauthed_conn();
-        let ws_tx = dummy_ws_tx();
+        let (ws_tx, ws_priority_tx) = dummy_ws_txs();
         let code = state.pairing.pairing_code().unwrap();
         let wrong = if code == "999999" { "000000" } else { "999999" };
 
@@ -1124,6 +1338,7 @@ mod tests {
             &state,
             &mut conn,
             &ws_tx,
+            &ws_priority_tx,
         )
         .await;
         match resp {
@@ -1138,7 +1353,7 @@ mod tests {
     async fn test_pair_disabled_auto_authenticates() {
         let state = make_state(MockRunner::ok(), false);
         let mut conn = unauthed_conn();
-        let ws_tx = dummy_ws_tx();
+        let (ws_tx, ws_priority_tx) = dummy_ws_txs();
 
         let resp = handle_message(
             GatewayMessage::Pair {
@@ -1147,6 +1362,7 @@ mod tests {
             &state,
             &mut conn,
             &ws_tx,
+            &ws_priority_tx,
         )
         .await;
         match resp {
@@ -1162,7 +1378,7 @@ mod tests {
     async fn test_authenticate_with_valid_token() {
         let state = make_state(MockRunner::ok(), true);
         let mut conn_a = unauthed_conn();
-        let ws_tx_a = dummy_ws_tx();
+        let (ws_tx_a, ws_priority_tx_a) = dummy_ws_txs();
 
         let code = state.pairing.pairing_code().unwrap();
         let token = match handle_message(
@@ -1170,6 +1386,7 @@ mod tests {
             &state,
             &mut conn_a,
             &ws_tx_a,
+            &ws_priority_tx_a,
         )
         .await
         {
@@ -1178,7 +1395,7 @@ mod tests {
         };
 
         let mut conn_b = unauthed_conn();
-        let ws_tx_b = dummy_ws_tx();
+        let (ws_tx_b, ws_priority_tx_b) = dummy_ws_txs();
         let resp = handle_message(
             GatewayMessage::Authenticate {
                 token: token.clone(),
@@ -1186,6 +1403,7 @@ mod tests {
             &state,
             &mut conn_b,
             &ws_tx_b,
+            &ws_priority_tx_b,
         )
         .await;
 
@@ -1202,7 +1420,7 @@ mod tests {
     async fn test_authenticate_rejects_invalid_token() {
         let state = make_state(MockRunner::ok(), true);
         let mut conn = unauthed_conn();
-        let ws_tx = dummy_ws_tx();
+        let (ws_tx, ws_priority_tx) = dummy_ws_txs();
 
         let resp = handle_message(
             GatewayMessage::Authenticate {
@@ -1211,6 +1429,7 @@ mod tests {
             &state,
             &mut conn,
             &ws_tx,
+            &ws_priority_tx,
         )
         .await;
 
@@ -1229,13 +1448,14 @@ mod tests {
     async fn test_create_session_success() {
         let state = make_state(MockRunner::ok(), false);
         let mut conn = authed_conn();
-        let ws_tx = dummy_ws_tx();
+        let (ws_tx, ws_priority_tx) = dummy_ws_txs();
 
         let resp = handle_message(
             GatewayMessage::CreateSession { config: None },
             &state,
             &mut conn,
             &ws_tx,
+            &ws_priority_tx,
         )
         .await;
         match resp {
@@ -1258,7 +1478,7 @@ mod tests {
     async fn test_create_session_with_config() {
         let state = make_state(MockRunner::ok(), false);
         let mut conn = authed_conn();
-        let ws_tx = dummy_ws_tx();
+        let (ws_tx, ws_priority_tx) = dummy_ws_txs();
         let config = SessionConfig {
             model: Some("gpt-4o".into()),
             voice: Some("alloy".into()),
@@ -1274,6 +1494,7 @@ mod tests {
             &state,
             &mut conn,
             &ws_tx,
+            &ws_priority_tx,
         )
         .await;
         match resp {
@@ -1288,13 +1509,14 @@ mod tests {
     async fn test_create_session_runner_error() {
         let state = make_state(MockRunner::with_create_err("provider unavailable"), false);
         let mut conn = authed_conn();
-        let ws_tx = dummy_ws_tx();
+        let (ws_tx, ws_priority_tx) = dummy_ws_txs();
 
         let resp = handle_message(
             GatewayMessage::CreateSession { config: None },
             &state,
             &mut conn,
             &ws_tx,
+            &ws_priority_tx,
         )
         .await;
         match resp {
@@ -1312,7 +1534,7 @@ mod tests {
     async fn test_terminate_session_success() {
         let state = make_state(MockRunner::ok(), false);
         let mut conn = authed_conn();
-        let ws_tx = dummy_ws_tx();
+        let (ws_tx, ws_priority_tx) = dummy_ws_txs();
         conn.owned_sessions.push("sess-1".to_string());
 
         let resp = handle_message(
@@ -1322,6 +1544,7 @@ mod tests {
             &state,
             &mut conn,
             &ws_tx,
+            &ws_priority_tx,
         )
         .await;
         match resp {
@@ -1336,7 +1559,7 @@ mod tests {
     async fn test_terminate_session_cleans_up_audio_sender() {
         let state = make_state(MockRunner::ok(), false);
         let mut conn = authed_conn();
-        let ws_tx = dummy_ws_tx();
+        let (ws_tx, ws_priority_tx) = dummy_ws_txs();
 
         // Insert a dummy audio sender
         let (tx, _rx) = mpsc::channel(1);
@@ -1367,6 +1590,7 @@ mod tests {
             &state,
             &mut conn,
             &ws_tx,
+            &ws_priority_tx,
         )
         .await;
         assert!(matches!(resp, GatewayResponse::SessionTerminated { .. }));
@@ -1386,7 +1610,7 @@ mod tests {
     async fn test_session_audio_forwards_to_runner() {
         let state = make_state(MockRunner::ok(), false);
         let mut conn = authed_conn();
-        let ws_tx = dummy_ws_tx();
+        let (ws_tx, ws_priority_tx) = dummy_ws_txs();
         conn.owned_sessions.push("sess-1".to_string());
 
         let resp = handle_message(
@@ -1397,6 +1621,7 @@ mod tests {
             &state,
             &mut conn,
             &ws_tx,
+            &ws_priority_tx,
         )
         .await;
         match resp {
@@ -1411,7 +1636,7 @@ mod tests {
     async fn test_session_audio_invalid_base64() {
         let state = make_state(MockRunner::ok(), false);
         let mut conn = authed_conn();
-        let ws_tx = dummy_ws_tx();
+        let (ws_tx, ws_priority_tx) = dummy_ws_txs();
         conn.owned_sessions.push("sess-1".to_string());
 
         let resp = handle_message(
@@ -1422,6 +1647,7 @@ mod tests {
             &state,
             &mut conn,
             &ws_tx,
+            &ws_priority_tx,
         )
         .await;
         match resp {
@@ -1440,7 +1666,7 @@ mod tests {
             principal_id: Some("user-2".to_string()),
             owned_sessions: Vec::new(),
         };
-        let ws_tx = dummy_ws_tx();
+        let (ws_tx, ws_priority_tx) = dummy_ws_txs();
 
         // Owner creates a session and gets ownership.
         let sid = match handle_message(
@@ -1448,6 +1674,7 @@ mod tests {
             &state,
             &mut owner,
             &ws_tx,
+            &ws_priority_tx,
         )
         .await
         {
@@ -1463,6 +1690,7 @@ mod tests {
             &state,
             &mut intruder,
             &ws_tx,
+            &ws_priority_tx,
         )
         .await;
 
@@ -1482,13 +1710,14 @@ mod tests {
             principal_id: Some("user-2".to_string()),
             owned_sessions: Vec::new(),
         };
-        let ws_tx = dummy_ws_tx();
+        let (ws_tx, ws_priority_tx) = dummy_ws_txs();
 
         let sid = match handle_message(
             GatewayMessage::CreateSession { config: None },
             &state,
             &mut owner,
             &ws_tx,
+            &ws_priority_tx,
         )
         .await
         {
@@ -1501,6 +1730,7 @@ mod tests {
             &state,
             &mut intruder,
             &ws_tx,
+            &ws_priority_tx,
         )
         .await;
 
@@ -1513,12 +1743,18 @@ mod tests {
     #[tokio::test]
     async fn test_token_auth_can_resume_session_control() {
         let state = make_state(MockRunner::ok(), true);
-        let ws_tx = dummy_ws_tx();
+        let (ws_tx, ws_priority_tx) = dummy_ws_txs();
 
         let mut conn_a = unauthed_conn();
         let code = state.pairing.pairing_code().unwrap();
-        let token = match handle_message(GatewayMessage::Pair { code }, &state, &mut conn_a, &ws_tx)
-            .await
+        let token = match handle_message(
+            GatewayMessage::Pair { code },
+            &state,
+            &mut conn_a,
+            &ws_tx,
+            &ws_priority_tx,
+        )
+        .await
         {
             GatewayResponse::PairSuccess { token } => token,
             other => panic!("Expected PairSuccess, got {:?}", other),
@@ -1529,6 +1765,7 @@ mod tests {
             &state,
             &mut conn_a,
             &ws_tx,
+            &ws_priority_tx,
         )
         .await
         {
@@ -1545,6 +1782,7 @@ mod tests {
             &state,
             &mut conn_b,
             &ws_tx,
+            &ws_priority_tx,
         )
         .await;
         assert!(matches!(auth_resp, GatewayResponse::Authenticated { .. }));
@@ -1557,6 +1795,7 @@ mod tests {
             &state,
             &mut conn_b,
             &ws_tx,
+            &ws_priority_tx,
         )
         .await;
         assert!(matches!(audio_resp, GatewayResponse::AudioAccepted { .. }));
@@ -1566,6 +1805,7 @@ mod tests {
             &state,
             &mut conn_b,
             &ws_tx,
+            &ws_priority_tx,
         )
         .await;
         assert!(matches!(

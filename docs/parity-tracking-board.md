@@ -118,6 +118,15 @@ Status scale: `NOT_STARTED`, `IN_PROGRESS`, `AT_RISK`, `BLOCKED`, `DONE`
 | Keep browser WS client aligned with gateway health surfaces | DONE | `tools/ws-client/index.html` adds Gateway Health action and `gw` badge |
 | Replace M6 placeholder demo with executable ops-surface checks | DONE | `scripts/demo/m6_release_flow.sh` now runs targeted protocol/server tests |
 
+## Sprint 10 Checklist (In Progress)
+
+| Item | Status | Evidence |
+|---|---|---|
+| Add priority control-plane probe path to validate channel precedence | DONE | `liveclaw-gateway/src/protocol.rs` `PriorityProbe`, `PriorityNotice`, `PriorityProbeAccepted`; `liveclaw-gateway/src/server.rs` probe handler |
+| Track priority channel bindings in gateway health snapshot | DONE | `GatewayHealth.active_priority_bindings` in `liveclaw-gateway/src/protocol.rs` and `liveclaw-gateway/src/server.rs` |
+| Keep browser WS client aligned with priority probe/notice flow | DONE | `tools/ws-client/index.html` adds Priority Probe action, template, and `prio` badge |
+| Extend M6 release-flow demo for priority-path verification | DONE | `scripts/demo/m6_release_flow.sh` includes priority probe tests |
+
 ## Notes
 
 1. Update this file at each sprint close with status transitions and links to commit SHAs.

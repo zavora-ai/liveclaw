@@ -24,6 +24,7 @@ pub enum GatewayMessage {
         session_id: SessionId,
         audio: String,
     },
+    PriorityProbe,
     GetGatewayHealth,
     GetDiagnostics,
     Ping,
@@ -59,6 +60,13 @@ pub enum GatewayResponse {
         session_id: SessionId,
         text: String,
         is_final: bool,
+    },
+    PriorityProbeAccepted {
+        queued_standard: bool,
+        queued_priority: bool,
+    },
+    PriorityNotice {
+        data: PriorityNotice,
     },
     GatewayHealth {
         data: GatewayHealth,
@@ -120,6 +128,16 @@ pub struct GatewayHealth {
     pub require_pairing: bool,
     pub active_sessions: usize,
     pub active_ws_bindings: usize,
+    pub active_priority_bindings: usize,
+}
+
+/// Priority control-plane notice routed over the gateway's priority channel.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct PriorityNotice {
+    pub level: String,
+    pub code: String,
+    pub message: String,
+    pub session_id: Option<String>,
 }
 
 /// Return supported client->gateway message type tags.
@@ -130,6 +148,7 @@ pub fn supported_client_message_types() -> Vec<String> {
         "CreateSession".to_string(),
         "TerminateSession".to_string(),
         "SessionAudio".to_string(),
+        "PriorityProbe".to_string(),
         "GetGatewayHealth".to_string(),
         "GetDiagnostics".to_string(),
         "Ping".to_string(),
@@ -147,6 +166,8 @@ pub fn supported_server_response_types() -> Vec<String> {
         "AudioAccepted".to_string(),
         "AudioOutput".to_string(),
         "TranscriptUpdate".to_string(),
+        "PriorityProbeAccepted".to_string(),
+        "PriorityNotice".to_string(),
         "GatewayHealth".to_string(),
         "Diagnostics".to_string(),
         "Error".to_string(),
@@ -251,6 +272,15 @@ mod tests {
         let parsed: GatewayMessage = serde_json::from_str(&json).unwrap();
         assert_eq!(msg, parsed);
         assert_eq!(json, r#"{"type":"GetGatewayHealth"}"#);
+    }
+
+    #[test]
+    fn test_gateway_message_priority_probe() {
+        let msg = GatewayMessage::PriorityProbe;
+        let json = serde_json::to_string(&msg).unwrap();
+        let parsed: GatewayMessage = serde_json::from_str(&json).unwrap();
+        assert_eq!(msg, parsed);
+        assert_eq!(json, r#"{"type":"PriorityProbe"}"#);
     }
 
     // --- GatewayResponse serialization tests ---
@@ -391,6 +421,33 @@ mod tests {
                 require_pairing: true,
                 active_sessions: 2,
                 active_ws_bindings: 1,
+                active_priority_bindings: 1,
+            },
+        };
+        let json = serde_json::to_string(&resp).unwrap();
+        let parsed: GatewayResponse = serde_json::from_str(&json).unwrap();
+        assert_eq!(resp, parsed);
+    }
+
+    #[test]
+    fn test_gateway_response_priority_probe_accepted() {
+        let resp = GatewayResponse::PriorityProbeAccepted {
+            queued_standard: true,
+            queued_priority: true,
+        };
+        let json = serde_json::to_string(&resp).unwrap();
+        let parsed: GatewayResponse = serde_json::from_str(&json).unwrap();
+        assert_eq!(resp, parsed);
+    }
+
+    #[test]
+    fn test_gateway_response_priority_notice() {
+        let resp = GatewayResponse::PriorityNotice {
+            data: PriorityNotice {
+                level: "info".to_string(),
+                code: "priority_probe".to_string(),
+                message: "Priority channel is active".to_string(),
+                session_id: Some("sess-1".to_string()),
             },
         };
         let json = serde_json::to_string(&resp).unwrap();
@@ -404,8 +461,11 @@ mod tests {
         let server_types = supported_server_response_types();
         assert!(client_types.contains(&"GetDiagnostics".to_string()));
         assert!(client_types.contains(&"GetGatewayHealth".to_string()));
+        assert!(client_types.contains(&"PriorityProbe".to_string()));
         assert!(server_types.contains(&"Diagnostics".to_string()));
         assert!(server_types.contains(&"GatewayHealth".to_string()));
+        assert!(server_types.contains(&"PriorityProbeAccepted".to_string()));
+        assert!(server_types.contains(&"PriorityNotice".to_string()));
     }
 
     #[test]

@@ -67,7 +67,7 @@
 
       .status-bar {
         display: grid;
-        grid-template-columns: 1fr auto auto auto auto auto auto;
+        grid-template-columns: 1fr auto auto auto auto auto auto auto;
         gap: 10px;
         align-items: center;
         padding: 14px;
@@ -294,6 +294,7 @@
         <span class="badge" id="diagBadge">diag: n/a</span>
         <span class="badge" id="secBadge">sec: n/a</span>
         <span class="badge" id="healthBadge">gw: n/a</span>
+        <span class="badge" id="prioBadge">prio: n/a</span>
         <button id="clearLog" class="muted">Clear Log</button>
       </section>
 
@@ -361,6 +362,7 @@
             <div class="field-row">
               <button id="pingBtn" class="muted">Ping</button>
               <button id="healthBtn" class="muted">Gateway Health</button>
+              <button id="priorityBtn" class="soft">Priority Probe</button>
               <button id="diagnosticsBtn" class="soft">Get Diagnostics</button>
               <button id="terminateBtn" class="warn">Terminate Session</button>
             </div>
@@ -410,6 +412,7 @@
                 <select id="templateType">
                   <option value="Ping">Ping</option>
                   <option value="GetGatewayHealth">GetGatewayHealth</option>
+                  <option value="PriorityProbe">PriorityProbe</option>
                   <option value="GetDiagnostics">GetDiagnostics</option>
                   <option value="CreateSession">CreateSession</option>
                   <option value="TerminateSession">TerminateSession</option>
@@ -447,6 +450,7 @@
           diagBadge: $("diagBadge"),
           secBadge: $("secBadge"),
           healthBadge: $("healthBadge"),
+          prioBadge: $("prioBadge"),
           wsUrl: $("wsUrl"),
           connectBtn: $("connectBtn"),
           disconnectBtn: $("disconnectBtn"),
@@ -463,6 +467,7 @@
           sessionId: $("sessionId"),
           pingBtn: $("pingBtn"),
           healthBtn: $("healthBtn"),
+          priorityBtn: $("priorityBtn"),
           diagnosticsBtn: $("diagnosticsBtn"),
           terminateBtn: $("terminateBtn"),
           audioB64: $("audioB64"),
@@ -589,6 +594,8 @@
               return { type: "GetDiagnostics" };
             case "GetGatewayHealth":
               return { type: "GetGatewayHealth" };
+            case "PriorityProbe":
+              return { type: "PriorityProbe" };
             case "Ping":
             default:
               return { type: "Ping" };
@@ -669,7 +676,15 @@
               const pairing = h.require_pairing ? "pair" : "open";
               const up = Number(h.uptime_seconds || 0);
               const sessions = Number(h.active_sessions || 0);
-              els.healthBadge.textContent = `gw: up=${up}s s=${sessions} ${pairing}`;
+              const p = Number(h.active_priority_bindings || 0);
+              els.healthBadge.textContent = `gw: up=${up}s s=${sessions} p=${p} ${pairing}`;
+            }
+
+            if (parsed.type === "PriorityNotice" && parsed.data) {
+              const p = parsed.data;
+              const code = p.code || "notice";
+              const level = p.level || "info";
+              els.prioBadge.textContent = `prio: ${code} (${level})`;
             }
           };
         }
@@ -791,6 +806,10 @@
 
         els.healthBtn.addEventListener("click", () => {
           sendObject({ type: "GetGatewayHealth" });
+        });
+
+        els.priorityBtn.addEventListener("click", () => {
+          sendObject({ type: "PriorityProbe" });
         });
 
         els.diagnosticsBtn.addEventListener("click", () => {
