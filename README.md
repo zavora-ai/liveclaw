@@ -54,6 +54,13 @@ cargo run -p liveclaw-app -- onboard
 cargo run -p liveclaw-app -- liveclaw.toml
 ```
 
+Optional local binary install (release build):
+
+```bash
+./scripts/install_local_release.sh
+~/.local/bin/liveclaw-app help
+```
+
 ## Onboarding and Service Commands
 
 The `liveclaw-app` binary now exposes first-class onboarding and service lifecycle commands.

@@ -254,6 +254,14 @@ Status scale: `NOT_STARTED`, `IN_PROGRESS`, `AT_RISK`, `BLOCKED`, `DONE`
 | Add Matrix adapter coverage tests | DONE | `server::tests::test_channel_matrix_http_routes_message_event` and `server::tests::test_channel_matrix_http_ignores_non_message_type` |
 | Keep release-flow/demo and client docs aligned | DONE | `scripts/demo/m6_release_flow.sh`, `tools/ws-client/index.html`, and `README.md` updated for Matrix channel path |
 
+## Sprint 24 Checklist (DONE)
+
+| Item | Status | Evidence |
+|---|---|---|
+| Add local release installer for app binary distribution | DONE | `scripts/install_local_release.sh` builds and installs `liveclaw-app` with configurable prefix/name |
+| Validate installer script safety/usage paths | DONE | `scripts/install_local_release.sh --help` and `bash -n scripts/install_local_release.sh` |
+| Keep quick-start/parity docs aligned to install hardening | DONE | `README.md` optional local binary install section and `docs/openclaw-zeroclaw-parity-comparison.md` install-path updates |
+
 ## Closeout Phase 1 Kickoff (2026-02-21)
 
 | Item | Status | Evidence |
