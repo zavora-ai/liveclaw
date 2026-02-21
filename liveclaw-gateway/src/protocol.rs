@@ -51,6 +51,18 @@ pub enum GatewayMessage {
         external_user_id: String,
         max_items: Option<usize>,
     },
+    CreateChannelJob {
+        channel: String,
+        account_id: String,
+        external_user_id: String,
+        text: String,
+        interval_seconds: u64,
+        create_response: Option<bool>,
+    },
+    CancelChannelJob {
+        job_id: String,
+    },
+    ListChannelJobs,
     SessionToolCall {
         session_id: SessionId,
         tool_name: String,
@@ -108,6 +120,15 @@ pub enum GatewayResponse {
         external_user_id: String,
         items: Vec<ChannelOutboundItem>,
     },
+    ChannelJobCreated {
+        job: ChannelJob,
+    },
+    ChannelJobCanceled {
+        job_id: String,
+    },
+    ChannelJobs {
+        jobs: Vec<ChannelJob>,
+    },
     SessionToolResult {
         session_id: SessionId,
         tool_name: String,
@@ -161,6 +182,19 @@ pub struct ChannelOutboundItem {
     pub id: String,
     pub session_id: SessionId,
     pub text: String,
+    pub created_at_unix_ms: u64,
+}
+
+/// Background channel job configuration.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ChannelJob {
+    pub job_id: String,
+    pub channel: String,
+    pub account_id: String,
+    pub external_user_id: String,
+    pub text: String,
+    pub interval_seconds: u64,
+    pub create_response: bool,
     pub created_at_unix_ms: u64,
 }
 
@@ -219,6 +253,7 @@ pub struct GatewayHealth {
     pub active_sessions: usize,
     pub active_ws_bindings: usize,
     pub active_priority_bindings: usize,
+    pub active_channel_jobs: usize,
 }
 
 /// Priority control-plane notice routed over the gateway's priority channel.
@@ -244,6 +279,9 @@ pub fn supported_client_message_types() -> Vec<String> {
         "SessionPrompt".to_string(),
         "ChannelInbound".to_string(),
         "GetChannelOutbound".to_string(),
+        "CreateChannelJob".to_string(),
+        "CancelChannelJob".to_string(),
+        "ListChannelJobs".to_string(),
         "SessionToolCall".to_string(),
         "PriorityProbe".to_string(),
         "GetGatewayHealth".to_string(),
@@ -267,6 +305,9 @@ pub fn supported_server_response_types() -> Vec<String> {
         "PromptAccepted".to_string(),
         "ChannelRouted".to_string(),
         "ChannelOutboundBatch".to_string(),
+        "ChannelJobCreated".to_string(),
+        "ChannelJobCanceled".to_string(),
+        "ChannelJobs".to_string(),
         "SessionToolResult".to_string(),
         "AudioOutput".to_string(),
         "TranscriptUpdate".to_string(),
@@ -415,6 +456,39 @@ mod tests {
             external_user_id: "U77".into(),
             max_items: Some(10),
         };
+        let json = serde_json::to_string(&msg).unwrap();
+        let parsed: GatewayMessage = serde_json::from_str(&json).unwrap();
+        assert_eq!(msg, parsed);
+    }
+
+    #[test]
+    fn test_gateway_message_create_channel_job() {
+        let msg = GatewayMessage::CreateChannelJob {
+            channel: "webhook".into(),
+            account_id: "acct-1".into(),
+            external_user_id: "user-1".into(),
+            text: "Scheduled check".into(),
+            interval_seconds: 30,
+            create_response: Some(true),
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        let parsed: GatewayMessage = serde_json::from_str(&json).unwrap();
+        assert_eq!(msg, parsed);
+    }
+
+    #[test]
+    fn test_gateway_message_cancel_channel_job() {
+        let msg = GatewayMessage::CancelChannelJob {
+            job_id: "job-1".into(),
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        let parsed: GatewayMessage = serde_json::from_str(&json).unwrap();
+        assert_eq!(msg, parsed);
+    }
+
+    #[test]
+    fn test_gateway_message_list_channel_jobs() {
+        let msg = GatewayMessage::ListChannelJobs;
         let json = serde_json::to_string(&msg).unwrap();
         let parsed: GatewayMessage = serde_json::from_str(&json).unwrap();
         assert_eq!(msg, parsed);
@@ -602,6 +676,54 @@ mod tests {
     }
 
     #[test]
+    fn test_gateway_response_channel_job_created() {
+        let resp = GatewayResponse::ChannelJobCreated {
+            job: ChannelJob {
+                job_id: "job-1".into(),
+                channel: "webhook".into(),
+                account_id: "acct-1".into(),
+                external_user_id: "user-1".into(),
+                text: "hello".into(),
+                interval_seconds: 10,
+                create_response: true,
+                created_at_unix_ms: 1_739_973_600_000,
+            },
+        };
+        let json = serde_json::to_string(&resp).unwrap();
+        let parsed: GatewayResponse = serde_json::from_str(&json).unwrap();
+        assert_eq!(resp, parsed);
+    }
+
+    #[test]
+    fn test_gateway_response_channel_job_canceled() {
+        let resp = GatewayResponse::ChannelJobCanceled {
+            job_id: "job-1".into(),
+        };
+        let json = serde_json::to_string(&resp).unwrap();
+        let parsed: GatewayResponse = serde_json::from_str(&json).unwrap();
+        assert_eq!(resp, parsed);
+    }
+
+    #[test]
+    fn test_gateway_response_channel_jobs() {
+        let resp = GatewayResponse::ChannelJobs {
+            jobs: vec![ChannelJob {
+                job_id: "job-1".into(),
+                channel: "telegram".into(),
+                account_id: "4455".into(),
+                external_user_id: "7788".into(),
+                text: "tick".into(),
+                interval_seconds: 45,
+                create_response: false,
+                created_at_unix_ms: 1_739_973_700_000,
+            }],
+        };
+        let json = serde_json::to_string(&resp).unwrap();
+        let parsed: GatewayResponse = serde_json::from_str(&json).unwrap();
+        assert_eq!(resp, parsed);
+    }
+
+    #[test]
     fn test_gateway_response_session_tool_result() {
         let resp = GatewayResponse::SessionToolResult {
             session_id: "sess-002".into(),
@@ -704,6 +826,7 @@ mod tests {
                 active_sessions: 2,
                 active_ws_bindings: 1,
                 active_priority_bindings: 1,
+                active_channel_jobs: 3,
             },
         };
         let json = serde_json::to_string(&resp).unwrap();
@@ -750,6 +873,9 @@ mod tests {
         assert!(client_types.contains(&"SessionPrompt".to_string()));
         assert!(client_types.contains(&"ChannelInbound".to_string()));
         assert!(client_types.contains(&"GetChannelOutbound".to_string()));
+        assert!(client_types.contains(&"CreateChannelJob".to_string()));
+        assert!(client_types.contains(&"CancelChannelJob".to_string()));
+        assert!(client_types.contains(&"ListChannelJobs".to_string()));
         assert!(client_types.contains(&"SessionToolCall".to_string()));
         assert!(server_types.contains(&"Diagnostics".to_string()));
         assert!(server_types.contains(&"GatewayHealth".to_string()));
@@ -761,6 +887,9 @@ mod tests {
         assert!(server_types.contains(&"PromptAccepted".to_string()));
         assert!(server_types.contains(&"ChannelRouted".to_string()));
         assert!(server_types.contains(&"ChannelOutboundBatch".to_string()));
+        assert!(server_types.contains(&"ChannelJobCreated".to_string()));
+        assert!(server_types.contains(&"ChannelJobCanceled".to_string()));
+        assert!(server_types.contains(&"ChannelJobs".to_string()));
         assert!(server_types.contains(&"SessionToolResult".to_string()));
     }
 

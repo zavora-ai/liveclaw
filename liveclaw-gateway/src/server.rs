@@ -12,13 +12,14 @@ use axum::Router;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tokio::net::TcpListener;
-use tokio::sync::{mpsc, RwLock};
+use tokio::sync::{mpsc, oneshot, RwLock};
+use tokio::time::{self, Duration, MissedTickBehavior};
 use tracing::{error, info, warn};
 
 use crate::pairing::PairingGuard;
 use crate::protocol::{
-    ChannelOutboundItem, GatewayHealth, GatewayMessage, GatewayResponse, GraphExecutionReport,
-    PriorityNotice, RuntimeDiagnostics, SessionConfig, PROTOCOL_VERSION,
+    ChannelJob, ChannelOutboundItem, GatewayHealth, GatewayMessage, GatewayResponse,
+    GraphExecutionReport, PriorityNotice, RuntimeDiagnostics, SessionConfig, PROTOCOL_VERSION,
 };
 
 // ---------------------------------------------------------------------------
@@ -136,6 +137,8 @@ struct AppState {
     session_channel_routes: Arc<RwLock<HashMap<String, ChannelRouteKey>>>,
     /// Buffered outbound events waiting for adapter delivery.
     channel_outbox: Arc<RwLock<HashMap<ChannelRouteKey, Vec<ChannelOutboundItem>>>>,
+    /// Active background channel jobs keyed by job id.
+    channel_jobs: Arc<RwLock<HashMap<String, ChannelJobRuntime>>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -159,6 +162,21 @@ struct ChannelOutboundPollRequest<'a> {
     account_id: &'a str,
     external_user_id: &'a str,
     max_items: Option<usize>,
+}
+
+struct ChannelJobCreateRequest<'a> {
+    channel: &'a str,
+    account_id: &'a str,
+    external_user_id: &'a str,
+    text: &'a str,
+    interval_seconds: u64,
+    create_response: bool,
+}
+
+struct ChannelJobRuntime {
+    owner_principal_id: String,
+    job: ChannelJob,
+    cancel_tx: Option<oneshot::Sender<()>>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -318,6 +336,7 @@ impl Gateway {
             channel_routes: Arc::new(RwLock::new(HashMap::new())),
             session_channel_routes: Arc::new(RwLock::new(HashMap::new())),
             channel_outbox: Arc::new(RwLock::new(HashMap::new())),
+            channel_jobs: Arc::new(RwLock::new(HashMap::new())),
         };
 
         // Spawn background task to consume audio output and route to WebSocket clients
@@ -643,9 +662,7 @@ async fn handle_channel_http_route(
         principal_id: Some(principal_id),
         owned_sessions: Vec::new(),
     };
-    let (ws_tx, _ws_rx) = mpsc::channel(64);
-    let (ws_priority_tx, _ws_priority_rx) = mpsc::channel(32);
-    handle_channel_inbound(request, state, &mut conn, &ws_tx, &ws_priority_tx).await
+    handle_channel_inbound(request, state, &mut conn, None, None).await
 }
 
 fn authenticate_http_principal(
@@ -998,8 +1015,8 @@ async fn handle_message(
                 },
                 state,
                 conn,
-                ws_tx,
-                ws_priority_tx,
+                Some(ws_tx),
+                Some(ws_priority_tx),
             )
             .await
         }
@@ -1022,6 +1039,46 @@ async fn handle_message(
                 conn,
             )
             .await
+        }
+
+        GatewayMessage::CreateChannelJob {
+            channel,
+            account_id,
+            external_user_id,
+            text,
+            interval_seconds,
+            create_response,
+        } => {
+            if !conn.authenticated {
+                return auth_required_error();
+            }
+            handle_create_channel_job(
+                ChannelJobCreateRequest {
+                    channel: &channel,
+                    account_id: &account_id,
+                    external_user_id: &external_user_id,
+                    text: &text,
+                    interval_seconds,
+                    create_response: create_response.unwrap_or(true),
+                },
+                state,
+                conn,
+            )
+            .await
+        }
+
+        GatewayMessage::CancelChannelJob { job_id } => {
+            if !conn.authenticated {
+                return auth_required_error();
+            }
+            handle_cancel_channel_job(&job_id, state, conn).await
+        }
+
+        GatewayMessage::ListChannelJobs => {
+            if !conn.authenticated {
+                return auth_required_error();
+            }
+            handle_list_channel_jobs(state, conn).await
         }
 
         GatewayMessage::SessionToolCall {
@@ -1127,6 +1184,16 @@ async fn handle_create_session(
     ws_tx: &mpsc::Sender<GatewayResponse>,
     ws_priority_tx: &mpsc::Sender<GatewayResponse>,
 ) -> GatewayResponse {
+    handle_create_session_internal(config, state, conn, Some(ws_tx), Some(ws_priority_tx)).await
+}
+
+async fn handle_create_session_internal(
+    config: Option<SessionConfig>,
+    state: &AppState,
+    conn: &mut ConnectionState,
+    ws_tx: Option<&mpsc::Sender<GatewayResponse>>,
+    ws_priority_tx: Option<&mpsc::Sender<GatewayResponse>>,
+) -> GatewayResponse {
     let principal_id = conn
         .principal_id
         .clone()
@@ -1147,16 +1214,20 @@ async fn handle_create_session(
 
             // Register the ws_response_sender so background tasks can forward
             // AudioOutput and TranscriptUpdate to this connection.
-            state
-                .ws_response_senders
-                .write()
-                .await
-                .insert(sid.clone(), ws_tx.clone());
-            state
-                .ws_priority_senders
-                .write()
-                .await
-                .insert(sid.clone(), ws_priority_tx.clone());
+            if let Some(tx) = ws_tx {
+                state
+                    .ws_response_senders
+                    .write()
+                    .await
+                    .insert(sid.clone(), tx.clone());
+            }
+            if let Some(tx) = ws_priority_tx {
+                state
+                    .ws_priority_senders
+                    .write()
+                    .await
+                    .insert(sid.clone(), tx.clone());
+            }
             if !conn.owned_sessions.contains(&sid) {
                 conn.owned_sessions.push(sid.clone());
             }
@@ -1538,6 +1609,199 @@ async fn handle_get_channel_outbound(
     }
 }
 
+async fn handle_create_channel_job(
+    request: ChannelJobCreateRequest<'_>,
+    state: &AppState,
+    conn: &ConnectionState,
+) -> GatewayResponse {
+    let Some(owner_principal_id) = conn.principal_id.clone() else {
+        return auth_required_error();
+    };
+
+    let Some(channel) = normalize_channel(request.channel) else {
+        return GatewayResponse::Error {
+            code: "invalid_channel".to_string(),
+            message: "Supported channels are telegram, slack, and webhook".to_string(),
+        };
+    };
+    let Some(account_id) = normalize_channel_component(request.account_id) else {
+        return GatewayResponse::Error {
+            code: "invalid_channel_route".to_string(),
+            message: "account_id is required".to_string(),
+        };
+    };
+    let Some(external_user_id) = normalize_channel_component(request.external_user_id) else {
+        return GatewayResponse::Error {
+            code: "invalid_channel_route".to_string(),
+            message: "external_user_id is required".to_string(),
+        };
+    };
+    let Some(text) = normalize_channel_component(request.text) else {
+        return GatewayResponse::Error {
+            code: "invalid_channel_message".to_string(),
+            message: "text is empty".to_string(),
+        };
+    };
+    if request.interval_seconds == 0 {
+        return GatewayResponse::Error {
+            code: "invalid_channel_job".to_string(),
+            message: "interval_seconds must be greater than 0".to_string(),
+        };
+    }
+
+    let job = ChannelJob {
+        job_id: uuid::Uuid::new_v4().to_string(),
+        channel,
+        account_id,
+        external_user_id,
+        text,
+        interval_seconds: request.interval_seconds,
+        create_response: request.create_response,
+        created_at_unix_ms: now_unix_ms(),
+    };
+
+    let (cancel_tx, cancel_rx) = oneshot::channel();
+    state.channel_jobs.write().await.insert(
+        job.job_id.clone(),
+        ChannelJobRuntime {
+            owner_principal_id: owner_principal_id.clone(),
+            job: job.clone(),
+            cancel_tx: Some(cancel_tx),
+        },
+    );
+
+    let job_state = state.clone();
+    let job_config = job.clone();
+    tokio::spawn(async move {
+        run_channel_job(job_state, job_config, owner_principal_id, cancel_rx).await;
+    });
+
+    GatewayResponse::ChannelJobCreated { job }
+}
+
+async fn run_channel_job(
+    state: AppState,
+    job: ChannelJob,
+    owner_principal_id: String,
+    mut cancel_rx: oneshot::Receiver<()>,
+) {
+    info!(
+        "Channel job {} started for {}/{}/{} every {}s",
+        job.job_id, job.channel, job.account_id, job.external_user_id, job.interval_seconds
+    );
+
+    let mut ticker = time::interval(Duration::from_secs(job.interval_seconds));
+    ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
+    // First tick fires immediately by default; consume it so periodic jobs
+    // start after one full interval.
+    ticker.tick().await;
+
+    loop {
+        tokio::select! {
+            _ = &mut cancel_rx => {
+                break;
+            }
+            _ = ticker.tick() => {
+                run_channel_job_tick(&state, &job, &owner_principal_id).await;
+            }
+        }
+    }
+
+    state.channel_jobs.write().await.remove(&job.job_id);
+    info!("Channel job {} stopped", job.job_id);
+}
+
+async fn run_channel_job_tick(state: &AppState, job: &ChannelJob, owner_principal_id: &str) {
+    let mut conn = ConnectionState {
+        authenticated: true,
+        token: None,
+        principal_id: Some(owner_principal_id.to_string()),
+        owned_sessions: Vec::new(),
+    };
+    let response = handle_channel_inbound(
+        ChannelInboundRequest {
+            channel: &job.channel,
+            account_id: &job.account_id,
+            external_user_id: &job.external_user_id,
+            text: &job.text,
+            create_response: job.create_response,
+        },
+        state,
+        &mut conn,
+        None,
+        None,
+    )
+    .await;
+    if let GatewayResponse::Error { code, message } = response {
+        warn!(
+            "Channel job {} tick failed with code='{}': {}",
+            job.job_id, code, message
+        );
+    }
+}
+
+async fn handle_cancel_channel_job(
+    job_id: &str,
+    state: &AppState,
+    conn: &ConnectionState,
+) -> GatewayResponse {
+    let Some(principal_id) = conn.principal_id.as_deref() else {
+        return auth_required_error();
+    };
+
+    let runtime = {
+        let mut jobs = state.channel_jobs.write().await;
+        let Some(existing) = jobs.get(job_id) else {
+            return GatewayResponse::Error {
+                code: "channel_job_not_found".to_string(),
+                message: format!("Channel job '{}' not found", job_id),
+            };
+        };
+        if existing.owner_principal_id != principal_id {
+            return GatewayResponse::Error {
+                code: "forbidden_channel_job".to_string(),
+                message: "Channel job is not owned by the authenticated principal".to_string(),
+            };
+        }
+        jobs.remove(job_id)
+    };
+
+    if let Some(mut runtime) = runtime {
+        if let Some(cancel_tx) = runtime.cancel_tx.take() {
+            let _ = cancel_tx.send(());
+        }
+        GatewayResponse::ChannelJobCanceled {
+            job_id: job_id.to_string(),
+        }
+    } else {
+        GatewayResponse::Error {
+            code: "channel_job_not_found".to_string(),
+            message: format!("Channel job '{}' not found", job_id),
+        }
+    }
+}
+
+async fn handle_list_channel_jobs(state: &AppState, conn: &ConnectionState) -> GatewayResponse {
+    let Some(principal_id) = conn.principal_id.as_deref() else {
+        return auth_required_error();
+    };
+
+    let mut jobs: Vec<ChannelJob> = state
+        .channel_jobs
+        .read()
+        .await
+        .values()
+        .filter(|runtime| runtime.owner_principal_id == principal_id)
+        .map(|runtime| runtime.job.clone())
+        .collect();
+    jobs.sort_by(|a, b| {
+        a.created_at_unix_ms
+            .cmp(&b.created_at_unix_ms)
+            .then_with(|| a.job_id.cmp(&b.job_id))
+    });
+    GatewayResponse::ChannelJobs { jobs }
+}
+
 async fn queue_channel_outbound_transcript(state: &AppState, output: &SessionTranscriptOutput) {
     if !output.is_final {
         return;
@@ -1686,8 +1950,8 @@ async fn handle_channel_inbound(
     request: ChannelInboundRequest<'_>,
     state: &AppState,
     conn: &mut ConnectionState,
-    ws_tx: &mpsc::Sender<GatewayResponse>,
-    ws_priority_tx: &mpsc::Sender<GatewayResponse>,
+    ws_tx: Option<&mpsc::Sender<GatewayResponse>>,
+    ws_priority_tx: Option<&mpsc::Sender<GatewayResponse>>,
 ) -> GatewayResponse {
     let Some(principal_id) = conn.principal_id.clone() else {
         return auth_required_error();
@@ -1745,11 +2009,18 @@ async fn handle_channel_inbound(
                 .write()
                 .await
                 .remove(&existing_session_id);
-            let created =
-                match handle_create_session(None, state, conn, ws_tx, ws_priority_tx).await {
-                    GatewayResponse::SessionCreated { session_id } => session_id,
-                    other => return other,
-                };
+            let created = match handle_create_session_internal(
+                None,
+                state,
+                conn,
+                ws_tx,
+                ws_priority_tx,
+            )
+            .await
+            {
+                GatewayResponse::SessionCreated { session_id } => session_id,
+                other => return other,
+            };
             state
                 .channel_routes
                 .write()
@@ -1758,10 +2029,11 @@ async fn handle_channel_inbound(
             created
         }
     } else {
-        let created = match handle_create_session(None, state, conn, ws_tx, ws_priority_tx).await {
-            GatewayResponse::SessionCreated { session_id } => session_id,
-            other => return other,
-        };
+        let created =
+            match handle_create_session_internal(None, state, conn, ws_tx, ws_priority_tx).await {
+                GatewayResponse::SessionCreated { session_id } => session_id,
+                other => return other,
+            };
         state
             .channel_routes
             .write()
@@ -1777,7 +2049,7 @@ async fn handle_channel_inbound(
         .insert(session_id.clone(), route_key);
 
     if let Err(resp) =
-        authorize_session_access(&session_id, state, conn, Some(ws_tx), Some(ws_priority_tx)).await
+        authorize_session_access(&session_id, state, conn, ws_tx, ws_priority_tx).await
     {
         return resp;
     }
@@ -1878,6 +2150,7 @@ async fn handle_get_gateway_health(state: &AppState) -> GatewayResponse {
     let active_sessions = state.session_owners.read().await.len();
     let active_ws_bindings = state.ws_response_senders.read().await.len();
     let active_priority_bindings = state.ws_priority_senders.read().await.len();
+    let active_channel_jobs = state.channel_jobs.read().await.len();
     let require_pairing = !state.pairing.is_authenticated("");
     GatewayResponse::GatewayHealth {
         data: GatewayHealth {
@@ -1887,6 +2160,7 @@ async fn handle_get_gateway_health(state: &AppState) -> GatewayResponse {
             active_sessions,
             active_ws_bindings,
             active_priority_bindings,
+            active_channel_jobs,
         },
     }
 }
@@ -2339,6 +2613,7 @@ mod tests {
             channel_routes: Arc::new(RwLock::new(HashMap::new())),
             session_channel_routes: Arc::new(RwLock::new(HashMap::new())),
             channel_outbox: Arc::new(RwLock::new(HashMap::new())),
+            channel_jobs: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -2489,6 +2764,7 @@ mod tests {
                 assert_eq!(data.active_sessions, 0);
                 assert_eq!(data.active_ws_bindings, 0);
                 assert_eq!(data.active_priority_bindings, 0);
+                assert_eq!(data.active_channel_jobs, 0);
             }
             other => panic!("Expected GatewayHealth response, got {:?}", other),
         }
@@ -2768,6 +3044,72 @@ mod tests {
                 external_user_id: "user-1".into(),
                 max_items: Some(10),
             },
+            &state,
+            &mut conn,
+            &ws_tx,
+            &ws_priority_tx,
+        )
+        .await;
+        match resp {
+            GatewayResponse::Error { code, .. } => assert_eq!(code, "auth_required"),
+            other => panic!("Expected auth_required error, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_create_channel_job_requires_auth() {
+        let state = make_state(MockRunner::ok(), true);
+        let mut conn = unauthed_conn();
+        let (ws_tx, ws_priority_tx) = dummy_ws_txs();
+        let resp = handle_message(
+            GatewayMessage::CreateChannelJob {
+                channel: "webhook".into(),
+                account_id: "acct-1".into(),
+                external_user_id: "user-1".into(),
+                text: "ping".into(),
+                interval_seconds: 30,
+                create_response: Some(false),
+            },
+            &state,
+            &mut conn,
+            &ws_tx,
+            &ws_priority_tx,
+        )
+        .await;
+        match resp {
+            GatewayResponse::Error { code, .. } => assert_eq!(code, "auth_required"),
+            other => panic!("Expected auth_required error, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_cancel_channel_job_requires_auth() {
+        let state = make_state(MockRunner::ok(), true);
+        let mut conn = unauthed_conn();
+        let (ws_tx, ws_priority_tx) = dummy_ws_txs();
+        let resp = handle_message(
+            GatewayMessage::CancelChannelJob {
+                job_id: "job-1".into(),
+            },
+            &state,
+            &mut conn,
+            &ws_tx,
+            &ws_priority_tx,
+        )
+        .await;
+        match resp {
+            GatewayResponse::Error { code, .. } => assert_eq!(code, "auth_required"),
+            other => panic!("Expected auth_required error, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_list_channel_jobs_requires_auth() {
+        let state = make_state(MockRunner::ok(), true);
+        let mut conn = unauthed_conn();
+        let (ws_tx, ws_priority_tx) = dummy_ws_txs();
+        let resp = handle_message(
+            GatewayMessage::ListChannelJobs,
             &state,
             &mut conn,
             &ws_tx,
@@ -3732,6 +4074,185 @@ mod tests {
             GatewayResponse::SessionTerminated { .. }
         ));
         assert!(state.channel_routes.read().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_channel_job_lifecycle_create_list_cancel() {
+        let state = make_state(MockRunner::ok(), false);
+        let mut conn = authed_conn();
+        let (ws_tx, ws_priority_tx) = dummy_ws_txs();
+
+        let created = handle_message(
+            GatewayMessage::CreateChannelJob {
+                channel: "webhook".into(),
+                account_id: "acct-ops".into(),
+                external_user_id: "user-ops".into(),
+                text: "scheduled ping".into(),
+                interval_seconds: 60,
+                create_response: Some(false),
+            },
+            &state,
+            &mut conn,
+            &ws_tx,
+            &ws_priority_tx,
+        )
+        .await;
+        let job = match created {
+            GatewayResponse::ChannelJobCreated { job } => job,
+            other => panic!("Expected ChannelJobCreated, got {:?}", other),
+        };
+
+        let listed = handle_message(
+            GatewayMessage::ListChannelJobs,
+            &state,
+            &mut conn,
+            &ws_tx,
+            &ws_priority_tx,
+        )
+        .await;
+        match listed {
+            GatewayResponse::ChannelJobs { jobs } => {
+                assert_eq!(jobs.len(), 1);
+                assert_eq!(jobs[0].job_id, job.job_id);
+                assert_eq!(jobs[0].channel, "webhook");
+            }
+            other => panic!("Expected ChannelJobs, got {:?}", other),
+        }
+
+        let health = handle_message(
+            GatewayMessage::GetGatewayHealth,
+            &state,
+            &mut conn,
+            &ws_tx,
+            &ws_priority_tx,
+        )
+        .await;
+        match health {
+            GatewayResponse::GatewayHealth { data } => {
+                assert_eq!(data.active_channel_jobs, 1);
+            }
+            other => panic!("Expected GatewayHealth, got {:?}", other),
+        }
+
+        let canceled = handle_message(
+            GatewayMessage::CancelChannelJob {
+                job_id: job.job_id.clone(),
+            },
+            &state,
+            &mut conn,
+            &ws_tx,
+            &ws_priority_tx,
+        )
+        .await;
+        match canceled {
+            GatewayResponse::ChannelJobCanceled { job_id } => {
+                assert_eq!(job_id, job.job_id);
+            }
+            other => panic!("Expected ChannelJobCanceled, got {:?}", other),
+        }
+
+        let listed_after = handle_message(
+            GatewayMessage::ListChannelJobs,
+            &state,
+            &mut conn,
+            &ws_tx,
+            &ws_priority_tx,
+        )
+        .await;
+        match listed_after {
+            GatewayResponse::ChannelJobs { jobs } => {
+                assert!(jobs.is_empty());
+            }
+            other => panic!("Expected ChannelJobs, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_create_channel_job_rejects_zero_interval() {
+        let state = make_state(MockRunner::ok(), false);
+        let mut conn = authed_conn();
+        let (ws_tx, ws_priority_tx) = dummy_ws_txs();
+
+        let resp = handle_message(
+            GatewayMessage::CreateChannelJob {
+                channel: "webhook".into(),
+                account_id: "acct-1".into(),
+                external_user_id: "user-1".into(),
+                text: "scheduled ping".into(),
+                interval_seconds: 0,
+                create_response: Some(false),
+            },
+            &state,
+            &mut conn,
+            &ws_tx,
+            &ws_priority_tx,
+        )
+        .await;
+        match resp {
+            GatewayResponse::Error { code, .. } => assert_eq!(code, "invalid_channel_job"),
+            other => panic!("Expected invalid_channel_job error, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_cancel_channel_job_rejects_non_owner() {
+        let state = make_state(MockRunner::ok(), false);
+        let mut owner_conn = authed_conn();
+        let mut intruder_conn = ConnectionState {
+            authenticated: true,
+            token: Some("tok-2".to_string()),
+            principal_id: Some("user-2".to_string()),
+            owned_sessions: Vec::new(),
+        };
+        let (ws_tx, ws_priority_tx) = dummy_ws_txs();
+
+        let job_id = match handle_message(
+            GatewayMessage::CreateChannelJob {
+                channel: "webhook".into(),
+                account_id: "acct-sec".into(),
+                external_user_id: "user-sec".into(),
+                text: "scheduled ping".into(),
+                interval_seconds: 60,
+                create_response: Some(false),
+            },
+            &state,
+            &mut owner_conn,
+            &ws_tx,
+            &ws_priority_tx,
+        )
+        .await
+        {
+            GatewayResponse::ChannelJobCreated { job } => job.job_id,
+            other => panic!("Expected ChannelJobCreated, got {:?}", other),
+        };
+
+        let forbidden = handle_message(
+            GatewayMessage::CancelChannelJob {
+                job_id: job_id.clone(),
+            },
+            &state,
+            &mut intruder_conn,
+            &ws_tx,
+            &ws_priority_tx,
+        )
+        .await;
+        match forbidden {
+            GatewayResponse::Error { code, .. } => assert_eq!(code, "forbidden_channel_job"),
+            other => panic!("Expected forbidden_channel_job, got {:?}", other),
+        }
+
+        let owner_cancel = handle_message(
+            GatewayMessage::CancelChannelJob { job_id },
+            &state,
+            &mut owner_conn,
+            &ws_tx,
+            &ws_priority_tx,
+        )
+        .await;
+        assert!(matches!(
+            owner_cancel,
+            GatewayResponse::ChannelJobCanceled { .. }
+        ));
     }
 
     #[tokio::test]
