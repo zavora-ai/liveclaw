@@ -238,6 +238,25 @@ if ! wait_for_pattern "${WS_OUT}" "${transcript_pattern}" "${OUTPUT_TIMEOUT_SECS
   fail_with_context "model transcript was not observed within ${OUTPUT_TIMEOUT_SECS}s"
 fi
 
+# Wait for transcript stream to quiesce so we capture full model output
+# (including prompt→tool→answer paths) instead of only the first chunk.
+idle_ticks=0
+last_count=0
+deadline=$((SECONDS + OUTPUT_TIMEOUT_SECS))
+while ((SECONDS < deadline)); do
+  count="$(grep -c "${transcript_pattern}" "${WS_OUT}" || true)"
+  if [[ "${count}" -gt "${last_count}" ]]; then
+    last_count="${count}"
+    idle_ticks=0
+  else
+    idle_ticks=$((idle_ticks + 1))
+  fi
+  if [[ "${idle_ticks}" -ge 3 ]]; then
+    break
+  fi
+  sleep 1
+done
+
 echo "---- Model Output (TranscriptUpdate) ----"
 if command -v jq >/dev/null 2>&1; then
   model_output="$(

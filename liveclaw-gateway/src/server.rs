@@ -831,6 +831,65 @@ async fn handle_session_response_interrupt(
     }
 }
 
+fn maybe_extract_workspace_read_path(prompt: &str) -> Option<String> {
+    let lower = prompt.to_ascii_lowercase();
+    let read_intent = lower.contains("read_workspace_file")
+        || lower.contains("read file")
+        || lower.contains("read the file")
+        || lower.contains("readme");
+    if !read_intent {
+        return None;
+    }
+
+    for token in prompt.split_whitespace() {
+        let candidate = token.trim_matches(|c: char| {
+            matches!(
+                c,
+                '"' | '\'' | '`' | ',' | ';' | ':' | '(' | ')' | '[' | ']' | '{' | '}'
+            )
+        });
+        if candidate.is_empty() {
+            continue;
+        }
+
+        let normalized = candidate.trim_start_matches("./");
+        let candidate_lower = normalized.to_ascii_lowercase();
+        let is_file_like = candidate.contains('/') || candidate.contains('.');
+        let known_ext = [
+            ".md", ".txt", ".toml", ".json", ".yaml", ".yml", ".rs", ".ts", ".js", ".py", ".sh",
+        ]
+        .iter()
+        .any(|ext| candidate_lower.ends_with(ext));
+        if is_file_like && known_ext {
+            return Some(normalized.to_string());
+        }
+    }
+
+    if lower.contains("readme") {
+        return Some("README.md".to_string());
+    }
+
+    None
+}
+
+fn build_workspace_summary_prompt(
+    user_prompt: &str,
+    path: &str,
+    content: &str,
+    truncated: bool,
+) -> String {
+    let truncation_note = if truncated {
+        "The file content was truncated for safety. If needed, ask for a narrower section."
+    } else {
+        "The file content is complete for this read."
+    };
+
+    format!(
+        "User request:\n{}\n\nContext from read_workspace_file(path=\"{}\"):\n{}\n\n{}\n\nNow answer the user request directly.",
+        user_prompt, path, content, truncation_note
+    )
+}
+
 /// Handle SessionPrompt — forward a text prompt to the active provider-side
 /// conversation, optionally triggering response generation.
 async fn handle_session_prompt(
@@ -856,7 +915,66 @@ async fn handle_session_prompt(
         };
     }
 
-    if let Err(e) = state.runner.send_text(session_id, trimmed).await {
+    let mut outbound_prompt = trimmed.to_string();
+    if let Some(path) = maybe_extract_workspace_read_path(trimmed) {
+        let tool_args = serde_json::json!({
+            "path": path,
+            "max_bytes": 32768,
+        });
+        match state
+            .runner
+            .session_tool_call(session_id, "read_workspace_file", tool_args)
+            .await
+        {
+            Ok((tool_result, graph)) => {
+                // Surface prompt-driven tool execution to the client for
+                // operator/user validation.
+                let _ = ws_tx
+                    .send(GatewayResponse::SessionToolResult {
+                        session_id: session_id.to_string(),
+                        tool_name: "read_workspace_file".to_string(),
+                        result: tool_result.clone(),
+                        graph,
+                    })
+                    .await;
+
+                let content = tool_result
+                    .get("result")
+                    .and_then(|v| v.get("content"))
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default();
+                let resolved_path = tool_result
+                    .get("result")
+                    .and_then(|v| v.get("path"))
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("README.md");
+                let truncated = tool_result
+                    .get("result")
+                    .and_then(|v| v.get("truncated"))
+                    .and_then(serde_json::Value::as_bool)
+                    .unwrap_or(false);
+                if !content.is_empty() {
+                    outbound_prompt =
+                        build_workspace_summary_prompt(trimmed, resolved_path, content, truncated);
+                }
+            }
+            Err(e) => {
+                warn!(
+                    "Prompt tool bridge failed for session {}: {}",
+                    session_id, e
+                );
+                return GatewayResponse::Error {
+                    code: "session_prompt_tool_bridge_failed".to_string(),
+                    message: format!(
+                        "Failed to execute prompt-driven read_workspace_file call: {}",
+                        e
+                    ),
+                };
+            }
+        }
+    }
+
+    if let Err(e) = state.runner.send_text(session_id, &outbound_prompt).await {
         warn!("Failed to send prompt for session {}: {}", session_id, e);
         return GatewayResponse::Error {
             code: "session_prompt_failed".to_string(),
@@ -1217,6 +1335,10 @@ mod tests {
         tool_call_err: Option<String>,
         /// If set, diagnostics returns this error.
         diagnostics_err: Option<String>,
+        /// Last prompt forwarded to send_text.
+        last_prompt: Arc<std::sync::Mutex<Option<String>>>,
+        /// Recorded tool calls: (tool_name, arguments).
+        tool_calls: Arc<std::sync::Mutex<Vec<(String, serde_json::Value)>>>,
     }
 
     impl MockRunner {
@@ -1231,6 +1353,8 @@ mod tests {
                 send_text_err: None,
                 tool_call_err: None,
                 diagnostics_err: None,
+                last_prompt: Arc::new(std::sync::Mutex::new(None)),
+                tool_calls: Arc::new(std::sync::Mutex::new(Vec::new())),
             }
         }
 
@@ -1245,6 +1369,8 @@ mod tests {
                 send_text_err: None,
                 tool_call_err: None,
                 diagnostics_err: None,
+                last_prompt: Arc::new(std::sync::Mutex::new(None)),
+                tool_calls: Arc::new(std::sync::Mutex::new(Vec::new())),
             }
         }
     }
@@ -1298,7 +1424,9 @@ mod tests {
             }
         }
 
-        async fn send_text(&self, _session_id: &str, _prompt: &str) -> anyhow::Result<()> {
+        async fn send_text(&self, _session_id: &str, prompt: &str) -> anyhow::Result<()> {
+            *self.last_prompt.lock().expect("last_prompt mutex poisoned") =
+                Some(prompt.to_string());
             match &self.send_text_err {
                 Some(e) => Err(anyhow::anyhow!("{}", e)),
                 None => Ok(()),
@@ -1311,13 +1439,24 @@ mod tests {
             tool_name: &str,
             arguments: serde_json::Value,
         ) -> anyhow::Result<(serde_json::Value, GraphExecutionReport)> {
+            self.tool_calls
+                .lock()
+                .expect("tool_calls mutex poisoned")
+                .push((tool_name.to_string(), arguments.clone()));
             match &self.tool_call_err {
                 Some(e) => Err(anyhow::anyhow!("{}", e)),
                 None => Ok((
                     serde_json::json!({
                         "tool": tool_name,
-                        "arguments": arguments,
                         "status": "ok",
+                        "result": {
+                            "path": arguments
+                                .get("path")
+                                .and_then(serde_json::Value::as_str)
+                                .unwrap_or("README.md"),
+                            "content": "LiveClaw README synthetic content",
+                            "truncated": false
+                        }
                     }),
                     GraphExecutionReport {
                         thread_id: "test-thread".to_string(),
@@ -2185,6 +2324,57 @@ mod tests {
             }
             other => panic!("Expected PromptAccepted, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn test_maybe_extract_workspace_read_path_defaults_to_readme() {
+        let path = maybe_extract_workspace_read_path("read the readme file and summarize");
+        assert_eq!(path.as_deref(), Some("README.md"));
+    }
+
+    #[tokio::test]
+    async fn test_session_prompt_readme_bridges_tool_call() {
+        let runner = MockRunner::ok();
+        let tool_calls = runner.tool_calls.clone();
+        let last_prompt = runner.last_prompt.clone();
+        let state = make_state(runner, false);
+
+        let mut conn = authed_conn();
+        let (ws_tx, ws_priority_tx) = dummy_ws_txs();
+        conn.owned_sessions.push("sess-1".to_string());
+
+        let resp = handle_message(
+            GatewayMessage::SessionPrompt {
+                session_id: "sess-1".into(),
+                prompt: "read the readme file and give me a summary".into(),
+                create_response: Some(true),
+            },
+            &state,
+            &mut conn,
+            &ws_tx,
+            &ws_priority_tx,
+        )
+        .await;
+
+        match resp {
+            GatewayResponse::PromptAccepted { session_id } => {
+                assert_eq!(session_id, "sess-1");
+            }
+            other => panic!("Expected PromptAccepted, got {:?}", other),
+        }
+
+        let calls = tool_calls.lock().expect("tool_calls mutex poisoned");
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, "read_workspace_file");
+        assert_eq!(calls[0].1["path"], serde_json::json!("README.md"));
+
+        let prompt = last_prompt
+            .lock()
+            .expect("last_prompt mutex poisoned")
+            .clone()
+            .expect("expected send_text prompt");
+        assert!(prompt.contains("Context from read_workspace_file"));
+        assert!(prompt.contains("README.md"));
     }
 
     #[tokio::test]

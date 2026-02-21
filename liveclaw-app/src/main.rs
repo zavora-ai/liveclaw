@@ -660,6 +660,87 @@ async fn execute_session_tool_call_graph(
     }
 }
 
+async fn execute_session_tool_call_direct(
+    session_id: &str,
+    user_id: &str,
+    tool_name: &str,
+    arguments: Value,
+    tools: HashMap<String, Arc<dyn Tool>>,
+) -> Result<(Value, GraphExecutionReport)> {
+    let thread_id = format!(
+        "{}-direct-{}",
+        session_id,
+        chrono::Utc::now().timestamp_millis()
+    );
+
+    let Some(tool) = tools.get(tool_name) else {
+        let mut available_tools = tools.keys().cloned().collect::<Vec<_>>();
+        available_tools.sort();
+        let result = json!({
+            "tool": tool_name,
+            "status": "error",
+            "message": "Tool is not registered for this session",
+            "available_tools": available_tools,
+        });
+        return Ok((
+            result.clone(),
+            GraphExecutionReport {
+                thread_id,
+                completed: true,
+                interrupted: false,
+                events: vec![GraphExecutionEvent {
+                    step: 0,
+                    node: "direct_tool".to_string(),
+                    action: "node_end".to_string(),
+                    detail: "tool not registered for session".to_string(),
+                }],
+                final_state: json!({
+                    "execution_mode": "direct",
+                    "tool_result": result,
+                }),
+            },
+        ));
+    };
+
+    let tool_ctx = Arc::new(ToolInvocationContext::new(
+        format!("direct-tool-{}", chrono::Utc::now().timestamp_millis()),
+        user_id.to_string(),
+        session_id.to_string(),
+    )) as Arc<dyn ToolContext>;
+
+    let result = match tool.execute(tool_ctx, arguments).await {
+        Ok(output) => json!({
+            "tool": tool_name,
+            "status": "ok",
+            "result": output,
+        }),
+        Err(err) => json!({
+            "tool": tool_name,
+            "status": "error",
+            "message": err.to_string(),
+        }),
+    };
+
+    Ok((
+        result.clone(),
+        GraphExecutionReport {
+            thread_id,
+            completed: true,
+            interrupted: false,
+            events: vec![GraphExecutionEvent {
+                step: 0,
+                node: "direct_tool".to_string(),
+                action: "node_end".to_string(),
+                detail: "direct tool execution completed".to_string(),
+            }],
+            final_state: json!({
+                "execution_mode": "direct",
+                "tool_result": result,
+            }),
+        },
+    ))
+}
+
 fn compact_memory_entries(
     entries: &mut Vec<adk_memory::MemoryEntry>,
     max_events_threshold: usize,
@@ -1428,23 +1509,21 @@ impl RunnerHandle for RunnerAdapter {
             )
         };
 
-        if !graph_enabled {
-            bail!(
-                "Graph execution is disabled for session '{}'. Create a session with enable_graph=true or set [graph].enable_graph=true.",
-                session_id
-            );
+        if graph_enabled {
+            execute_session_tool_call_graph(
+                session_id,
+                &user_id,
+                &role,
+                tool_name,
+                arguments,
+                tools,
+                graph_recursion_limit,
+            )
+            .await
+        } else {
+            execute_session_tool_call_direct(session_id, &user_id, tool_name, arguments, tools)
+                .await
         }
-
-        execute_session_tool_call_graph(
-            session_id,
-            &user_id,
-            &role,
-            tool_name,
-            arguments,
-            tools,
-            graph_recursion_limit,
-        )
-        .await
     }
 
     async fn diagnostics(&self) -> Result<RuntimeDiagnostics> {
@@ -2242,6 +2321,57 @@ mod tests {
         assert_eq!(result["status"], json!("interrupted"));
         assert!(report.interrupted);
         assert!(!report.completed);
+    }
+
+    #[tokio::test]
+    async fn test_execute_session_tool_call_direct_reads_workspace_file() {
+        let workspace = std::env::temp_dir().join(format!(
+            "liveclaw-direct-read-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let target_file = workspace.join("notes").join("direct.txt");
+        std::fs::create_dir_all(target_file.parent().unwrap()).unwrap();
+        std::fs::write(&target_file, "direct tool read success").unwrap();
+
+        let adapter = test_adapter_with_workspace("full", vec![], &workspace);
+        let tools = adapter
+            .build_protected_tools("principal-1", "full")
+            .unwrap()
+            .into_iter()
+            .map(|tool| (tool.name().to_string(), tool))
+            .collect::<HashMap<_, _>>();
+
+        let (result, report) = execute_session_tool_call_direct(
+            "sess-direct-read-1",
+            "principal-1",
+            "read_workspace_file",
+            json!({
+                "path": "notes/direct.txt",
+                "max_bytes": 256,
+            }),
+            tools,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result["status"], json!("ok"));
+        assert_eq!(result["tool"], json!("read_workspace_file"));
+        assert_eq!(result["result"]["path"], json!("notes/direct.txt"));
+        let content = result["result"]["content"].as_str().unwrap_or_default();
+        assert!(
+            content.contains("direct tool read success"),
+            "unexpected read content: {}",
+            content
+        );
+        assert!(report.completed);
+        assert!(!report.interrupted);
+        assert_eq!(report.final_state["execution_mode"], json!("direct"));
+
+        let _ = std::fs::remove_dir_all(workspace);
     }
 
     #[tokio::test]

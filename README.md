@@ -169,8 +169,14 @@ cd /Users/jameskaranja/Developer/projects/liveclaw
 
 Useful overrides:
 - `LIVECLAW_PROMPT_TEXT="Use utc_time and answer with current UTC only."`
+- `LIVECLAW_PROMPT_TEXT="Read README.md with read_workspace_file and summarize in 5 bullets."`
 - `LIVECLAW_PROMPT_USE_EXISTING_GATEWAY=auto|always|never`
 - `LIVECLAW_PROMPT_TOKEN=<token>` for pairing-required existing gateway runs
+
+Notes:
+- Prompt-driven workspace file requests now trigger `read_workspace_file` automatically when a file-read intent/path is detected.
+- The gateway emits a `SessionToolResult` event before the model summary so clients can verify the tool invocation.
+- `SessionToolCall` works even when graph mode is disabled; the response report marks `execution_mode` as `direct`.
 
 Required:
 - `OPENAI_API_KEY` or `LIVECLAW_API_KEY`
