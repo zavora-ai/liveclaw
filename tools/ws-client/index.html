@@ -672,11 +672,22 @@
           return els.sessionId.value.trim();
         }
 
+        function hasOpenSocket() {
+          return Boolean(ws && ws.readyState === WebSocket.OPEN);
+        }
+
+        function refreshMicControls() {
+          const hasSession = Boolean(activeSessionId());
+          els.micStartBtn.disabled = micState.active || !hasSession || !hasOpenSocket();
+          els.micStopBtn.disabled = !micState.active;
+        }
+
         function updateBadges() {
           const sid = activeSessionId();
           const tok = els.tokenInput.value.trim();
           els.sessionBadge.textContent = sid ? `session: ${sid}` : "session: none";
           els.tokenBadge.textContent = tok ? `token: ${tok.slice(0, 12)}...` : "token: none";
+          refreshMicControls();
         }
 
         function resetSessionOutputState() {
@@ -732,6 +743,32 @@
             log("error", `Invalid JSON: ${err.message}`);
             return null;
           }
+        }
+
+        function legacyGetUserMediaFn() {
+          return (
+            navigator.getUserMedia ||
+            navigator.webkitGetUserMedia ||
+            navigator.mozGetUserMedia ||
+            navigator.msGetUserMedia
+          );
+        }
+
+        async function requestMicrophoneStream(constraints) {
+          if (navigator.mediaDevices?.getUserMedia) {
+            return navigator.mediaDevices.getUserMedia(constraints);
+          }
+
+          const legacy = legacyGetUserMediaFn();
+          if (!legacy) {
+            throw new Error(
+              "Microphone API unavailable. Use a recent Chrome/Edge/Safari and open the client over http://127.0.0.1 or https."
+            );
+          }
+
+          return new Promise((resolve, reject) => {
+            legacy.call(navigator, constraints, resolve, reject);
+          });
         }
 
         function syncTemplateOptions(types) {
@@ -1030,14 +1067,13 @@
           const sid = activeSessionId();
           if (!sid) {
             log("error", "Create or set a Session ID before starting mic stream.");
-            return;
-          }
-          if (!navigator.mediaDevices?.getUserMedia) {
-            log("error", "getUserMedia is not available in this browser.");
+            setMicStatus("session required");
+            refreshMicControls();
             return;
           }
           if (!AudioCtx) {
             log("error", "Web Audio API is not available in this browser.");
+            setMicStatus("web-audio unavailable");
             return;
           }
           if (micState.active) {
@@ -1045,7 +1081,14 @@
             return;
           }
 
-          const stream = await navigator.mediaDevices.getUserMedia({
+          if (!window.isSecureContext) {
+            throw new Error(
+              "Microphone access requires secure context. Open the client via http://127.0.0.1:18080 or https (not file://)."
+            );
+          }
+
+          setMicStatus("requesting permission");
+          const stream = await requestMicrophoneStream({
             audio: {
               channelCount: 1,
               echoCancellation: true,
@@ -1056,6 +1099,13 @@
 
           const context = new AudioCtx();
           const source = context.createMediaStreamSource(stream);
+          if (typeof context.createScriptProcessor !== "function") {
+            stream.getTracks().forEach((track) => track.stop());
+            await context.close().catch(() => {});
+            throw new Error(
+              "This browser does not support ScriptProcessor mic capture. Use Chrome or Edge for this client path."
+            );
+          }
           const processor = context.createScriptProcessor(MIC_BUFFER_SIZE, 1, 1);
           const sink = context.createGain();
           sink.gain.value = 0;
@@ -1089,8 +1139,7 @@
           micState.processor = processor;
           micState.sink = sink;
           micState.active = true;
-          els.micStartBtn.disabled = true;
-          els.micStopBtn.disabled = false;
+          refreshMicControls();
           setMicStatus(`live ${context.sampleRate}Hz`);
           log("system", `Mic streaming started for session ${sid}.`);
         }
@@ -1113,8 +1162,7 @@
             micState.processor = null;
             micState.sink = null;
             micState.active = false;
-            els.micStartBtn.disabled = false;
-            els.micStopBtn.disabled = true;
+            refreshMicControls();
             setMicStatus("idle");
             log("system", "Mic streaming stopped.");
           }
@@ -1150,6 +1198,7 @@
             setStatus("connected");
             log("system", `Connected to ${url}`);
             savePrefs();
+            refreshMicControls();
           };
 
           ws.onclose = async (event) => {
@@ -1157,6 +1206,7 @@
             setStatus("closed", `${event.code}`);
             log("system", `Socket closed (${event.code}) - ${reason}`);
             await stopMicStream();
+            refreshMicControls();
           };
 
           ws.onerror = () => {
@@ -1375,7 +1425,12 @@
 
         els.micStartBtn.addEventListener("click", () => {
           startMicStream().catch((err) => {
-            log("error", `Mic stream start failed: ${err.message}`);
+            const message = err?.name === "NotAllowedError"
+              ? "Microphone permission denied. Allow mic access for this page and retry."
+              : (err?.message || String(err));
+            setMicStatus("error");
+            refreshMicControls();
+            log("error", `Mic stream start failed: ${message}`);
           });
         });
 
@@ -1479,6 +1534,19 @@
         setStatus("closed");
         setMicStatus("idle");
         setPlaybackStatus("idle");
+        refreshMicControls();
+        if (!window.isSecureContext) {
+          log(
+            "error",
+            "Page is not in a secure context. Mic access requires http://127.0.0.1 or https."
+          );
+        }
+        if (!navigator.mediaDevices?.getUserMedia && !legacyGetUserMediaFn()) {
+          log(
+            "error",
+            "Microphone API is unavailable in this browser. Use recent Chrome/Edge/Safari."
+          );
+        }
         log("system", "Ready. Connect, Pair/Auth, then CreateSession.");
       })();
     </script>
