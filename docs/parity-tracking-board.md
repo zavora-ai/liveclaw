@@ -13,7 +13,7 @@ Status scale: `NOT_STARTED`, `IN_PROGRESS`, `AT_RISK`, `BLOCKED`, `DONE`
 | M3 Tool and Graph Execution | DONE | Core Team | 2026-04-24 | `scripts/demo/m3_tools_graph.sh` | Non-empty toolset; RBAC enforced; graph tools node executes; `SessionToolCall` emits graph trace |
 | M4 Memory, Artifacts, Resilience | DONE | Core Team | 2026-05-22 | `scripts/demo/m4_memory_artifacts.sh` | Persistent recall across restarts; artifact persistence; reconnect behavior validated |
 | M5 ZeroClaw Track Parity | DONE | Core Team | 2026-06-19 | `scripts/demo/m5_runtime_security.sh` | Runtime modes validated; provider flexibility; security hardening gates pass |
-| M6 OpenClaw Track Parity + RC | IN_PROGRESS | Core Team | 2026-07-31 | `scripts/demo/m6_release_flow.sh` | Priority channels work; ops surfaces validated; release candidate checklist passes |
+| M6 OpenClaw Track Parity + RC | DONE | Core Team | 2026-07-31 | `scripts/demo/m6_release_flow.sh` + `scripts/demo/m6_rc_signoff.sh` | Priority channels work; ops surfaces validated; release candidate checklist/sign-off record published |
 
 ## Sprint 0 Checklist
 
@@ -176,13 +176,13 @@ Status scale: `NOT_STARTED`, `IN_PROGRESS`, `AT_RISK`, `BLOCKED`, `DONE`
 | Extend M6 release-flow checks for scheduler surfaces | DONE | `scripts/demo/m6_release_flow.sh` includes protocol + server tests for channel job messages/responses and lifecycle |
 | Deliver remaining tooling/automation closeout surfaces (policy-controlled browser/http/cron) | DONE | `liveclaw-gateway/src/server.rs` adds cron tick execution coverage (`test_channel_job_tick_routes_text_for_owner_principal`, `test_channel_job_tick_honors_create_response_flag`) and `scripts/demo/m6_release_flow.sh` validates the checks end-to-end |
 
-## Sprint 15 Checklist (IN_PROGRESS)
+## Sprint 15 Checklist (DONE)
 
 | Item | Status | Evidence |
 |---|---|---|
-| Add concurrent-session load test evidence and publish operational limits | IN_PROGRESS | `liveclaw-gateway/src/server.rs` adds `test_concurrent_create_session_burst_updates_health_and_ownership` and `scripts/demo/m6_release_flow.sh` now exercises the burst path |
+| Add concurrent-session load test evidence and publish operational limits | DONE | `liveclaw-gateway/src/server.rs` `test_concurrent_create_session_burst_updates_health_and_ownership` verifies 128-session burst; `docs/rc-operational-limits.md` publishes the RC limit and re-verification commands |
 | Create release runbook, deployment guide, and rollback playbook | DONE | `docs/release-runbook.md`, `docs/deployment-guide.md`, `docs/rollback-playbook.md` |
-| Finalize smoke suite and CI sign-off path | IN_PROGRESS | `scripts/run_quality_gate.sh` + `scripts/demo/run_all.sh` as sign-off gates; release RC sign-off record still open |
+| Finalize smoke suite and CI sign-off path | DONE | `scripts/demo/m6_rc_signoff.sh` writes `docs/rc-signoff-record.md` with latest `scripts/run_quality_gate.sh` and `scripts/demo/run_all.sh` evidence logs |
 
 ## Closeout Phase 1 Kickoff (2026-02-21)
 
@@ -191,7 +191,7 @@ Status scale: `NOT_STARTED`, `IN_PROGRESS`, `AT_RISK`, `BLOCKED`, `DONE`
 | Re-run deterministic quality gate | DONE | `scripts/run_quality_gate.sh` passed (`check`, `test`, `clippy`, `fmt`) |
 | Re-run milestone demo harness | DONE | `scripts/demo/run_all.sh` passed end-to-end |
 | Validate provider-backed live voice roundtrip | DONE | `scripts/demo/m1_voice_e2e_live.sh` passed in isolated mode (`LIVECLAW_E2E_USE_EXISTING_GATEWAY=never`) |
-| Promote milestone statuses where acceptance is fully evidenced | DONE | M1-M5 moved to `DONE`; M6 remains `IN_PROGRESS` |
+| Promote milestone statuses where acceptance is fully evidenced | DONE | M1-M6 moved to `DONE` with RC sign-off evidence in `docs/rc-signoff-record.md` |
 | Capture remaining project-complete blockers and execution plan | DONE | `docs/closeout-plan.md` |
 
 ## Notes

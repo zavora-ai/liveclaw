@@ -115,6 +115,14 @@ cargo fmt --check
 - Runbook: [`docs/release-runbook.md`](docs/release-runbook.md)
 - Deployment guide: [`docs/deployment-guide.md`](docs/deployment-guide.md)
 - Rollback playbook: [`docs/rollback-playbook.md`](docs/rollback-playbook.md)
+- Operational limits: [`docs/rc-operational-limits.md`](docs/rc-operational-limits.md)
+- Latest smoke sign-off record: [`docs/rc-signoff-record.md`](docs/rc-signoff-record.md)
+
+Generate/update the RC smoke sign-off record:
+
+```bash
+./scripts/demo/m6_rc_signoff.sh
+```
 
 ## Browser WS Client
 

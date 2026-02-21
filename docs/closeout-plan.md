@@ -1,7 +1,7 @@
 # LiveClaw Project Closeout Plan
 
 Date: 2026-02-21
-Status: Phase 3 complete; Phase 4 in progress
+Status: Phase 4 complete; Phase 5 in progress
 Owner: Core Team
 
 ## Objective
@@ -24,12 +24,12 @@ Close the remaining parity and release-candidate scope so the project can be dec
 2. Milestone demo harness passed: `scripts/demo/run_all.sh`.
 3. Live provider-backed voice roundtrip passed:
    `LIVECLAW_E2E_USE_EXISTING_GATEWAY=never LIVECLAW_E2E_CONFIG=<temp_config> LIVECLAW_E2E_WS_URL=ws://127.0.0.1:8520/ws scripts/demo/m1_voice_e2e_live.sh`.
-4. Current status: M1-M5 acceptance checks are evidenced; M6 remains in progress.
+4. Current status: M1-M6 acceptance checks are evidenced; RC sign-off record is published.
 
 ## Remaining Blockers
 
-1. Publish concurrent-session operational limits from RC load evidence.
-2. Complete final smoke-suite release sign-off record.
+1. No open technical blockers for RC hardening.
+2. Phase 5 closure actions remain: final parity closeout summary, ADK delta report publication, and release-candidate tagging.
 
 ## Phase Plan and Sprints
 
@@ -60,10 +60,11 @@ Close the remaining parity and release-candidate scope so the project can be dec
 ## Phase 4: RC Hardening (Sprint 15, 2026-04-06 to 2026-04-17)
 
 1. Add concurrent-session load tests and publish limits.
-   - Status: concurrent burst coverage added in gateway tests; limits publication pending.
+   - Status: delivered via `test_concurrent_create_session_burst_updates_health_and_ownership` and `docs/rc-operational-limits.md`.
 2. Create release runbook, deployment guide, and rollback playbook.
    - Status: delivered (`docs/release-runbook.md`, `docs/deployment-guide.md`, `docs/rollback-playbook.md`).
 3. Finalize smoke suite and CI sign-off path.
+   - Status: delivered via `scripts/demo/m6_rc_signoff.sh` and `docs/rc-signoff-record.md`.
 4. Exit criteria:
    - RC checklist is complete and reproducible.
 
@@ -99,3 +100,5 @@ Close the remaining parity and release-candidate scope so the project can be dec
 11. 2026-02-21: closed cron/operator policy evidence by adding deterministic channel-job tick execution tests (`test_channel_job_tick_routes_text_for_owner_principal`, `test_channel_job_tick_honors_create_response_flag`) and wiring them into `scripts/demo/m6_release_flow.sh`.
 12. 2026-02-21: started Phase 4 RC hardening by adding concurrent session burst coverage (`test_concurrent_create_session_burst_updates_health_and_ownership`) and wiring it into `scripts/demo/m6_release_flow.sh`.
 13. 2026-02-21: published RC operation artifacts (`docs/release-runbook.md`, `docs/deployment-guide.md`, `docs/rollback-playbook.md`).
+14. 2026-02-21: published RC operational limits (`docs/rc-operational-limits.md`) with deterministic burst evidence and re-verification command path.
+15. 2026-02-21: completed smoke-suite sign-off workflow via `scripts/demo/m6_rc_signoff.sh` and published `docs/rc-signoff-record.md`.

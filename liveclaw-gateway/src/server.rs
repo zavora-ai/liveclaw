@@ -3103,7 +3103,8 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn test_concurrent_create_session_burst_updates_health_and_ownership() {
         let state = make_state(MockRunner::ok(), false);
-        let task_count = 64usize;
+        // RC minimum verified burst capacity for concurrent CreateSession calls.
+        let task_count = 128usize;
         let mut handles = Vec::with_capacity(task_count);
 
         for idx in 0..task_count {
