@@ -66,7 +66,7 @@ Status legend:
 | 14 | Enforce workspace file boundaries | Full | Partial | Full | LiveClaw and ZeroClaw explicitly document workspace/path controls; OpenClaw sandbox policy is present but differs by session mode |
 | 15 | Persist memory across restarts | Full | Full | Full | LiveClaw M4 acceptance explicitly validates persistence; ZeroClaw and OpenClaw document memory/session persistence |
 | 16 | Persist/retrieve artifacts/transcripts | Full | Partial | Partial | LiveClaw M4 includes artifact service and probes; others have session/log persistence but less explicit artifact API evidence |
-| 17 | Integrate Telegram/Slack/Webhook ingress | Full | Full | Full | LiveClaw implements adapter and route tests for Telegram/Slack/Webhook |
+| 17 | Integrate Telegram/Slack/Webhook ingress | Full | Full | Full | LiveClaw implements adapter and route tests for Telegram/Slack/Webhook plus Discord |
 | 18 | Retrieve outbound channel messages programmatically | Full | Unknown | Partial | LiveClaw has `GetChannelOutbound` + HTTP poll; this was not clearly surfaced in OpenClaw docs pulled |
 | 19 | Schedule recurring jobs/automations | Full | Full | Full | LiveClaw channel jobs; OpenClaw cron/webhook automation; ZeroClaw cron command suite |
 | 20 | Survive provider/runtime interruptions with policy-based retries | Full | Partial | Full | LiveClaw M4 resilience evidence includes reconnect/backoff tests; ZeroClaw runtime/ops posture is explicit |
@@ -85,7 +85,7 @@ Status legend:
 ### Main parity gaps versus OpenClaw + ZeroClaw
 
 1. User-facing product surfaces gap: OpenClaw has richer end-user app/dashboard experience out of the box.
-2. Channel breadth gap: LiveClaw currently focuses on priority channels and protocol surfaces rather than broad channel ecosystem breadth.
+2. Channel breadth gap: LiveClaw now covers Telegram/Slack/Webhook/Discord, but still trails broader ecosystem depth.
 
 ## 4) Recommended Closure Order (Pragmatic)
 

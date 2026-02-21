@@ -273,6 +273,22 @@ struct TelegramUser {
     id: i64,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+struct DiscordMessageEvent {
+    #[serde(rename = "type")]
+    event_type: Option<String>,
+    guild_id: Option<String>,
+    channel_id: Option<String>,
+    author: Option<DiscordAuthor>,
+    content: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct DiscordAuthor {
+    id: Option<String>,
+    bot: Option<bool>,
+}
+
 // ---------------------------------------------------------------------------
 // Health check response
 // ---------------------------------------------------------------------------
@@ -436,6 +452,10 @@ fn build_router(state: AppState) -> Router {
         .route(
             "/channels/telegram/update",
             post(channel_telegram_update_handler),
+        )
+        .route(
+            "/channels/discord/events",
+            post(channel_discord_events_handler),
         )
         .route(
             "/channels/outbound/poll",
@@ -635,6 +655,101 @@ async fn channel_telegram_update_handler(
             channel: "telegram",
             account_id: &account_id,
             external_user_id: &external_user_id,
+            text,
+            create_response: query.create_response.unwrap_or(true),
+            session_config_on_create: None,
+            force_session_recreate: false,
+        },
+        token,
+        &state,
+    )
+    .await;
+    http_response_from_gateway(resp)
+}
+
+async fn channel_discord_events_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(query): Query<ChannelIngressQuery>,
+    JsonExtract(payload): JsonExtract<DiscordMessageEvent>,
+) -> impl IntoResponse {
+    if let Some(event_type) = payload.event_type.as_deref() {
+        if !event_type.eq_ignore_ascii_case("MESSAGE_CREATE") {
+            return (
+                StatusCode::ACCEPTED,
+                Json(serde_json::json!({
+                    "status": "ignored",
+                    "reason": "unsupported_event_type",
+                })),
+            );
+        }
+    }
+
+    let token = extract_channel_token(&headers, &query);
+
+    let Some(author) = payload.author.as_ref() else {
+        return http_json_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_discord_payload",
+            "Discord payload is missing 'author'",
+        );
+    };
+
+    if author.bot.unwrap_or(false) {
+        return (
+            StatusCode::ACCEPTED,
+            Json(serde_json::json!({
+                "status": "ignored",
+                "reason": "bot_message",
+            })),
+        );
+    }
+
+    let Some(external_user_id) = author.id.as_deref() else {
+        return http_json_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_discord_payload",
+            "Discord payload is missing 'author.id'",
+        );
+    };
+
+    let Some(text_raw) = payload.content.as_deref() else {
+        return (
+            StatusCode::ACCEPTED,
+            Json(serde_json::json!({
+                "status": "ignored",
+                "reason": "no_text",
+            })),
+        );
+    };
+    let text = text_raw.trim();
+    if text.is_empty() {
+        return (
+            StatusCode::ACCEPTED,
+            Json(serde_json::json!({
+                "status": "ignored",
+                "reason": "no_text",
+            })),
+        );
+    }
+
+    let Some(account_id) = payload
+        .guild_id
+        .as_deref()
+        .or(payload.channel_id.as_deref())
+    else {
+        return http_json_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_discord_payload",
+            "Discord payload is missing 'guild_id' or 'channel_id'",
+        );
+    };
+
+    let resp = handle_channel_http_route(
+        ChannelInboundRequest {
+            channel: "discord",
+            account_id,
+            external_user_id,
             text,
             create_response: query.create_response.unwrap_or(true),
             session_config_on_create: None,
@@ -1757,11 +1872,15 @@ fn build_workspace_summary_prompt(
     )
 }
 
+const SUPPORTED_CHANNELS_MESSAGE: &str =
+    "Supported channels are telegram, slack, webhook, and discord";
+
 fn normalize_channel(channel: &str) -> Option<String> {
     match channel.trim().to_ascii_lowercase().as_str() {
         "telegram" => Some("telegram".to_string()),
         "slack" => Some("slack".to_string()),
         "webhook" => Some("webhook".to_string()),
+        "discord" => Some("discord".to_string()),
         _ => None,
     }
 }
@@ -1798,7 +1917,7 @@ async fn drain_channel_outbox(
     let Some(channel) = normalize_channel(channel) else {
         return Err(GatewayResponse::Error {
             code: "invalid_channel".to_string(),
-            message: "Supported channels are telegram, slack, and webhook".to_string(),
+            message: SUPPORTED_CHANNELS_MESSAGE.to_string(),
         });
     };
     let Some(account_id) = normalize_channel_component(account_id) else {
@@ -1881,7 +2000,7 @@ async fn handle_create_channel_job(
     let Some(channel) = normalize_channel(request.channel) else {
         return GatewayResponse::Error {
             code: "invalid_channel".to_string(),
-            message: "Supported channels are telegram, slack, and webhook".to_string(),
+            message: SUPPORTED_CHANNELS_MESSAGE.to_string(),
         };
     };
     let Some(account_id) = normalize_channel_component(request.account_id) else {
@@ -2222,7 +2341,7 @@ async fn handle_channel_inbound(
     let Some(channel) = normalize_channel(request.channel) else {
         return GatewayResponse::Error {
             code: "invalid_channel".to_string(),
-            message: "Supported channels are telegram, slack, and webhook".to_string(),
+            message: SUPPORTED_CHANNELS_MESSAGE.to_string(),
         };
     };
     let Some(account_id) = normalize_channel_component(request.account_id) else {
@@ -4847,6 +4966,52 @@ mod tests {
         assert_eq!(body["channel"], serde_json::json!("telegram"));
         assert_eq!(body["account_id"], serde_json::json!("4455"));
         assert_eq!(body["external_user_id"], serde_json::json!("7788"));
+    }
+
+    #[tokio::test]
+    async fn test_channel_discord_http_routes_message_event() {
+        let state = make_state(MockRunner::ok(), true);
+        let token = paired_token(&state);
+        let app = build_router(state);
+
+        let request = Request::builder()
+            .method("POST")
+            .uri("/channels/discord/events")
+            .header(header::CONTENT_TYPE, "application/json")
+            .header(header::AUTHORIZATION, format!("Bearer {}", token))
+            .body(Body::from(
+                r#"{"type":"MESSAGE_CREATE","guild_id":"G901","author":{"id":"U42","bot":false},"content":"hello from discord"}"#,
+            ))
+            .expect("request");
+
+        let (status, body) = request_json(app, request).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["type"], serde_json::json!("ChannelRouted"));
+        assert_eq!(body["channel"], serde_json::json!("discord"));
+        assert_eq!(body["account_id"], serde_json::json!("G901"));
+        assert_eq!(body["external_user_id"], serde_json::json!("U42"));
+    }
+
+    #[tokio::test]
+    async fn test_channel_discord_http_ignores_bot_message() {
+        let state = make_state(MockRunner::ok(), true);
+        let token = paired_token(&state);
+        let app = build_router(state);
+
+        let request = Request::builder()
+            .method("POST")
+            .uri("/channels/discord/events")
+            .header(header::CONTENT_TYPE, "application/json")
+            .header(header::AUTHORIZATION, format!("Bearer {}", token))
+            .body(Body::from(
+                r#"{"type":"MESSAGE_CREATE","guild_id":"G901","author":{"id":"U-bot","bot":true},"content":"bot text"}"#,
+            ))
+            .expect("request");
+
+        let (status, body) = request_json(app, request).await;
+        assert_eq!(status, StatusCode::ACCEPTED);
+        assert_eq!(body["status"], serde_json::json!("ignored"));
+        assert_eq!(body["reason"], serde_json::json!("bot_message"));
     }
 
     #[tokio::test]

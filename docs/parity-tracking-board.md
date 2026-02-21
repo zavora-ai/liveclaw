@@ -228,6 +228,15 @@ Status scale: `NOT_STARTED`, `IN_PROGRESS`, `AT_RISK`, `BLOCKED`, `DONE`
 | Keep quick-start docs aligned to bootstrap path | DONE | `README.md` Quick Start now includes `scripts/bootstrap_local.sh` flow |
 | Keep parity comparison aligned to install-path improvements | DONE | `docs/openclaw-zeroclaw-parity-comparison.md` primary install row + install use-case notes updated |
 
+## Sprint 21 Checklist (DONE)
+
+| Item | Status | Evidence |
+|---|---|---|
+| Add Discord HTTP ingress adapter path | DONE | `liveclaw-gateway/src/server.rs` adds `/channels/discord/events` with payload mapping to `ChannelInbound` route |
+| Extend supported channel normalization to include Discord | DONE | `liveclaw-gateway/src/server.rs` `normalize_channel()` now accepts `discord` across inbound/outbound/job paths |
+| Add Discord adapter coverage tests | DONE | `server::tests::test_channel_discord_http_routes_message_event` and `server::tests::test_channel_discord_http_ignores_bot_message` |
+| Keep release-flow/demo and client docs aligned | DONE | `scripts/demo/m6_release_flow.sh`, `tools/ws-client/index.html`, and `README.md` updated for Discord channel path |
+
 ## Closeout Phase 1 Kickoff (2026-02-21)
 
 | Item | Status | Evidence |
