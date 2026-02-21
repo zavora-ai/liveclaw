@@ -28,13 +28,11 @@ Close the remaining parity and release-candidate scope so the project can be dec
 
 ## Remaining Blockers
 
-1. Docker runtime parity:
-   - `ADK-GAP-005` containerized runtime execution path beyond compatibility mode.
-2. OpenClaw-track scope not yet implemented end-to-end:
+1. OpenClaw-track scope not yet implemented end-to-end:
    - Telegram, Slack, Webhook channel adapters.
    - Browser/HTTP/Cron baseline tool surfaces with policy controls.
    - Background scheduling and webhook-triggered supervised actions.
-3. Release candidate artifacts:
+2. Release candidate artifacts:
    - Runbook, deployment guide, rollback playbook.
    - Concurrent-session load test evidence and smoke-suite sign-off.
 
@@ -50,11 +48,9 @@ Close the remaining parity and release-candidate scope so the project can be dec
 
 ## Phase 2: Runtime and Channel Parity (Sprint 13, 2026-03-09 to 2026-03-20)
 
-1. Implement Docker runtime execution bridge for `runtime.kind=docker`.
-2. Implement Telegram, Slack, and Webhook channel adapters.
-3. Add channel routing isolation and channel smoke tests.
+1. Implement Telegram, Slack, and Webhook channel adapters.
+2. Add channel routing isolation and channel smoke tests.
 4. Exit criteria:
-   - `ADK-GAP-005` closed.
    - Channel demo script passes with auth/routing evidence.
 
 ## Phase 3: Tooling and Automation Surfaces (Sprint 14, 2026-03-23 to 2026-04-03)
@@ -95,3 +91,4 @@ Close the remaining parity and release-candidate scope so the project can be dec
 1. 2026-02-21: created closeout plan document.
 2. 2026-02-21: began Phase 1 by reconciling parity, defect, and ADK tracking docs with current verification evidence.
 3. 2026-02-21: completed ADK lifecycle closeout (`ADK-GAP-004`) by wiring transcript lifecycle and compaction snapshots through `adk-runner::Runner` in the active gateway path.
+4. 2026-02-21: completed docker runtime closeout (`ADK-GAP-005`) by adding containerized realtime worker mode (`--runtime-worker`) and docker command/event bridge runtime (`DockerRuntimeBridgeRuntime`) in active session creation flow.

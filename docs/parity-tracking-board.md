@@ -141,6 +141,15 @@ Status scale: `NOT_STARTED`, `IN_PROGRESS`, `AT_RISK`, `BLOCKED`, `DONE`
 | Add manual turn-control voice protocol for deterministic prerecorded-audio flows | DONE | `SessionAudioCommit` / `SessionResponseCreate` / `SessionResponseInterrupt` in `liveclaw-gateway/src/protocol.rs` + `liveclaw-gateway/src/server.rs` + `liveclaw-app/src/main.rs` runner wiring |
 | Keep reusable browser WS client aligned with full voice E2E path | DONE | `tools/ws-client/index.html` adds mic streaming, upload-to-PCM conversion, `AudioOutput` playback, and session transcript pane |
 
+## Sprint 12 Checklist (DONE)
+
+| Item | Status | Evidence |
+|---|---|---|
+| Implement containerized runtime worker mode for `runtime.kind=docker` | DONE | `liveclaw-app/src/main.rs` adds `--runtime-worker` command path and worker command/event protocol (`DockerWorkerCommand` / `DockerWorkerMessage`) |
+| Route docker sessions through active runtime bridge | DONE | `liveclaw-app/src/main.rs` `DockerRuntimeBridgeRuntime` now selected in `RunnerAdapter::create_session` when `runtime.kind=docker` |
+| Remove compatibility-mode warning and surface real docker diagnostics | DONE | `validate_runtime_and_provider()` now reports `runtime.docker_image` note without compatibility fallback warning |
+| Add docker bridge tests and demo coverage | DONE | `test_build_docker_runtime_command_includes_worker_mode_and_env`, `test_validate_runtime_and_provider_docker_reports_runtime_image_note`, and `scripts/demo/m5_runtime_security.sh` |
+
 ## Closeout Phase 1 Kickoff (2026-02-21)
 
 | Item | Status | Evidence |

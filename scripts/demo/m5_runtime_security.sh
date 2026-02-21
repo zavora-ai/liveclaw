@@ -18,6 +18,8 @@ demo_header "M5 Runtime and Security Parity"
   cargo test -p liveclaw-app --bin liveclaw-app tests::test_validate_runtime_and_provider_rejects_non_ws_base_url -- --exact
   cargo test -p liveclaw-app --bin liveclaw-app tests::test_validate_runtime_and_provider_rejects_public_bind_without_override -- --exact
   cargo test -p liveclaw-app --bin liveclaw-app tests::test_validate_runtime_and_provider_allows_public_bind_with_override_warning -- --exact
+  cargo test -p liveclaw-app --bin liveclaw-app tests::test_validate_runtime_and_provider_docker_reports_runtime_image_note -- --exact
+  cargo test -p liveclaw-app --bin liveclaw-app tests::test_build_docker_runtime_command_includes_worker_mode_and_env -- --exact
   cargo test -p liveclaw-app --bin liveclaw-app tests::test_create_session_denied_when_principal_not_allowlisted -- --exact
   cargo test -p liveclaw-app --bin liveclaw-app tests::test_runner_diagnostics_snapshot_exposes_runtime_and_provider_config -- --exact
   cargo test -p liveclaw-gateway --lib protocol::tests::test_supported_protocol_message_lists_include_diagnostics_path -- --exact

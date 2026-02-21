@@ -1357,6 +1357,7 @@ dependencies = [
  "adk-tool",
  "anyhow",
  "async-trait",
+ "base64 0.22.1",
  "chrono",
  "futures",
  "liveclaw-gateway",

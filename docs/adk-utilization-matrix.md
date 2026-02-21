@@ -38,7 +38,7 @@ Track ADK-Rust crate/API usage for each roadmap milestone and explicitly documen
 1. `scripts/run_quality_gate.sh` passed.
 2. `scripts/demo/run_all.sh` passed.
 3. `scripts/demo/m1_voice_e2e_live.sh` passed in isolated mode with provider-backed audio/transcript roundtrip.
-4. Remaining ADK blocker for project closure is `ADK-GAP-005`.
+4. No open ADK gap blockers remain for closeout phases.
 
 ## Open ADK Gap Log
 
@@ -48,4 +48,4 @@ Track ADK-Rust crate/API usage for each roadmap milestone and explicitly documen
 | ADK-GAP-002 | Graph tools node | CLOSED | Graph tools node drains pending calls into deterministic state updates, with supervised interrupts covered by tests | Keep tool-loop behavior on `adk-graph` nodes and wire full runtime orchestration incrementally | Core Runtime | M4 |
 | ADK-GAP-003 | Plugin parity | CLOSED | Config-gated plugin assembly and per-session rate-limit plugin path implemented | Keep lifecycle hook wiring on `adk-plugin::PluginManager`; avoid bespoke plugin execution paths | Platform | M4 |
 | ADK-GAP-004 | Runner lifecycle parity | CLOSED | Transcript lifecycle ingestion now runs through `adk-runner::Runner` (`SessionLifecycleManager`) with runner-backed compaction summaries and session snapshots wired into gateway memory persistence | Keep realtime transport on `adk-realtime` while routing lifecycle/compaction through `adk-runner`; monitor fallback path alerts | Core Runtime | Sprint 12 |
-| ADK-GAP-005 | Docker runtime parity | IN_PROGRESS | `runtime.kind=docker` diagnostics and config surface exist, but execution remains compatibility mode in-process | Implement containerized runtime bridge while preserving ADK session lifecycle semantics | Platform | Sprint 13 |
+| ADK-GAP-005 | Docker runtime parity | CLOSED | `runtime.kind=docker` now spawns per-session containerized realtime workers (`--runtime-worker`) with command/event bridge protocol (`DockerRuntimeBridgeRuntime`) | Keep runtime worker protocol stable and extend parity tests in M5 demo script | Platform | Sprint 13 |

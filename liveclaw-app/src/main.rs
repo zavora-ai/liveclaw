@@ -1,14 +1,19 @@
 //! LiveClaw entry point — wires ADK-Rust realtime sessions to the gateway.
 
 use std::collections::HashMap;
+use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
 use async_trait::async_trait;
+use base64::Engine;
 use futures::StreamExt;
-use tokio::sync::{mpsc, RwLock};
+use serde::{Deserialize, Serialize};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::process::{Child, Command};
+use tokio::sync::{mpsc, oneshot, Mutex as AsyncMutex, RwLock};
 use tokio::task::JoinHandle;
 use tracing::{info, warn};
 
@@ -140,6 +145,459 @@ impl SessionRuntime for RealtimeRunnerRuntime {
             .interrupt()
             .await
             .map_err(|e| anyhow::anyhow!("Failed to interrupt realtime response: {}", e))
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum DockerWorkerCommand {
+    SendAudio { id: u64, audio_base64: String },
+    SendText { id: u64, text: String },
+    CommitAudio { id: u64 },
+    CreateResponse { id: u64 },
+    InterruptResponse { id: u64 },
+    Close { id: u64 },
+}
+
+impl DockerWorkerCommand {
+    fn id(&self) -> u64 {
+        match self {
+            Self::SendAudio { id, .. }
+            | Self::SendText { id, .. }
+            | Self::CommitAudio { id }
+            | Self::CreateResponse { id }
+            | Self::InterruptResponse { id }
+            | Self::Close { id } => *id,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum DockerWorkerMessage {
+    Started,
+    Ack {
+        id: u64,
+        ok: bool,
+        error: Option<String>,
+    },
+    AudioOutput {
+        audio_base64: String,
+        item_id: String,
+    },
+    TextOutput {
+        text: String,
+        item_id: String,
+    },
+    TranscriptOutput {
+        transcript: String,
+        item_id: String,
+    },
+    RuntimeError {
+        message: String,
+    },
+}
+
+struct DockerWorkerEventForwarder {
+    tx: mpsc::UnboundedSender<DockerWorkerMessage>,
+}
+
+#[async_trait]
+impl EventHandler for DockerWorkerEventForwarder {
+    async fn on_audio(&self, audio: &[u8], item_id: &str) -> adk_realtime::Result<()> {
+        let encoded = base64_encode(audio);
+        self.tx
+            .send(DockerWorkerMessage::AudioOutput {
+                audio_base64: encoded,
+                item_id: item_id.to_string(),
+            })
+            .map_err(|e| {
+                adk_realtime::error::RealtimeError::connection(format!(
+                    "Failed to send audio output from docker worker: {}",
+                    e
+                ))
+            })
+    }
+
+    async fn on_text(&self, text: &str, item_id: &str) -> adk_realtime::Result<()> {
+        self.tx
+            .send(DockerWorkerMessage::TextOutput {
+                text: text.to_string(),
+                item_id: item_id.to_string(),
+            })
+            .map_err(|e| {
+                adk_realtime::error::RealtimeError::connection(format!(
+                    "Failed to send text output from docker worker: {}",
+                    e
+                ))
+            })
+    }
+
+    async fn on_transcript(&self, transcript: &str, item_id: &str) -> adk_realtime::Result<()> {
+        self.tx
+            .send(DockerWorkerMessage::TranscriptOutput {
+                transcript: transcript.to_string(),
+                item_id: item_id.to_string(),
+            })
+            .map_err(|e| {
+                adk_realtime::error::RealtimeError::connection(format!(
+                    "Failed to send transcript output from docker worker: {}",
+                    e
+                ))
+            })
+    }
+}
+
+#[derive(Debug, Clone)]
+struct DockerRuntimeConfig {
+    session_id: String,
+    image: String,
+    api_key: String,
+    model: String,
+    voice: String,
+    instructions: Option<String>,
+    base_url: Option<String>,
+}
+
+#[derive(Clone)]
+struct DockerRuntimeConnection {
+    child: Arc<AsyncMutex<Child>>,
+    stdout: Arc<AsyncMutex<Option<tokio::process::ChildStdout>>>,
+    command_tx: mpsc::UnboundedSender<DockerWorkerCommand>,
+    pending_acks: Arc<AsyncMutex<HashMap<u64, oneshot::Sender<Result<()>>>>>,
+}
+
+struct DockerRuntimeBridgeRuntime {
+    config: DockerRuntimeConfig,
+    event_handler: Arc<dyn EventHandler>,
+    connection: AsyncMutex<Option<DockerRuntimeConnection>>,
+    next_command_id: AtomicU64,
+}
+
+impl DockerRuntimeBridgeRuntime {
+    fn new(config: DockerRuntimeConfig, event_handler: Arc<dyn EventHandler>) -> Self {
+        Self {
+            config,
+            event_handler,
+            connection: AsyncMutex::new(None),
+            next_command_id: AtomicU64::new(1),
+        }
+    }
+
+    fn docker_runtime_command_args(config: &DockerRuntimeConfig) -> Vec<String> {
+        let session_slug = config
+            .session_id
+            .chars()
+            .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '-' })
+            .take(30)
+            .collect::<String>();
+        let container_name = format!("liveclaw-runtime-{}", session_slug);
+
+        let mut args = vec![
+            "run".to_string(),
+            "--rm".to_string(),
+            "-i".to_string(),
+            "--network".to_string(),
+            "host".to_string(),
+            "--name".to_string(),
+            container_name,
+            "-e".to_string(),
+            format!("LIVECLAW_RUNTIME_API_KEY={}", config.api_key),
+            "-e".to_string(),
+            format!("LIVECLAW_RUNTIME_MODEL={}", config.model),
+            "-e".to_string(),
+            format!("LIVECLAW_RUNTIME_VOICE={}", config.voice),
+        ];
+
+        if let Some(instructions) = &config.instructions {
+            args.push("-e".to_string());
+            args.push(format!("LIVECLAW_RUNTIME_INSTRUCTIONS={}", instructions));
+        }
+        if let Some(base_url) = &config.base_url {
+            args.push("-e".to_string());
+            args.push(format!("LIVECLAW_RUNTIME_BASE_URL={}", base_url));
+        }
+
+        args.push(config.image.clone());
+        args.push("--runtime-worker".to_string());
+        args
+    }
+
+    fn build_docker_runtime_command(config: &DockerRuntimeConfig) -> Command {
+        let mut command = Command::new("docker");
+        command
+            .args(Self::docker_runtime_command_args(config))
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+
+        command
+    }
+
+    async fn send_worker_command(&self, command: DockerWorkerCommand) -> Result<()> {
+        let connection = {
+            let guard = self.connection.lock().await;
+            guard
+                .as_ref()
+                .cloned()
+                .ok_or_else(|| anyhow::anyhow!("Docker runtime session is not connected"))?
+        };
+
+        let id = command.id();
+        let (ack_tx, ack_rx) = oneshot::channel();
+        connection.pending_acks.lock().await.insert(id, ack_tx);
+        if connection.command_tx.send(command).is_err() {
+            connection.pending_acks.lock().await.remove(&id);
+            bail!("Failed to send command to docker runtime worker");
+        }
+
+        match tokio::time::timeout(Duration::from_secs(15), ack_rx).await {
+            Ok(Ok(result)) => result,
+            Ok(Err(_)) => bail!("Docker runtime worker closed ack channel"),
+            Err(_) => {
+                connection.pending_acks.lock().await.remove(&id);
+                bail!("Timed out waiting for docker runtime worker ack")
+            }
+        }
+    }
+
+    async fn fail_pending_acks(&self, error: &str) {
+        if let Some(connection) = self.connection.lock().await.as_ref().cloned() {
+            let mut pending = connection.pending_acks.lock().await;
+            for (_id, tx) in pending.drain() {
+                let _ = tx.send(Err(anyhow::anyhow!(error.to_string())));
+            }
+        }
+    }
+}
+
+#[async_trait]
+impl SessionRuntime for DockerRuntimeBridgeRuntime {
+    async fn connect(&self) -> Result<()> {
+        if self.connection.lock().await.is_some() {
+            return Ok(());
+        }
+
+        let mut command = Self::build_docker_runtime_command(&self.config);
+        let mut child = command.spawn().with_context(|| {
+            format!(
+                "Failed to spawn docker runtime container '{}'",
+                self.config.image
+            )
+        })?;
+
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| anyhow::anyhow!("Docker runtime child stdout was not piped"))?;
+        let stderr = child
+            .stderr
+            .take()
+            .ok_or_else(|| anyhow::anyhow!("Docker runtime child stderr was not piped"))?;
+        let mut stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| anyhow::anyhow!("Docker runtime child stdin was not piped"))?;
+
+        let pending_acks: Arc<AsyncMutex<HashMap<u64, oneshot::Sender<Result<()>>>>> =
+            Arc::new(AsyncMutex::new(HashMap::new()));
+        let (command_tx, mut command_rx) = mpsc::unbounded_channel::<DockerWorkerCommand>();
+
+        tokio::spawn(async move {
+            while let Some(command) = command_rx.recv().await {
+                let line = match serde_json::to_string(&command) {
+                    Ok(line) => line,
+                    Err(e) => {
+                        warn!(error = %e, "Failed to serialize docker worker command");
+                        break;
+                    }
+                };
+
+                if let Err(e) = stdin.write_all(line.as_bytes()).await {
+                    warn!(error = %e, "Failed writing docker worker command");
+                    break;
+                }
+                if let Err(e) = stdin.write_all(b"\n").await {
+                    warn!(error = %e, "Failed writing docker worker newline");
+                    break;
+                }
+                if let Err(e) = stdin.flush().await {
+                    warn!(error = %e, "Failed flushing docker worker stdin");
+                    break;
+                }
+            }
+        });
+
+        tokio::spawn(async move {
+            let mut lines = BufReader::new(stderr).lines();
+            while let Ok(Some(line)) = lines.next_line().await {
+                warn!(message = %line, "Docker runtime stderr");
+            }
+        });
+
+        let connection = DockerRuntimeConnection {
+            child: Arc::new(AsyncMutex::new(child)),
+            stdout: Arc::new(AsyncMutex::new(Some(stdout))),
+            command_tx,
+            pending_acks,
+        };
+
+        *self.connection.lock().await = Some(connection);
+        Ok(())
+    }
+
+    async fn run(&self) -> Result<()> {
+        let connection = {
+            let guard = self.connection.lock().await;
+            guard
+                .as_ref()
+                .cloned()
+                .ok_or_else(|| anyhow::anyhow!("Docker runtime session is not connected"))?
+        };
+
+        let stdout = {
+            let mut stdout_guard = connection.stdout.lock().await;
+            stdout_guard
+                .take()
+                .ok_or_else(|| anyhow::anyhow!("Docker runtime stdout stream is unavailable"))?
+        };
+
+        let process_result: Result<()> = async {
+            let mut lines = BufReader::new(stdout).lines();
+            while let Some(line) = lines
+                .next_line()
+                .await
+                .context("Failed reading docker runtime worker output")?
+            {
+                let message: DockerWorkerMessage = serde_json::from_str(&line).with_context(|| {
+                    format!("Failed to parse docker runtime worker message: {}", line)
+                })?;
+
+                match message {
+                    DockerWorkerMessage::Started => {
+                        info!(session_id = %self.config.session_id, "Docker runtime worker started");
+                    }
+                    DockerWorkerMessage::Ack { id, ok, error } => {
+                        if let Some(tx) = connection.pending_acks.lock().await.remove(&id) {
+                            if ok {
+                                let _ = tx.send(Ok(()));
+                            } else {
+                                let _ = tx.send(Err(anyhow::anyhow!(
+                                    error.unwrap_or_else(|| "Docker runtime worker command failed".to_string())
+                                )));
+                            }
+                        }
+                    }
+                    DockerWorkerMessage::AudioOutput { audio_base64, item_id } => {
+                        let audio = base64::engine::general_purpose::STANDARD
+                            .decode(audio_base64.as_bytes())
+                            .context("Failed to decode docker worker audio payload")?;
+                        self.event_handler.on_audio(&audio, &item_id).await.map_err(|e| {
+                            anyhow::anyhow!("Failed to forward docker audio output: {}", e)
+                        })?;
+                    }
+                    DockerWorkerMessage::TextOutput { text, item_id } => {
+                        self.event_handler
+                            .on_text(&text, &item_id)
+                            .await
+                            .map_err(|e| anyhow::anyhow!("Failed to forward docker text output: {}", e))?;
+                    }
+                    DockerWorkerMessage::TranscriptOutput { transcript, item_id } => {
+                        self.event_handler
+                            .on_transcript(&transcript, &item_id)
+                            .await
+                            .map_err(|e| anyhow::anyhow!("Failed to forward docker transcript output: {}", e))?;
+                    }
+                    DockerWorkerMessage::RuntimeError { message } => {
+                        bail!("Docker runtime worker error: {}", message);
+                    }
+                }
+            }
+
+            let status = connection
+                .child
+                .lock()
+                .await
+                .wait()
+                .await
+                .context("Failed waiting on docker runtime child process")?;
+            bail!("Docker runtime worker exited with status {}", status)
+        }
+        .await;
+
+        *self.connection.lock().await = None;
+        let error_message = process_result
+            .as_ref()
+            .err()
+            .map(|e| e.to_string())
+            .unwrap_or_else(|| "Docker runtime worker loop ended".to_string());
+        self.fail_pending_acks(&error_message).await;
+        process_result
+    }
+
+    async fn close(&self) -> Result<()> {
+        let connection = { self.connection.lock().await.take() };
+        let Some(connection) = connection else {
+            return Ok(());
+        };
+
+        let close_id = self.next_command_id.fetch_add(1, Ordering::SeqCst);
+        let _ = connection
+            .command_tx
+            .send(DockerWorkerCommand::Close { id: close_id });
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        if let Err(e) = connection.child.lock().await.kill().await {
+            warn!(
+                session_id = %self.config.session_id,
+                error = %e,
+                "Failed to kill docker runtime child"
+            );
+        }
+
+        let mut pending = connection.pending_acks.lock().await;
+        for (_id, tx) in pending.drain() {
+            let _ = tx.send(Err(anyhow::anyhow!(
+                "Docker runtime worker closed before acknowledging command"
+            )));
+        }
+        Ok(())
+    }
+
+    async fn send_audio_base64(&self, audio_base64: &str) -> Result<()> {
+        let id = self.next_command_id.fetch_add(1, Ordering::SeqCst);
+        self.send_worker_command(DockerWorkerCommand::SendAudio {
+            id,
+            audio_base64: audio_base64.to_string(),
+        })
+        .await
+    }
+
+    async fn send_text(&self, text: &str) -> Result<()> {
+        let id = self.next_command_id.fetch_add(1, Ordering::SeqCst);
+        self.send_worker_command(DockerWorkerCommand::SendText {
+            id,
+            text: text.to_string(),
+        })
+        .await
+    }
+
+    async fn commit_audio(&self) -> Result<()> {
+        let id = self.next_command_id.fetch_add(1, Ordering::SeqCst);
+        self.send_worker_command(DockerWorkerCommand::CommitAudio { id })
+            .await
+    }
+
+    async fn create_response(&self) -> Result<()> {
+        let id = self.next_command_id.fetch_add(1, Ordering::SeqCst);
+        self.send_worker_command(DockerWorkerCommand::CreateResponse { id })
+            .await
+    }
+
+    async fn interrupt_response(&self) -> Result<()> {
+        let id = self.next_command_id.fetch_add(1, Ordering::SeqCst);
+        self.send_worker_command(DockerWorkerCommand::InterruptResponse { id })
+            .await
     }
 }
 
@@ -1432,6 +1890,7 @@ impl EventHandler for GatewayEventForwarder {
 /// Adapter implementing gateway session operations on top of adk-realtime.
 struct RunnerAdapter {
     runtime_kind: RuntimeKind,
+    runtime_docker_image: String,
     provider: ProviderSelection,
     default_voice: Option<String>,
     default_instructions: Option<String>,
@@ -1453,6 +1912,7 @@ struct RunnerAdapter {
 
 struct RunnerAdapterInit {
     runtime_kind: RuntimeKind,
+    runtime_docker_image: String,
     provider: ProviderSelection,
     runtime_diagnostics: Arc<RuntimeDiagnosticsCounters>,
     memory_store: Arc<dyn MemoryService>,
@@ -1487,6 +1947,7 @@ impl RunnerAdapter {
 
         Self {
             runtime_kind: init.runtime_kind,
+            runtime_docker_image: init.runtime_docker_image,
             provider: init.provider,
             default_voice: voice_cfg.voice.clone(),
             default_instructions: voice_cfg.instructions.clone(),
@@ -1641,30 +2102,14 @@ impl RunnerHandle for RunnerAdapter {
             "Configured baseline toolset for realtime session"
         );
 
-        // Build adk-realtime runner for this session.
-        let mut model = OpenAIRealtimeModel::new(self.provider.api_key.clone(), model_id.clone());
-        match self.provider.kind {
-            ProviderKind::OpenAI => {
-                if let Some(base_url) = &self.provider.base_url {
-                    model = model.with_base_url(base_url.clone());
-                }
-            }
-            ProviderKind::OpenAICompatible => {
-                let base_url = self.provider.base_url.clone().ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "Provider profile '{}' requires a non-empty WebSocket base_url",
-                        self.provider.profile_name
-                    )
-                })?;
-                model = model.with_base_url(base_url);
-            }
-        }
         let mut tool_names = protected_tools
             .iter()
             .map(|tool| tool.name().to_string())
             .collect::<Vec<_>>();
         tool_names.sort();
-        let merged_instruction = if !tool_names.is_empty() {
+        let merged_instruction = if matches!(self.runtime_kind, RuntimeKind::Native)
+            && !tool_names.is_empty()
+        {
             let tool_guidance = format!(
                 "You can call these tools: {}. When the user asks for math, current time/date, or workspace file content, call the relevant tool before answering.",
                 tool_names.join(", ")
@@ -1679,60 +2124,96 @@ impl RunnerHandle for RunnerAdapter {
             instructions
         };
 
-        let mut realtime_config = RealtimeConfig::default()
-            .with_model(model_id)
-            .with_text_and_audio()
-            .with_server_vad()
-            .with_voice(voice);
-        if let Some(instr) = merged_instruction {
-            realtime_config = realtime_config.with_instruction(instr);
-        }
-
-        let mut runner_builder = RealtimeRunner::builder()
-            .model(Arc::new(model))
-            .config(realtime_config)
-            .event_handler(GatewayEventForwarder {
-                session_id: session_id.to_string(),
-                user_id: user_id.to_string(),
-                memory_store: self.memory_store.clone(),
-                session_memory_entries: self.session_memory_entries.clone(),
-                session_lifecycle: self.session_lifecycle.clone(),
-                artifact_service: self.artifact_service.clone(),
-                memory_compaction: self.memory_compaction_policy.clone(),
-                runtime_diagnostics: self.runtime_diagnostics.clone(),
-                audio_sequence: AtomicU64::new(0),
-                transcript_sequence: AtomicU64::new(0),
-                audio_tx: self.audio_tx.clone(),
-                transcript_tx: self.transcript_tx.clone(),
-            });
+        let event_forwarder = GatewayEventForwarder {
+            session_id: session_id.to_string(),
+            user_id: user_id.to_string(),
+            memory_store: self.memory_store.clone(),
+            session_memory_entries: self.session_memory_entries.clone(),
+            session_lifecycle: self.session_lifecycle.clone(),
+            artifact_service: self.artifact_service.clone(),
+            memory_compaction: self.memory_compaction_policy.clone(),
+            runtime_diagnostics: self.runtime_diagnostics.clone(),
+            audio_sequence: AtomicU64::new(0),
+            transcript_sequence: AtomicU64::new(0),
+            audio_tx: self.audio_tx.clone(),
+            transcript_tx: self.transcript_tx.clone(),
+        };
 
         let mut session_tools = HashMap::new();
         for tool in &protected_tools {
             session_tools.insert(tool.name().to_string(), tool.clone());
         }
 
-        for tool in protected_tools {
-            let definition = ToolDefinition {
-                name: tool.name().to_string(),
-                description: Some(tool.enhanced_description()),
-                parameters: tool.parameters_schema(),
-            };
-            let handler = AdkToolHandler {
-                tool: tool.clone(),
-                session_id: session_id.to_string(),
-                user_id: user_id.to_string(),
-                metrics: self.tool_metrics.clone(),
-            };
-            runner_builder = runner_builder.tool(definition, handler);
-        }
+        let runtime: Arc<dyn SessionRuntime> = match &self.runtime_kind {
+            RuntimeKind::Native => {
+                let mut model =
+                    OpenAIRealtimeModel::new(self.provider.api_key.clone(), model_id.clone());
+                match self.provider.kind {
+                    ProviderKind::OpenAI => {
+                        if let Some(base_url) = &self.provider.base_url {
+                            model = model.with_base_url(base_url.clone());
+                        }
+                    }
+                    ProviderKind::OpenAICompatible => {
+                        let base_url = self.provider.base_url.clone().ok_or_else(|| {
+                            anyhow::anyhow!(
+                                "Provider profile '{}' requires a non-empty WebSocket base_url",
+                                self.provider.profile_name
+                            )
+                        })?;
+                        model = model.with_base_url(base_url);
+                    }
+                }
 
-        let runner = Arc::new(
-            runner_builder
-                .build()
-                .map_err(|e| anyhow::anyhow!("Failed to build realtime runner: {}", e))?,
-        );
+                let mut realtime_config = RealtimeConfig::default()
+                    .with_model(model_id.clone())
+                    .with_text_and_audio()
+                    .with_server_vad()
+                    .with_voice(voice.clone());
+                if let Some(instr) = merged_instruction.clone() {
+                    realtime_config = realtime_config.with_instruction(instr);
+                }
 
-        let runtime: Arc<dyn SessionRuntime> = Arc::new(RealtimeRunnerRuntime::new(runner));
+                let mut runner_builder = RealtimeRunner::builder()
+                    .model(Arc::new(model))
+                    .config(realtime_config)
+                    .event_handler(event_forwarder);
+
+                for tool in protected_tools {
+                    let definition = ToolDefinition {
+                        name: tool.name().to_string(),
+                        description: Some(tool.enhanced_description()),
+                        parameters: tool.parameters_schema(),
+                    };
+                    let handler = AdkToolHandler {
+                        tool: tool.clone(),
+                        session_id: session_id.to_string(),
+                        user_id: user_id.to_string(),
+                        metrics: self.tool_metrics.clone(),
+                    };
+                    runner_builder = runner_builder.tool(definition, handler);
+                }
+
+                let runner = Arc::new(
+                    runner_builder
+                        .build()
+                        .map_err(|e| anyhow::anyhow!("Failed to build realtime runner: {}", e))?,
+                );
+                Arc::new(RealtimeRunnerRuntime::new(runner))
+            }
+            RuntimeKind::Docker => Arc::new(DockerRuntimeBridgeRuntime::new(
+                DockerRuntimeConfig {
+                    session_id: session_id.to_string(),
+                    image: self.runtime_docker_image.clone(),
+                    api_key: self.provider.api_key.clone(),
+                    model: model_id.clone(),
+                    voice: voice.clone(),
+                    instructions: merged_instruction.clone(),
+                    base_url: self.provider.base_url.clone(),
+                },
+                Arc::new(event_forwarder) as Arc<dyn EventHandler>,
+            )),
+        };
         runtime.connect().await?;
         let shutdown = Arc::new(AtomicBool::new(false));
         let run_task = spawn_runtime_loop(
@@ -1981,6 +2462,7 @@ fn effective_api_key(configured: &str) -> String {
 enum AppCommand {
     Run { config_path: String },
     Doctor { config_path: String },
+    RuntimeWorker,
 }
 
 #[derive(Debug, Default)]
@@ -1992,6 +2474,7 @@ struct DoctorReport {
 fn parse_command() -> AppCommand {
     let mut args = std::env::args().skip(1);
     match args.next() {
+        Some(flag) if flag == "--runtime-worker" => AppCommand::RuntimeWorker,
         Some(flag) if flag == "--doctor" => AppCommand::Doctor {
             config_path: args.next().unwrap_or_else(|| "liveclaw.toml".to_string()),
         },
@@ -2172,9 +2655,6 @@ fn validate_runtime_and_provider(
         if config.runtime.docker_image.trim().is_empty() {
             bail!("runtime.docker_image must be set when runtime.kind is docker");
         }
-        report.warnings.push(
-            "runtime.kind=docker currently uses embedded runtime compatibility mode (container bridge is planned in a later sprint)".to_string(),
-        );
         report.notes.push(format!(
             "runtime.docker_image={}",
             config.runtime.docker_image
@@ -2224,6 +2704,149 @@ fn print_doctor_report(config_path: &str, provider: &ProviderSelection, report: 
     }
 }
 
+fn required_env(name: &str) -> Result<String> {
+    std::env::var(name).with_context(|| format!("Missing required environment variable {}", name))
+}
+
+async fn run_docker_runtime_worker() -> Result<()> {
+    let api_key = required_env("LIVECLAW_RUNTIME_API_KEY")?;
+    let model_id = required_env("LIVECLAW_RUNTIME_MODEL")?;
+    let voice = std::env::var("LIVECLAW_RUNTIME_VOICE").unwrap_or_else(|_| "alloy".to_string());
+    let instructions = non_empty(std::env::var("LIVECLAW_RUNTIME_INSTRUCTIONS").ok());
+    let base_url = non_empty(std::env::var("LIVECLAW_RUNTIME_BASE_URL").ok());
+
+    let mut model = OpenAIRealtimeModel::new(api_key, model_id.clone());
+    if let Some(url) = base_url {
+        model = model.with_base_url(url);
+    }
+
+    let mut realtime_config = RealtimeConfig::default()
+        .with_model(model_id)
+        .with_text_and_audio()
+        .with_server_vad()
+        .with_voice(voice);
+    if let Some(instruction_text) = instructions {
+        realtime_config = realtime_config.with_instruction(instruction_text);
+    }
+
+    let (msg_tx, mut msg_rx) = mpsc::unbounded_channel::<DockerWorkerMessage>();
+    let event_handler = DockerWorkerEventForwarder { tx: msg_tx.clone() };
+
+    let runner = Arc::new(
+        RealtimeRunner::builder()
+            .model(Arc::new(model))
+            .config(realtime_config)
+            .event_handler(event_handler)
+            .build()
+            .map_err(|e| anyhow::anyhow!("Failed to build docker runtime worker runner: {}", e))?,
+    );
+    runner
+        .connect()
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to connect docker runtime worker runner: {}", e))?;
+
+    let _ = msg_tx.send(DockerWorkerMessage::Started);
+
+    let runtime_runner = runner.clone();
+    let runtime_msg_tx = msg_tx.clone();
+    tokio::spawn(async move {
+        if let Err(e) = runtime_runner.run().await {
+            let _ = runtime_msg_tx.send(DockerWorkerMessage::RuntimeError {
+                message: format!("Realtime worker loop ended: {}", e),
+            });
+        }
+    });
+
+    tokio::spawn(async move {
+        let mut stdout = tokio::io::stdout();
+        while let Some(message) = msg_rx.recv().await {
+            let line = match serde_json::to_string(&message) {
+                Ok(line) => line,
+                Err(e) => {
+                    warn!(error = %e, "Failed to serialize docker runtime worker message");
+                    break;
+                }
+            };
+
+            if let Err(e) = stdout.write_all(line.as_bytes()).await {
+                warn!(error = %e, "Failed writing docker runtime worker stdout");
+                break;
+            }
+            if let Err(e) = stdout.write_all(b"\n").await {
+                warn!(error = %e, "Failed writing docker runtime worker newline");
+                break;
+            }
+            if let Err(e) = stdout.flush().await {
+                warn!(error = %e, "Failed flushing docker runtime worker stdout");
+                break;
+            }
+        }
+    });
+
+    let stdin = tokio::io::stdin();
+    let mut lines = BufReader::new(stdin).lines();
+    while let Some(line) = lines
+        .next_line()
+        .await
+        .context("Failed reading docker runtime worker stdin")?
+    {
+        let command: DockerWorkerCommand = match serde_json::from_str(&line) {
+            Ok(command) => command,
+            Err(e) => {
+                let _ = msg_tx.send(DockerWorkerMessage::RuntimeError {
+                    message: format!("Invalid docker runtime worker command: {}", e),
+                });
+                continue;
+            }
+        };
+
+        let id = command.id();
+        let command_result = match command {
+            DockerWorkerCommand::SendAudio { audio_base64, .. } => runner
+                .send_audio(&audio_base64)
+                .await
+                .map_err(|e| anyhow::anyhow!("send_audio failed: {}", e)),
+            DockerWorkerCommand::SendText { text, .. } => runner
+                .send_text(&text)
+                .await
+                .map_err(|e| anyhow::anyhow!("send_text failed: {}", e)),
+            DockerWorkerCommand::CommitAudio { .. } => runner
+                .commit_audio()
+                .await
+                .map_err(|e| anyhow::anyhow!("commit_audio failed: {}", e)),
+            DockerWorkerCommand::CreateResponse { .. } => runner
+                .create_response()
+                .await
+                .map_err(|e| anyhow::anyhow!("create_response failed: {}", e)),
+            DockerWorkerCommand::InterruptResponse { .. } => runner
+                .interrupt()
+                .await
+                .map_err(|e| anyhow::anyhow!("interrupt_response failed: {}", e)),
+            DockerWorkerCommand::Close { .. } => {
+                let close_result = runner
+                    .close()
+                    .await
+                    .map_err(|e| anyhow::anyhow!("close failed: {}", e));
+                let _ = msg_tx.send(DockerWorkerMessage::Ack {
+                    id,
+                    ok: close_result.is_ok(),
+                    error: close_result.err().map(|err| err.to_string()),
+                });
+                return Ok(());
+            }
+        };
+
+        let _ = msg_tx.send(DockerWorkerMessage::Ack {
+            id,
+            ok: command_result.is_ok(),
+            error: command_result.err().map(|err| err.to_string()),
+        });
+    }
+
+    let _ = runner.close().await;
+    Ok(())
+}
+
 fn base64_encode(input: &[u8]) -> String {
     const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
@@ -2257,8 +2880,12 @@ fn base64_encode(input: &[u8]) -> String {
 #[tokio::main]
 async fn main() -> Result<()> {
     let command = parse_command();
+    if matches!(command, AppCommand::RuntimeWorker) {
+        return run_docker_runtime_worker().await;
+    }
     let config_path = match &command {
         AppCommand::Run { config_path } | AppCommand::Doctor { config_path } => config_path,
+        AppCommand::RuntimeWorker => unreachable!("runtime worker handled above"),
     };
 
     let config = LiveClawConfig::load(config_path)?;
@@ -2324,6 +2951,7 @@ async fn main() -> Result<()> {
         &config.security,
         RunnerAdapterInit {
             runtime_kind: config.runtime.kind.clone(),
+            runtime_docker_image: config.runtime.docker_image.clone(),
             provider,
             runtime_diagnostics: Arc::new(RuntimeDiagnosticsCounters::default()),
             memory_store,
@@ -2400,6 +3028,7 @@ mod tests {
             &security_cfg,
             RunnerAdapterInit {
                 runtime_kind: RuntimeKind::Native,
+                runtime_docker_image: "zavoraai/liveclaw-runtime:test".to_string(),
                 provider: ProviderSelection {
                     kind: ProviderKind::OpenAI,
                     profile_name: "legacy".to_string(),
@@ -3269,5 +3898,58 @@ mod tests {
             .warnings
             .iter()
             .any(|warning| warning.contains("public bind")));
+    }
+
+    #[test]
+    fn test_validate_runtime_and_provider_docker_reports_runtime_image_note() {
+        let mut cfg = LiveClawConfig::default();
+        cfg.runtime.kind = RuntimeKind::Docker;
+        cfg.runtime.docker_image = "zavoraai/liveclaw-runtime:test".to_string();
+
+        let (_provider, report) = validate_runtime_and_provider(&cfg, false).unwrap();
+        assert!(
+            report
+                .notes
+                .iter()
+                .any(|note| note.contains("runtime.docker_image=zavoraai/liveclaw-runtime:test")),
+            "expected docker image diagnostic note, got {:?}",
+            report.notes
+        );
+    }
+
+    #[test]
+    fn test_build_docker_runtime_command_includes_worker_mode_and_env() {
+        let cfg = DockerRuntimeConfig {
+            session_id: "sess docker 42".to_string(),
+            image: "zavoraai/liveclaw-runtime:test".to_string(),
+            api_key: "secret".to_string(),
+            model: "gpt-4o-realtime-preview-2024-12-17".to_string(),
+            voice: "alloy".to_string(),
+            instructions: Some("You are a docker runtime worker.".to_string()),
+            base_url: Some("wss://api.openai.com/v1/realtime".to_string()),
+        };
+
+        let args = DockerRuntimeBridgeRuntime::docker_runtime_command_args(&cfg);
+        assert!(args.contains(&"run".to_string()));
+        assert!(args.contains(&"--runtime-worker".to_string()));
+        assert!(args.contains(&cfg.image));
+        assert!(
+            args.iter()
+                .any(|arg| arg.starts_with("LIVECLAW_RUNTIME_API_KEY=")),
+            "expected API key env argument in docker run args: {:?}",
+            args
+        );
+        assert!(
+            args.iter()
+                .any(|arg| arg.starts_with("LIVECLAW_RUNTIME_MODEL=")),
+            "expected model env argument in docker run args: {:?}",
+            args
+        );
+        assert!(
+            args.iter()
+                .any(|arg| arg.starts_with("LIVECLAW_RUNTIME_BASE_URL=")),
+            "expected base URL env argument in docker run args: {:?}",
+            args
+        );
     }
 }
