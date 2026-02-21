@@ -40,7 +40,7 @@ Status legend:
 | First run command | `cargo run -p liveclaw-app -- liveclaw.toml` | `openclaw onboard --install-daemon`, then `openclaw dashboard`/`openclaw gateway` | `zeroclaw onboard ...`, then `zeroclaw daemon` or `zeroclaw gateway` |
 | Foreground runtime mode | Full | Full | Full |
 | Background service mode | Full (`service install/start/stop/restart/status/uninstall` with macOS launchd and Linux systemd user units) | Full (`--install-daemon`) | Full (`zeroclaw service ...`) |
-| Health and diagnostics | Full (`GetGatewayHealth`, `GetDiagnostics`, `--doctor`) | Full (`openclaw health`, doctor docs) | Full (`zeroclaw status`, `doctor`, `channel doctor`) |
+| Health and diagnostics | Full (`GetGatewayHealth`, `GetDiagnostics`, `--doctor`, plus `service doctor` and `service logs`) | Full (`openclaw health`, doctor docs) | Full (`zeroclaw status`, `doctor`, `channel doctor`) |
 | Client/operator UI | Browser WS client (`scripts/ws_client.sh`) focused on gateway protocol operations | Full dashboard/control UI + app surfaces | Primarily CLI/operator docs; UI not primary |
 | Auth bootstrapping | Pairing code -> token -> `Authenticate` | Wizard/app onboarding + pairing/allowlists | Pairing and bearer token model documented |
 | Runtime/provider flexibility | Full (`runtime.kind=native/docker`, provider profiles, doctor validation) | Partial (broad model/provider support; runtime model less central) | Full (native/docker runtime and provider abstraction documented) |
@@ -80,6 +80,7 @@ Status legend:
 3. Memory, artifacts, and resilience are demonstrated with milestone evidence and runnable scripts.
 4. Runtime/provider security hardening is explicit (`native`/`docker`, allowlist enforcement, public bind safety checks).
 5. Browser client now includes guided bootstrap/ops workflows plus reusable saved connection profiles.
+6. Service operator ergonomics now include `service doctor` and `service logs` shortcuts.
 
 ### Main parity gaps versus OpenClaw + ZeroClaw
 
@@ -88,9 +89,9 @@ Status legend:
 
 ## 4) Recommended Closure Order (Pragmatic)
 
-1. `P0` UX unification: promote WS client as first-class control UI with guided tasks and saved environment profiles.
-2. `P1` Channel breadth expansion based on actual user demand sequence.
-3. `P1` Operator ergonomics follow-up: add service log-tail and diagnostics shortcuts under `service` command group.
+1. `P1` Channel breadth expansion based on actual user demand sequence.
+2. `P1` Install simplification: reduce first-time setup dependence on manual Rust/ADK sibling orchestration.
+3. `P2` End-user surface expansion beyond operator-focused WS client workflows.
 
 ## 5) Bottom Line
 

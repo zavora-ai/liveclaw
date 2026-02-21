@@ -82,6 +82,12 @@ cargo run -p liveclaw-app -- service status
 cargo run -p liveclaw-app -- service restart
 cargo run -p liveclaw-app -- service stop
 
+# Service diagnostics shortcuts
+cargo run -p liveclaw-app -- service doctor --config liveclaw.toml
+cargo run -p liveclaw-app -- service logs --lines 120
+cargo run -p liveclaw-app -- service logs --stream stderr --lines 80
+cargo run -p liveclaw-app -- service logs --follow
+
 # Uninstall service
 cargo run -p liveclaw-app -- service uninstall
 ```
