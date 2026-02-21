@@ -258,6 +258,10 @@ Webhook/Slack/Telegram payloads into the same `ChannelInbound` route used by WS 
 - `POST /channels/webhook`
 - `POST /channels/slack/events`
 - `POST /channels/telegram/update`
+- `POST /channels/outbound/poll`
+- `POST /channels/jobs/create`
+- `GET /channels/jobs/list`
+- `POST /channels/jobs/cancel`
 
 When pairing is enabled, send the paired token as `Authorization: Bearer <token>`.
 
@@ -314,6 +318,40 @@ curl -sS -X POST http://127.0.0.1:8420/channels/outbound/poll \
     "account_id":"acct-1",
     "external_user_id":"user-1",
     "max_items": 20
+  }'
+```
+
+Example channel job create (HTTP scheduler surface):
+
+```bash
+curl -sS -X POST http://127.0.0.1:8420/channels/jobs/create \
+  -H "Authorization: Bearer ${LIVECLAW_TOKEN}" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "channel":"webhook",
+    "account_id":"acct-1",
+    "external_user_id":"user-1",
+    "text":"scheduled check",
+    "interval_seconds": 60,
+    "create_response": false
+  }'
+```
+
+Example channel jobs list:
+
+```bash
+curl -sS -X GET http://127.0.0.1:8420/channels/jobs/list \
+  -H "Authorization: Bearer ${LIVECLAW_TOKEN}"
+```
+
+Example channel job cancel:
+
+```bash
+curl -sS -X POST http://127.0.0.1:8420/channels/jobs/cancel \
+  -H "Authorization: Bearer ${LIVECLAW_TOKEN}" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "job_id":"<JOB_ID>"
   }'
 ```
 

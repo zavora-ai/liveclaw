@@ -203,6 +203,21 @@ struct ChannelOutboundPollPayload {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+struct ChannelJobCreatePayload {
+    channel: String,
+    account_id: String,
+    external_user_id: String,
+    text: String,
+    interval_seconds: u64,
+    create_response: Option<bool>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct ChannelJobCancelPayload {
+    job_id: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
 struct SlackEnvelope {
     #[serde(rename = "type")]
     envelope_type: Option<String>,
@@ -412,6 +427,9 @@ fn build_router(state: AppState) -> Router {
             "/channels/outbound/poll",
             post(channel_outbound_poll_handler),
         )
+        .route("/channels/jobs/create", post(channel_job_create_handler))
+        .route("/channels/jobs/cancel", post(channel_job_cancel_handler))
+        .route("/channels/jobs/list", get(channel_job_list_handler))
         .with_state(state)
 }
 
@@ -626,6 +644,50 @@ async fn channel_outbound_poll_handler(
     http_response_from_gateway(resp)
 }
 
+async fn channel_job_create_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(query): Query<ChannelIngressQuery>,
+    JsonExtract(payload): JsonExtract<ChannelJobCreatePayload>,
+) -> impl IntoResponse {
+    let token = extract_channel_token(&headers, &query);
+    let resp = handle_channel_http_create_job(
+        ChannelJobCreateRequest {
+            channel: &payload.channel,
+            account_id: &payload.account_id,
+            external_user_id: &payload.external_user_id,
+            text: &payload.text,
+            interval_seconds: payload.interval_seconds,
+            create_response: payload.create_response.unwrap_or(true),
+        },
+        token,
+        &state,
+    )
+    .await;
+    http_response_from_gateway(resp)
+}
+
+async fn channel_job_cancel_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(query): Query<ChannelIngressQuery>,
+    JsonExtract(payload): JsonExtract<ChannelJobCancelPayload>,
+) -> impl IntoResponse {
+    let token = extract_channel_token(&headers, &query);
+    let resp = handle_channel_http_cancel_job(&payload.job_id, token, &state).await;
+    http_response_from_gateway(resp)
+}
+
+async fn channel_job_list_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(query): Query<ChannelIngressQuery>,
+) -> impl IntoResponse {
+    let token = extract_channel_token(&headers, &query);
+    let resp = handle_channel_http_list_jobs(token, &state).await;
+    http_response_from_gateway(resp)
+}
+
 fn extract_channel_token(headers: &HeaderMap, query: &ChannelIngressQuery) -> Option<String> {
     let from_header = headers
         .get(header::AUTHORIZATION)
@@ -717,6 +779,56 @@ async fn handle_channel_http_outbound_poll(
     }
 }
 
+async fn handle_channel_http_create_job(
+    request: ChannelJobCreateRequest<'_>,
+    token: Option<String>,
+    state: &AppState,
+) -> GatewayResponse {
+    let principal_id = match authenticate_http_principal(token.as_deref(), state) {
+        Ok(id) => id,
+        Err(resp) => return *resp,
+    };
+    let conn = ConnectionState {
+        authenticated: true,
+        token,
+        principal_id: Some(principal_id),
+        owned_sessions: Vec::new(),
+    };
+    handle_create_channel_job(request, state, &conn).await
+}
+
+async fn handle_channel_http_cancel_job(
+    job_id: &str,
+    token: Option<String>,
+    state: &AppState,
+) -> GatewayResponse {
+    let principal_id = match authenticate_http_principal(token.as_deref(), state) {
+        Ok(id) => id,
+        Err(resp) => return *resp,
+    };
+    let conn = ConnectionState {
+        authenticated: true,
+        token,
+        principal_id: Some(principal_id),
+        owned_sessions: Vec::new(),
+    };
+    handle_cancel_channel_job(job_id, state, &conn).await
+}
+
+async fn handle_channel_http_list_jobs(token: Option<String>, state: &AppState) -> GatewayResponse {
+    let principal_id = match authenticate_http_principal(token.as_deref(), state) {
+        Ok(id) => id,
+        Err(resp) => return *resp,
+    };
+    let conn = ConnectionState {
+        authenticated: true,
+        token,
+        principal_id: Some(principal_id),
+        owned_sessions: Vec::new(),
+    };
+    handle_list_channel_jobs(state, &conn).await
+}
+
 fn http_response_from_gateway(resp: GatewayResponse) -> (StatusCode, Json<serde_json::Value>) {
     match resp {
         GatewayResponse::Error { code, message } => {
@@ -725,6 +837,9 @@ fn http_response_from_gateway(resp: GatewayResponse) -> (StatusCode, Json<serde_
                 "invalid_channel" | "invalid_channel_route" | "invalid_channel_message" => {
                     StatusCode::BAD_REQUEST
                 }
+                "invalid_channel_job" => StatusCode::BAD_REQUEST,
+                "forbidden_channel_job" => StatusCode::FORBIDDEN,
+                "channel_job_not_found" => StatusCode::NOT_FOUND,
                 _ => StatusCode::INTERNAL_SERVER_ERROR,
             };
             http_json_error(status, &code, &message)
@@ -757,6 +872,27 @@ fn http_response_from_gateway(resp: GatewayResponse) -> (StatusCode, Json<serde_
                 "account_id": account_id,
                 "external_user_id": external_user_id,
                 "items": items,
+            })),
+        ),
+        GatewayResponse::ChannelJobCreated { job } => (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "type": "ChannelJobCreated",
+                "job": job,
+            })),
+        ),
+        GatewayResponse::ChannelJobCanceled { job_id } => (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "type": "ChannelJobCanceled",
+                "job_id": job_id,
+            })),
+        ),
+        GatewayResponse::ChannelJobs { jobs } => (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "type": "ChannelJobs",
+                "jobs": jobs,
             })),
         ),
         other => (
@@ -4432,6 +4568,104 @@ mod tests {
         let (second_status, second_body) = request_json(app, second_request).await;
         assert_eq!(second_status, StatusCode::OK);
         assert_eq!(second_body["items"].as_array().map(|v| v.len()), Some(0));
+    }
+
+    #[tokio::test]
+    async fn test_channel_job_create_http_requires_auth_token() {
+        let state = make_state(MockRunner::ok(), true);
+        let app = build_router(state);
+
+        let request = Request::builder()
+            .method("POST")
+            .uri("/channels/jobs/create")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(
+                r#"{"channel":"webhook","account_id":"acct-1","external_user_id":"user-1","text":"scheduled ping","interval_seconds":60,"create_response":false}"#,
+            ))
+            .expect("request");
+
+        let (status, body) = request_json(app, request).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(body["code"], serde_json::json!("auth_required"));
+    }
+
+    #[tokio::test]
+    async fn test_channel_job_http_create_list_cancel_with_bearer_token() {
+        let state = make_state(MockRunner::ok(), true);
+        let token = paired_token(&state);
+        let app = build_router(state);
+
+        let create_request = Request::builder()
+            .method("POST")
+            .uri("/channels/jobs/create")
+            .header(header::CONTENT_TYPE, "application/json")
+            .header(header::AUTHORIZATION, format!("Bearer {}", token))
+            .body(Body::from(
+                r#"{"channel":"webhook","account_id":"acct-job","external_user_id":"user-job","text":"scheduled ping","interval_seconds":3600,"create_response":false}"#,
+            ))
+            .expect("request");
+        let (create_status, create_body) = request_json(app.clone(), create_request).await;
+        assert_eq!(create_status, StatusCode::OK);
+        assert_eq!(create_body["type"], serde_json::json!("ChannelJobCreated"));
+        let job_id = create_body["job"]["job_id"]
+            .as_str()
+            .expect("job_id")
+            .to_string();
+
+        let list_request = Request::builder()
+            .method("GET")
+            .uri("/channels/jobs/list")
+            .header(header::AUTHORIZATION, format!("Bearer {}", token))
+            .body(Body::empty())
+            .expect("request");
+        let (list_status, list_body) = request_json(app.clone(), list_request).await;
+        assert_eq!(list_status, StatusCode::OK);
+        assert_eq!(list_body["type"], serde_json::json!("ChannelJobs"));
+        let jobs = list_body["jobs"].as_array().expect("jobs array");
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(jobs[0]["job_id"], serde_json::json!(job_id.clone()));
+
+        let cancel_request = Request::builder()
+            .method("POST")
+            .uri("/channels/jobs/cancel")
+            .header(header::CONTENT_TYPE, "application/json")
+            .header(header::AUTHORIZATION, format!("Bearer {}", token))
+            .body(Body::from(format!(r#"{{"job_id":"{}"}}"#, job_id)))
+            .expect("request");
+        let (cancel_status, cancel_body) = request_json(app.clone(), cancel_request).await;
+        assert_eq!(cancel_status, StatusCode::OK);
+        assert_eq!(cancel_body["type"], serde_json::json!("ChannelJobCanceled"));
+
+        let list_after_request = Request::builder()
+            .method("GET")
+            .uri("/channels/jobs/list")
+            .header(header::AUTHORIZATION, format!("Bearer {}", token))
+            .body(Body::empty())
+            .expect("request");
+        let (list_after_status, list_after_body) = request_json(app, list_after_request).await;
+        assert_eq!(list_after_status, StatusCode::OK);
+        assert_eq!(list_after_body["jobs"].as_array().map(|v| v.len()), Some(0));
+    }
+
+    #[tokio::test]
+    async fn test_channel_job_http_create_rejects_zero_interval() {
+        let state = make_state(MockRunner::ok(), true);
+        let token = paired_token(&state);
+        let app = build_router(state);
+
+        let request = Request::builder()
+            .method("POST")
+            .uri("/channels/jobs/create")
+            .header(header::CONTENT_TYPE, "application/json")
+            .header(header::AUTHORIZATION, format!("Bearer {}", token))
+            .body(Body::from(
+                r#"{"channel":"webhook","account_id":"acct-1","external_user_id":"user-1","text":"scheduled ping","interval_seconds":0,"create_response":false}"#,
+            ))
+            .expect("request");
+
+        let (status, body) = request_json(app, request).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["code"], serde_json::json!("invalid_channel_job"));
     }
 
     // --- Base64 helpers ---

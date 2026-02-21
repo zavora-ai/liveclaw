@@ -40,6 +40,9 @@ demo_header "M6 Release Candidate Flow"
   cargo test -p liveclaw-gateway --lib server::tests::test_get_channel_outbound_returns_queued_final_transcript_items -- --exact
   cargo test -p liveclaw-gateway --lib server::tests::test_channel_outbound_poll_http_requires_auth_token -- --exact
   cargo test -p liveclaw-gateway --lib server::tests::test_channel_outbound_poll_http_returns_and_drains_items -- --exact
+  cargo test -p liveclaw-gateway --lib server::tests::test_channel_job_create_http_requires_auth_token -- --exact
+  cargo test -p liveclaw-gateway --lib server::tests::test_channel_job_http_create_list_cancel_with_bearer_token -- --exact
+  cargo test -p liveclaw-gateway --lib server::tests::test_channel_job_http_create_rejects_zero_interval -- --exact
   cargo test -p liveclaw-gateway --lib server::tests::test_create_channel_job_requires_auth -- --exact
   cargo test -p liveclaw-gateway --lib server::tests::test_list_channel_jobs_requires_auth -- --exact
   cargo test -p liveclaw-gateway --lib server::tests::test_cancel_channel_job_requires_auth -- --exact
