@@ -544,6 +544,42 @@
           </div>
         </article>
 
+        <article class="card panel span-6">
+          <h2>M4 Evidence (Memory, Artifacts, Resilience)</h2>
+          <div class="field-grid">
+            <div class="field-row compact">
+              <button id="refreshM4Btn" class="primary">Refresh Diagnostics</button>
+              <button id="captureM4Btn" class="soft">Capture Evidence Snapshot</button>
+            </div>
+            <div class="field-row compact">
+              <div class="field-stack">
+                <label for="memoryProbePath">Memory Probe Path</label>
+                <input id="memoryProbePath" value="liveclaw-memory.json" placeholder="workspace-relative file" />
+              </div>
+              <div class="field-stack">
+                <label for="artifactProbePath">Artifact Probe Path</label>
+                <input id="artifactProbePath" value="artifacts" placeholder="workspace-relative file/dir" />
+              </div>
+            </div>
+            <div class="field-row compact">
+              <button id="probeMemoryBtn" class="muted">Probe Memory File</button>
+              <button id="probeArtifactBtn" class="muted">Probe Artifact Path</button>
+            </div>
+            <div class="field-stack">
+              <label for="m4EvidenceView">M4 Evidence View</label>
+              <textarea
+                id="m4EvidenceView"
+                class="output-pane"
+                readonly
+                placeholder="Snapshots include diagnostics counters, observed session traffic, and probe outcomes."
+              ></textarea>
+            </div>
+            <p class="hint">
+              Use file-backed memory and enabled artifacts in config for strongest persistence evidence. Diagnostics provide resilience + compaction state.
+            </p>
+          </div>
+        </article>
+
         <article class="card panel span-12">
           <h2>Raw JSON Message</h2>
           <div class="field-grid">
@@ -646,6 +682,13 @@
           runReadSummaryBtn: $("runReadSummaryBtn"),
           applyReadSummaryPromptBtn: $("applyReadSummaryPromptBtn"),
           promptToolActivityView: $("promptToolActivityView"),
+          refreshM4Btn: $("refreshM4Btn"),
+          captureM4Btn: $("captureM4Btn"),
+          memoryProbePath: $("memoryProbePath"),
+          artifactProbePath: $("artifactProbePath"),
+          probeMemoryBtn: $("probeMemoryBtn"),
+          probeArtifactBtn: $("probeArtifactBtn"),
+          m4EvidenceView: $("m4EvidenceView"),
           sendPromptBtn: $("sendPromptBtn"),
           rawJson: $("rawJson"),
           sendRawBtn: $("sendRawBtn"),
@@ -660,6 +703,8 @@
           sessionId: "liveclaw.ws.session_id",
           summaryFilePath: "liveclaw.ws.summary_file_path",
           summaryBullets: "liveclaw.ws.summary_bullets",
+          memoryProbePath: "liveclaw.ws.memory_probe_path",
+          artifactProbePath: "liveclaw.ws.artifact_probe_path",
         };
 
         const DEFAULT_SAMPLE_RATE = 24000;
@@ -675,6 +720,15 @@
           accepted: 0,
           transcript: 0,
           audioOutput: 0,
+        };
+
+        const m4State = {
+          lastDiagnostics: null,
+          snapshots: [],
+          toolResultCount: 0,
+          transcriptChars: 0,
+          lastToolSummary: "n/a",
+          lastError: "",
         };
 
         const micState = {
@@ -743,12 +797,19 @@
           voiceCounters.transcript = 0;
           voiceCounters.audioOutput = 0;
           lastAudioOutputBytes = null;
+          m4State.toolResultCount = 0;
+          m4State.transcriptChars = 0;
+          m4State.lastToolSummary = "n/a";
+          m4State.lastError = "";
+          m4State.snapshots = [];
           els.transcriptView.value = "";
           els.toolResultView.value = "";
           els.graphTraceView.value = "";
           els.promptToolActivityView.value = "";
+          els.m4EvidenceView.value = "";
           els.audioProgress.textContent = "idle";
           setPlaybackStatus("idle");
+          updateM4EvidenceView();
         }
 
         function savePrefs() {
@@ -757,6 +818,8 @@
           localStorage.setItem(keys.sessionId, activeSessionId());
           localStorage.setItem(keys.summaryFilePath, els.summaryFilePath.value.trim());
           localStorage.setItem(keys.summaryBullets, els.summaryBullets.value.trim());
+          localStorage.setItem(keys.memoryProbePath, els.memoryProbePath.value.trim());
+          localStorage.setItem(keys.artifactProbePath, els.artifactProbePath.value.trim());
         }
 
         function loadPrefs() {
@@ -765,6 +828,8 @@
           const sid = localStorage.getItem(keys.sessionId);
           const summaryFilePath = localStorage.getItem(keys.summaryFilePath);
           const summaryBullets = localStorage.getItem(keys.summaryBullets);
+          const memoryProbePath = localStorage.getItem(keys.memoryProbePath);
+          const artifactProbePath = localStorage.getItem(keys.artifactProbePath);
           if (url) els.wsUrl.value = url;
           if (token) els.tokenInput.value = token;
           if (sid) els.sessionId.value = sid;
@@ -773,7 +838,10 @@
             const matches = [...els.summaryBullets.options].some((opt) => opt.value === summaryBullets);
             if (matches) els.summaryBullets.value = summaryBullets;
           }
+          if (memoryProbePath) els.memoryProbePath.value = memoryProbePath;
+          if (artifactProbePath) els.artifactProbePath.value = artifactProbePath;
           updateBadges();
+          updateM4EvidenceView();
         }
 
         function requireOpenSocket() {
@@ -960,6 +1028,72 @@
             return `[${now()}] ${toolName} ${status} path=${path} bytes=${bytes} truncated=${truncated} mode=${executionMode}`;
           }
           return `[${now()}] ${toolName} ${status} mode=${executionMode}`;
+        }
+
+        function summarizeToolResult(parsed) {
+          const toolName = parsed.tool_name || "unknown";
+          const result = parsed.result || {};
+          const status = result.status || "unknown";
+          const report = parsed.graph || {};
+          const mode = report.final_state?.execution_mode || (Array.isArray(report.events) && report.events.length ? "graph" : "n/a");
+          if (toolName === "read_workspace_file" && result.result) {
+            const rr = result.result;
+            return `${toolName} ${status} path=${rr.path || "n/a"} bytes=${Number(rr.bytes_read || 0)} truncated=${Boolean(rr.truncated)} mode=${mode}`;
+          }
+          return `${toolName} ${status} mode=${mode}`;
+        }
+
+        function updateM4EvidenceView() {
+          const sid = activeSessionId() || "none";
+          const diag = m4State.lastDiagnostics || {};
+          const lines = [];
+          lines.push(`session_id: ${sid}`);
+          lines.push(`captured_at: ${new Date().toISOString()}`);
+          lines.push("");
+          lines.push("observed_session_evidence:");
+          lines.push(`- transcript_chunks=${voiceCounters.transcript}`);
+          lines.push(`- transcript_chars=${m4State.transcriptChars}`);
+          lines.push(`- audio_output_events=${voiceCounters.audioOutput}`);
+          lines.push(`- tool_result_events=${m4State.toolResultCount}`);
+          lines.push(`- last_tool_result=${m4State.lastToolSummary}`);
+          lines.push("");
+          lines.push("resilience_diagnostics:");
+          lines.push(`- reconnect_enabled=${diag.reconnect_enabled ?? "n/a"}`);
+          lines.push(`- reconnect_max_attempts=${diag.reconnect_max_attempts ?? "n/a"}`);
+          lines.push(`- reconnect_attempts_total=${diag.reconnect_attempts_total ?? "n/a"}`);
+          lines.push(`- reconnect_successes_total=${diag.reconnect_successes_total ?? "n/a"}`);
+          lines.push(`- reconnect_failures_total=${diag.reconnect_failures_total ?? "n/a"}`);
+          lines.push("");
+          lines.push("memory_compaction_diagnostics:");
+          lines.push(`- compaction_enabled=${diag.compaction_enabled ?? "n/a"}`);
+          lines.push(`- compaction_max_events_threshold=${diag.compaction_max_events_threshold ?? "n/a"}`);
+          lines.push(`- compactions_applied_total=${diag.compactions_applied_total ?? "n/a"}`);
+          lines.push("");
+          lines.push("recent_snapshots:");
+          if (m4State.snapshots.length === 0) {
+            lines.push("- none");
+          } else {
+            for (const s of m4State.snapshots.slice(-8)) {
+              lines.push(`- [${s.time}] ${s.note}`);
+            }
+          }
+          if (m4State.lastError) {
+            lines.push("");
+            lines.push(`last_error: ${m4State.lastError}`);
+          }
+          els.m4EvidenceView.value = lines.join("\n");
+          els.m4EvidenceView.scrollTop = els.m4EvidenceView.scrollHeight;
+        }
+
+        function recordM4Snapshot(note) {
+          m4State.snapshots.push({
+            time: now(),
+            note,
+          });
+          if (m4State.snapshots.length > 24) {
+            m4State.snapshots.shift();
+          }
+          updateM4EvidenceView();
         }
 
         function bytesToBase64(bytes) {
@@ -1365,6 +1499,7 @@
 
             if (parsed.type === "Diagnostics" && parsed.data) {
               const d = parsed.data;
+              m4State.lastDiagnostics = d;
               const compactions = Number(d.compactions_applied_total || 0);
               const reconnects = Number(d.reconnect_attempts_total || 0);
               const allowlistSize = Number(d.security_principal_allowlist_size || 0);
@@ -1380,6 +1515,9 @@
                 );
               }
               syncTemplateOptions(d.supported_client_messages);
+              recordM4Snapshot(
+                `diagnostics reconnect_attempts=${reconnects} compactions=${compactions} active_sessions=${Number(d.active_sessions || 0)}`
+              );
             }
 
             if (parsed.type === "GatewayHealth" && parsed.data) {
@@ -1426,6 +1564,7 @@
             if (parsed.type === "PromptAccepted" && parsed.session_id && parsed.session_id === activeSessionId()) {
               els.audioProgress.textContent = "prompt accepted";
               appendPromptToolActivity(`[${now()}] prompt accepted for session ${parsed.session_id}`);
+              recordM4Snapshot(`prompt accepted for session ${parsed.session_id}`);
             }
 
             if (parsed.type === "SessionToolResult" && parsed.session_id && parsed.session_id === activeSessionId()) {
@@ -1434,15 +1573,27 @@
               els.toolResultView.scrollTop = 0;
               els.graphTraceView.scrollTop = 0;
               appendPromptToolActivity(describeToolResultForActivity(parsed));
+              m4State.toolResultCount += 1;
+              m4State.lastToolSummary = summarizeToolResult(parsed);
+              recordM4Snapshot(`tool result: ${m4State.lastToolSummary}`);
             }
 
             if (parsed.type === "TranscriptUpdate" && parsed.session_id && parsed.session_id === activeSessionId()) {
               voiceCounters.transcript += 1;
-              appendTranscript(parsed.text || "", Boolean(parsed.is_final));
+              const textChunk = parsed.text || "";
+              m4State.transcriptChars += textChunk.length;
+              appendTranscript(textChunk, Boolean(parsed.is_final));
+              if (parsed.is_final) {
+                recordM4Snapshot(`final transcript chunk observed (${textChunk.length} chars)`);
+              } else {
+                updateM4EvidenceView();
+              }
             }
 
             if (parsed.type === "Error") {
+              m4State.lastError = `${parsed.code || "unknown"}: ${parsed.message || "unknown"}`;
               appendPromptToolActivity(`[${now()}] error ${parsed.code || "unknown"}: ${parsed.message || "unknown"}`);
+              recordM4Snapshot(`error ${parsed.code || "unknown"}`);
             }
 
             if (parsed.type === "AudioOutput" && parsed.session_id && parsed.session_id === activeSessionId()) {
@@ -1644,6 +1795,49 @@
           });
         });
 
+        els.refreshM4Btn.addEventListener("click", () => {
+          sendObject({ type: "GetDiagnostics" });
+          recordM4Snapshot("requested diagnostics refresh");
+        });
+
+        els.captureM4Btn.addEventListener("click", () => {
+          recordM4Snapshot("manual evidence snapshot");
+        });
+
+        function runReadWorkspaceProbe(path, probeLabel) {
+          const sid = activeSessionId();
+          if (!sid) {
+            log("error", "Session ID is empty.");
+            return;
+          }
+          const trimmedPath = (path || "").trim();
+          if (!trimmedPath) {
+            log("error", `${probeLabel} path is empty.`);
+            return;
+          }
+          const args = {
+            path: trimmedPath,
+            max_bytes: 4096,
+          };
+          els.toolName.value = "read_workspace_file";
+          els.toolArgs.value = JSON.stringify(args, null, 2);
+          sendObject({
+            type: "SessionToolCall",
+            session_id: sid,
+            tool_name: "read_workspace_file",
+            arguments: args,
+          });
+          recordM4Snapshot(`${probeLabel} probe requested for path '${trimmedPath}'`);
+        }
+
+        els.probeMemoryBtn.addEventListener("click", () => {
+          runReadWorkspaceProbe(els.memoryProbePath.value, "memory");
+        });
+
+        els.probeArtifactBtn.addEventListener("click", () => {
+          runReadWorkspaceProbe(els.artifactProbePath.value, "artifact");
+        });
+
         els.sendPromptBtn.addEventListener("click", () => {
           const sid = activeSessionId();
           if (!sid) {
@@ -1716,7 +1910,15 @@
           els.log.innerHTML = "";
         });
 
-        [els.wsUrl, els.tokenInput, els.sessionId, els.summaryFilePath, els.summaryBullets].forEach((el) => {
+        [
+          els.wsUrl,
+          els.tokenInput,
+          els.sessionId,
+          els.summaryFilePath,
+          els.summaryBullets,
+          els.memoryProbePath,
+          els.artifactProbePath,
+        ].forEach((el) => {
           el.addEventListener("input", () => {
             savePrefs();
             updateBadges();

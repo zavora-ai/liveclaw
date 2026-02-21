@@ -124,6 +124,8 @@ The client now supports:
 - Graph execution trace inspection from `SessionToolResult.graph`
 - One-click `Run Read + Summarize` flow that builds a `SessionPrompt` for workspace files
 - Prompt tool activity panel that confirms prompt-driven `read_workspace_file` execution details
+- Dedicated M4 evidence panel for memory/artifact/resilience snapshots
+- One-click memory/artifact `read_workspace_file` probes plus live diagnostics counters in the UI
 
 ```bash
 cd /Users/jameskaranja/Developer/projects/liveclaw
