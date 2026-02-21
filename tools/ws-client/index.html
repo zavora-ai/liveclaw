@@ -212,9 +212,40 @@
         color: #7f2d22;
       }
 
+      button.step-pending {
+        background: #c54233;
+        color: #fff;
+        animation: stepBlink 0.9s linear infinite;
+      }
+
+      button.step-done {
+        background: #2f6f45;
+        color: #fff;
+      }
+
+      button.step-wait {
+        background: #ede6db;
+        color: #534f45;
+      }
+
       button:disabled {
         cursor: not-allowed;
         opacity: 0.58;
+      }
+
+      @keyframes stepBlink {
+        0% {
+          opacity: 1;
+          box-shadow: 0 0 0 0 rgba(197, 66, 51, 0.6);
+        }
+        50% {
+          opacity: 0.4;
+          box-shadow: 0 0 0 6px rgba(197, 66, 51, 0);
+        }
+        100% {
+          opacity: 1;
+          box-shadow: 0 0 0 0 rgba(197, 66, 51, 0);
+        }
       }
 
       .hint {
@@ -731,6 +762,13 @@
           lastError: "",
         };
 
+        const flowState = {
+          requirePairing: true,
+          paired: false,
+          authenticated: false,
+          sessionReady: false,
+        };
+
         const micState = {
           stream: null,
           context: null,
@@ -778,6 +816,85 @@
           return Boolean(ws && ws.readyState === WebSocket.OPEN);
         }
 
+        function setButtonVariant(button, variant) {
+          const variants = ["primary", "soft", "muted", "warn", "step-pending", "step-done", "step-wait"];
+          for (const v of variants) {
+            button.classList.remove(v);
+          }
+          button.classList.add(variant);
+        }
+
+        function resetFlowState() {
+          flowState.requirePairing = true;
+          flowState.paired = false;
+          flowState.authenticated = false;
+          flowState.sessionReady = Boolean(activeSessionId());
+        }
+
+        function refreshFlowControls() {
+          const open = hasOpenSocket();
+          const authRequired = flowState.requirePairing;
+
+          if (open) {
+            setButtonVariant(els.connectBtn, "warn");
+            els.connectBtn.textContent = "Disconnect";
+          } else {
+            setButtonVariant(els.connectBtn, "primary");
+            els.connectBtn.textContent = "Connect";
+          }
+          els.disconnectBtn.disabled = !open;
+
+          if (!open) {
+            setButtonVariant(els.pairBtn, "step-wait");
+            els.pairBtn.textContent = "Send Pair";
+            els.pairBtn.disabled = true;
+          } else if (!flowState.requirePairing) {
+            setButtonVariant(els.pairBtn, "step-done");
+            els.pairBtn.textContent = "Pair N/A";
+            els.pairBtn.disabled = true;
+          } else if (flowState.paired) {
+            setButtonVariant(els.pairBtn, "step-done");
+            els.pairBtn.textContent = "Paired";
+            els.pairBtn.disabled = false;
+          } else {
+            setButtonVariant(els.pairBtn, "step-pending");
+            els.pairBtn.textContent = "Send Pair";
+            els.pairBtn.disabled = false;
+          }
+
+          if (!open) {
+            setButtonVariant(els.authBtn, "step-wait");
+            els.authBtn.textContent = "Authenticate";
+            els.authBtn.disabled = true;
+          } else if (!authRequired) {
+            setButtonVariant(els.authBtn, "step-done");
+            els.authBtn.textContent = "Auth N/A";
+            els.authBtn.disabled = true;
+          } else if (!flowState.paired) {
+            setButtonVariant(els.authBtn, "step-wait");
+            els.authBtn.textContent = "Authenticate";
+            els.authBtn.disabled = true;
+          } else if (flowState.authenticated) {
+            setButtonVariant(els.authBtn, "step-done");
+            els.authBtn.textContent = "Authenticated";
+            els.authBtn.disabled = false;
+          } else {
+            setButtonVariant(els.authBtn, "soft");
+            els.authBtn.textContent = "Authenticate";
+            els.authBtn.disabled = false;
+          }
+
+          const canCreateSession = open && (!authRequired || flowState.authenticated);
+          if (flowState.sessionReady) {
+            setButtonVariant(els.createSessionBtn, "step-done");
+            els.createSessionBtn.textContent = "Session Ready";
+          } else {
+            setButtonVariant(els.createSessionBtn, "primary");
+            els.createSessionBtn.textContent = "Create Session";
+          }
+          els.createSessionBtn.disabled = !canCreateSession;
+        }
+
         function refreshMicControls() {
           const hasSession = Boolean(activeSessionId());
           els.micStartBtn.disabled = micState.active || !hasSession || !hasOpenSocket();
@@ -789,7 +906,9 @@
           const tok = els.tokenInput.value.trim();
           els.sessionBadge.textContent = sid ? `session: ${sid}` : "session: none";
           els.tokenBadge.textContent = tok ? `token: ${tok.slice(0, 12)}...` : "token: none";
+          flowState.sessionReady = Boolean(sid);
           refreshMicControls();
+          refreshFlowControls();
         }
 
         function resetSessionOutputState() {
@@ -1455,21 +1574,29 @@
           }
 
           setStatus("connecting");
+          refreshFlowControls();
           ws = new WebSocket(url);
 
           ws.onopen = () => {
             setStatus("connected");
+            flowState.paired = false;
+            flowState.authenticated = false;
+            flowState.sessionReady = Boolean(activeSessionId());
             log("system", `Connected to ${url}`);
             savePrefs();
             refreshMicControls();
+            refreshFlowControls();
+            sendObject({ type: "GetGatewayHealth" }, { silent: true });
           };
 
           ws.onclose = async (event) => {
             const reason = event.reason || "no reason";
             setStatus("closed", `${event.code}`);
+            resetFlowState();
             log("system", `Socket closed (${event.code}) - ${reason}`);
             await stopMicStream();
             refreshMicControls();
+            refreshFlowControls();
           };
 
           ws.onerror = () => {
@@ -1486,15 +1613,46 @@
 
             if (parsed.type === "PairSuccess" && parsed.token) {
               els.tokenInput.value = parsed.token;
+              flowState.paired = true;
+              flowState.authenticated = false;
               savePrefs();
               updateBadges();
+              recordM4Snapshot("pair successful");
+            }
+
+            if (parsed.type === "PairFailure") {
+              flowState.paired = false;
+              flowState.authenticated = false;
+              updateBadges();
+              recordM4Snapshot("pair failed");
+            }
+
+            if (parsed.type === "Authenticated") {
+              flowState.authenticated = true;
+              if (flowState.requirePairing) {
+                flowState.paired = true;
+              }
+              updateBadges();
+              recordM4Snapshot("authenticated");
             }
 
             if (parsed.type === "SessionCreated" && parsed.session_id) {
               els.sessionId.value = parsed.session_id;
+              flowState.sessionReady = true;
               savePrefs();
               updateBadges();
               resetSessionOutputState();
+              recordM4Snapshot(`session created ${parsed.session_id}`);
+            }
+
+            if (parsed.type === "SessionTerminated" && parsed.session_id) {
+              if (parsed.session_id === activeSessionId()) {
+                els.sessionId.value = "";
+                flowState.sessionReady = false;
+                savePrefs();
+                updateBadges();
+              }
+              recordM4Snapshot(`session terminated ${parsed.session_id}`);
             }
 
             if (parsed.type === "Diagnostics" && parsed.data) {
@@ -1527,6 +1685,13 @@
               const sessions = Number(h.active_sessions || 0);
               const p = Number(h.active_priority_bindings || 0);
               els.healthBadge.textContent = `gw: up=${up}s s=${sessions} p=${p} ${pairing}`;
+              flowState.requirePairing = Boolean(h.require_pairing);
+              if (!flowState.requirePairing) {
+                flowState.paired = true;
+                flowState.authenticated = true;
+              }
+              updateBadges();
+              recordM4Snapshot(`gateway health require_pairing=${flowState.requirePairing}`);
             }
 
             if (parsed.type === "PriorityNotice" && parsed.data) {
@@ -1593,6 +1758,13 @@
             if (parsed.type === "Error") {
               m4State.lastError = `${parsed.code || "unknown"}: ${parsed.message || "unknown"}`;
               appendPromptToolActivity(`[${now()}] error ${parsed.code || "unknown"}: ${parsed.message || "unknown"}`);
+              if (parsed.code === "invalid_token" || parsed.code === "auth_required") {
+                flowState.authenticated = false;
+              }
+              if (parsed.code === "invalid_pairing_code") {
+                flowState.paired = false;
+              }
+              refreshFlowControls();
               recordM4Snapshot(`error ${parsed.code || "unknown"}`);
             }
 
@@ -1637,7 +1809,13 @@
           };
         }
 
-        els.connectBtn.addEventListener("click", connect);
+        els.connectBtn.addEventListener("click", () => {
+          if (hasOpenSocket()) {
+            disconnect();
+          } else {
+            connect();
+          }
+        });
         els.disconnectBtn.addEventListener("click", disconnect);
 
         els.pairBtn.addEventListener("click", () => {
@@ -1646,6 +1824,9 @@
             log("error", "Pairing code is empty.");
             return;
           }
+          flowState.paired = false;
+          flowState.authenticated = false;
+          refreshFlowControls();
           sendObject({ type: "Pair", code });
         });
 
@@ -1655,12 +1836,16 @@
             log("error", "Token is empty.");
             return;
           }
+          flowState.authenticated = false;
+          refreshFlowControls();
           sendObject({ type: "Authenticate", token });
           savePrefs();
           updateBadges();
         });
 
         els.createSessionBtn.addEventListener("click", () => {
+          flowState.sessionReady = false;
+          refreshFlowControls();
           sendObject(buildCreateSessionMessage());
         });
 
@@ -1933,11 +2118,13 @@
           stopMicStream().catch(() => {});
         });
 
+        resetFlowState();
         loadPrefs();
         setStatus("closed");
         setMicStatus("idle");
         setPlaybackStatus("idle");
         refreshMicControls();
+        refreshFlowControls();
         maybeApplyToolArgsPreset();
         if (!window.isSecureContext) {
           log(
