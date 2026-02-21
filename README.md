@@ -126,6 +126,7 @@ The client now supports:
 - Prompt tool activity panel that confirms prompt-driven `read_workspace_file` execution details
 - Dedicated M4 evidence panel for memory/artifact/resilience snapshots
 - One-click memory/artifact `read_workspace_file` probes plus live diagnostics counters in the UI
+- Channel bridge panel for `ChannelInbound` routing tests (telegram/slack/webhook keys)
 
 ```bash
 cd /Users/jameskaranja/Developer/projects/liveclaw
@@ -212,6 +213,7 @@ Clients connect via WebSocket and exchange JSON messages:
 { "type": "SessionResponseCreate", "session_id": "..." }
 { "type": "SessionResponseInterrupt", "session_id": "..." }
 { "type": "SessionPrompt", "session_id": "...", "prompt": "Use add_numbers with a=12 and b=30", "create_response": true }
+{ "type": "ChannelInbound", "channel": "slack", "account_id": "T123", "external_user_id": "U77", "text": "hello", "create_response": true }
 { "type": "SessionToolCall", "session_id": "...", "tool_name": "echo_text", "arguments": {"text":"hello"} }
 { "type": "TerminateSession", "session_id": "..." }
 { "type": "GetGatewayHealth" }
@@ -227,6 +229,7 @@ Clients connect via WebSocket and exchange JSON messages:
 { "type": "ResponseCreateAccepted", "session_id": "..." }
 { "type": "ResponseInterruptAccepted", "session_id": "..." }
 { "type": "PromptAccepted", "session_id": "..." }
+{ "type": "ChannelRouted", "channel": "slack", "account_id": "T123", "external_user_id": "U77", "session_id": "..." }
 { "type": "SessionToolResult", "session_id": "...", "tool_name": "echo_text", "result": {"status":"ok","result":{"text":"hello","length":5}}, "graph": {"thread_id":"...","completed":true,"interrupted":false,"events":[...],"final_state":{...}} }
 { "type": "AudioOutput", "session_id": "...", "audio": "<base64>" }
 { "type": "TranscriptUpdate", "session_id": "...", "text": "...", "is_final": true }
@@ -235,6 +238,59 @@ Clients connect via WebSocket and exchange JSON messages:
 { "type": "GatewayHealth", "data": { "uptime_seconds": 123, "active_sessions": 1, "active_priority_bindings": 1, "require_pairing": true } }
 { "type": "Diagnostics", "data": { "...": "runtime/provider/reconnect/compaction snapshot", "protocol_version": "...", "supported_client_messages": ["..."] } }
 { "type": "Pong" }
+```
+
+## Channel Adapter HTTP Endpoints
+
+LiveClaw now exposes token-authenticated ingress adapters that translate
+Webhook/Slack/Telegram payloads into the same `ChannelInbound` route used by WS clients.
+
+- `POST /channels/webhook`
+- `POST /channels/slack/events`
+- `POST /channels/telegram/update`
+
+When pairing is enabled, send the paired token as `Authorization: Bearer <token>`.
+
+Example generic webhook ingress:
+
+```bash
+curl -sS -X POST http://127.0.0.1:8420/channels/webhook \
+  -H "Authorization: Bearer ${LIVECLAW_TOKEN}" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "channel":"webhook",
+    "account_id":"acct-1",
+    "external_user_id":"user-1",
+    "text":"hello from webhook",
+    "create_response": true
+  }'
+```
+
+Example Slack message ingress:
+
+```bash
+curl -sS -X POST http://127.0.0.1:8420/channels/slack/events \
+  -H "Authorization: Bearer ${LIVECLAW_TOKEN}" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "team_id":"T123",
+    "event": { "type":"message", "user":"U77", "text":"hello from slack" }
+  }'
+```
+
+Example Telegram message ingress:
+
+```bash
+curl -sS -X POST http://127.0.0.1:8420/channels/telegram/update \
+  -H "Authorization: Bearer ${LIVECLAW_TOKEN}" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "message": {
+      "text":"hello from telegram",
+      "chat": { "id": 4455 },
+      "from": { "id": 7788 }
+    }
+  }'
 ```
 
 ## Inspiration

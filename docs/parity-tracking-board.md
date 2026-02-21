@@ -158,7 +158,8 @@ Status scale: `NOT_STARTED`, `IN_PROGRESS`, `AT_RISK`, `BLOCKED`, `DONE`
 | Add principal-scoped route isolation by channel/account/external user | DONE | `liveclaw-gateway/src/server.rs` `channel_routes` map with `ChannelRouteKey` and routing tests |
 | Keep browser WS client aligned for channel bridge verification | DONE | `tools/ws-client/index.html` adds Channel Bridge panel and `ChannelInbound` raw template |
 | Extend M6 demo checks for channel-routing behavior | DONE | `scripts/demo/m6_release_flow.sh` adds protocol + server channel-routing tests |
-| Implement external Telegram/Slack/Webhook adapter services | IN_PROGRESS | Pending next slice: adapter workers + outbound delivery contracts |
+| Implement external Telegram/Slack/Webhook adapter services | DONE | `liveclaw-gateway/src/server.rs` adds HTTP ingress endpoints (`/channels/webhook`, `/channels/slack/events`, `/channels/telegram/update`) with token auth and payload translation tests |
+| Expose channel-adapter verification in M6 demo flow | DONE | `scripts/demo/m6_release_flow.sh` runs HTTP adapter route tests (`test_channel_webhook_http_*`, `test_channel_slack_http_*`, `test_channel_telegram_http_*`) |
 
 ## Closeout Phase 1 Kickoff (2026-02-21)
 

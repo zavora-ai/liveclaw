@@ -4,11 +4,12 @@ use std::time::Instant;
 
 use async_trait::async_trait;
 use axum::extract::ws::{Message, WebSocket};
-use axum::extract::{State, WebSocketUpgrade};
+use axum::extract::{Json as JsonExtract, Query, State, WebSocketUpgrade};
+use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Json};
-use axum::routing::get;
+use axum::routing::{get, post};
 use axum::Router;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tokio::net::TcpListener;
 use tokio::sync::{mpsc, RwLock};
@@ -149,6 +150,63 @@ struct ChannelInboundRequest<'a> {
     create_response: bool,
 }
 
+#[derive(Debug, Clone, Deserialize, Default)]
+struct ChannelIngressQuery {
+    token: Option<String>,
+    create_response: Option<bool>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct WebhookInboundPayload {
+    channel: Option<String>,
+    account_id: String,
+    external_user_id: String,
+    text: String,
+    create_response: Option<bool>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct SlackEnvelope {
+    #[serde(rename = "type")]
+    envelope_type: Option<String>,
+    challenge: Option<String>,
+    team_id: Option<String>,
+    event: Option<SlackEvent>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct SlackEvent {
+    #[serde(rename = "type")]
+    event_type: Option<String>,
+    user: Option<String>,
+    text: Option<String>,
+    bot_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct TelegramUpdate {
+    message: Option<TelegramMessage>,
+    edited_message: Option<TelegramMessage>,
+    channel_post: Option<TelegramMessage>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct TelegramMessage {
+    text: Option<String>,
+    chat: Option<TelegramChat>,
+    from: Option<TelegramUser>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct TelegramChat {
+    id: i64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct TelegramUser {
+    id: i64,
+}
+
 // ---------------------------------------------------------------------------
 // Health check response
 // ---------------------------------------------------------------------------
@@ -285,10 +343,7 @@ impl Gateway {
             });
         }
 
-        let app = Router::new()
-            .route("/health", get(health_handler))
-            .route("/ws", get(ws_upgrade_handler))
-            .with_state(state);
+        let app = build_router(state);
 
         let addr = format!("{}:{}", self.config.host, self.config.port);
         info!("Gateway listening on {}", addr);
@@ -298,6 +353,19 @@ impl Gateway {
 
         Ok(())
     }
+}
+
+fn build_router(state: AppState) -> Router {
+    Router::new()
+        .route("/health", get(health_handler))
+        .route("/ws", get(ws_upgrade_handler))
+        .route("/channels/webhook", post(channel_webhook_handler))
+        .route("/channels/slack/events", post(channel_slack_events_handler))
+        .route(
+            "/channels/telegram/update",
+            post(channel_telegram_update_handler),
+        )
+        .with_state(state)
 }
 
 // ---------------------------------------------------------------------------
@@ -319,6 +387,288 @@ async fn ws_upgrade_handler(
     State(state): State<AppState>,
 ) -> impl IntoResponse {
     ws.on_upgrade(move |socket| handle_ws(socket, state))
+}
+
+async fn channel_webhook_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(query): Query<ChannelIngressQuery>,
+    JsonExtract(payload): JsonExtract<WebhookInboundPayload>,
+) -> impl IntoResponse {
+    let token = extract_channel_token(&headers, &query);
+    let create_response = payload
+        .create_response
+        .or(query.create_response)
+        .unwrap_or(true);
+    let channel = payload.channel.as_deref().unwrap_or("webhook");
+
+    let resp = handle_channel_http_route(
+        ChannelInboundRequest {
+            channel,
+            account_id: &payload.account_id,
+            external_user_id: &payload.external_user_id,
+            text: &payload.text,
+            create_response,
+        },
+        token,
+        &state,
+    )
+    .await;
+    http_response_from_gateway(resp)
+}
+
+async fn channel_slack_events_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(query): Query<ChannelIngressQuery>,
+    JsonExtract(payload): JsonExtract<SlackEnvelope>,
+) -> impl IntoResponse {
+    if payload.envelope_type.as_deref() == Some("url_verification") {
+        return (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "challenge": payload.challenge.unwrap_or_default(),
+            })),
+        );
+    }
+
+    let token = extract_channel_token(&headers, &query);
+    let Some(event) = payload.event.as_ref() else {
+        return http_json_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_slack_payload",
+            "Slack event payload is missing 'event'",
+        );
+    };
+    if event.event_type.as_deref() != Some("message") {
+        return (
+            StatusCode::ACCEPTED,
+            Json(serde_json::json!({
+                "status": "ignored",
+                "reason": "unsupported_event_type",
+            })),
+        );
+    }
+    if event.bot_id.is_some() {
+        return (
+            StatusCode::ACCEPTED,
+            Json(serde_json::json!({
+                "status": "ignored",
+                "reason": "bot_message",
+            })),
+        );
+    }
+
+    let Some(account_id) = payload.team_id.as_deref() else {
+        return http_json_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_slack_payload",
+            "Slack event payload is missing 'team_id'",
+        );
+    };
+    let Some(external_user_id) = event.user.as_deref() else {
+        return http_json_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_slack_payload",
+            "Slack message payload is missing 'event.user'",
+        );
+    };
+    let Some(text) = event.text.as_deref() else {
+        return http_json_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_slack_payload",
+            "Slack message payload is missing 'event.text'",
+        );
+    };
+
+    let resp = handle_channel_http_route(
+        ChannelInboundRequest {
+            channel: "slack",
+            account_id,
+            external_user_id,
+            text,
+            create_response: query.create_response.unwrap_or(true),
+        },
+        token,
+        &state,
+    )
+    .await;
+    http_response_from_gateway(resp)
+}
+
+async fn channel_telegram_update_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(query): Query<ChannelIngressQuery>,
+    JsonExtract(payload): JsonExtract<TelegramUpdate>,
+) -> impl IntoResponse {
+    let token = extract_channel_token(&headers, &query);
+    let msg = payload
+        .message
+        .as_ref()
+        .or(payload.edited_message.as_ref())
+        .or(payload.channel_post.as_ref());
+    let Some(msg) = msg else {
+        return (
+            StatusCode::ACCEPTED,
+            Json(serde_json::json!({
+                "status": "ignored",
+                "reason": "no_message",
+            })),
+        );
+    };
+    let Some(text) = msg.text.as_deref() else {
+        return (
+            StatusCode::ACCEPTED,
+            Json(serde_json::json!({
+                "status": "ignored",
+                "reason": "no_text",
+            })),
+        );
+    };
+    let Some(chat) = msg.chat.as_ref() else {
+        return http_json_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_telegram_payload",
+            "Telegram payload is missing 'message.chat.id'",
+        );
+    };
+    let Some(from) = msg.from.as_ref() else {
+        return http_json_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_telegram_payload",
+            "Telegram payload is missing 'message.from.id'",
+        );
+    };
+
+    let account_id = chat.id.to_string();
+    let external_user_id = from.id.to_string();
+    let resp = handle_channel_http_route(
+        ChannelInboundRequest {
+            channel: "telegram",
+            account_id: &account_id,
+            external_user_id: &external_user_id,
+            text,
+            create_response: query.create_response.unwrap_or(true),
+        },
+        token,
+        &state,
+    )
+    .await;
+    http_response_from_gateway(resp)
+}
+
+fn extract_channel_token(headers: &HeaderMap, query: &ChannelIngressQuery) -> Option<String> {
+    let from_header = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|raw| {
+            raw.strip_prefix("Bearer ")
+                .or_else(|| raw.strip_prefix("bearer "))
+        })
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .map(ToOwned::to_owned);
+    from_header.or_else(|| {
+        query
+            .token
+            .as_ref()
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty())
+    })
+}
+
+async fn handle_channel_http_route(
+    request: ChannelInboundRequest<'_>,
+    token: Option<String>,
+    state: &AppState,
+) -> GatewayResponse {
+    let principal_id = match authenticate_http_principal(token.as_deref(), state) {
+        Ok(id) => id,
+        Err(resp) => return *resp,
+    };
+
+    let mut conn = ConnectionState {
+        authenticated: true,
+        token,
+        principal_id: Some(principal_id),
+        owned_sessions: Vec::new(),
+    };
+    let (ws_tx, _ws_rx) = mpsc::channel(64);
+    let (ws_priority_tx, _ws_priority_rx) = mpsc::channel(32);
+    handle_channel_inbound(request, state, &mut conn, &ws_tx, &ws_priority_tx).await
+}
+
+fn authenticate_http_principal(
+    token: Option<&str>,
+    state: &AppState,
+) -> Result<String, Box<GatewayResponse>> {
+    if state.pairing.is_authenticated("") {
+        return Ok("anonymous".to_string());
+    }
+
+    let Some(token) = token else {
+        return Err(Box::new(auth_required_error()));
+    };
+    if !state.pairing.is_authenticated(token) {
+        return Err(Box::new(GatewayResponse::Error {
+            code: "invalid_token".to_string(),
+            message: "Token authentication failed".to_string(),
+        }));
+    }
+    Ok(principal_from_token(token))
+}
+
+fn http_response_from_gateway(resp: GatewayResponse) -> (StatusCode, Json<serde_json::Value>) {
+    match resp {
+        GatewayResponse::Error { code, message } => {
+            let status = match code.as_str() {
+                "auth_required" | "invalid_token" => StatusCode::UNAUTHORIZED,
+                "invalid_channel" | "invalid_channel_route" | "invalid_channel_message" => {
+                    StatusCode::BAD_REQUEST
+                }
+                _ => StatusCode::INTERNAL_SERVER_ERROR,
+            };
+            http_json_error(status, &code, &message)
+        }
+        GatewayResponse::ChannelRouted {
+            channel,
+            account_id,
+            external_user_id,
+            session_id,
+        } => (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "type": "ChannelRouted",
+                "channel": channel,
+                "account_id": account_id,
+                "external_user_id": external_user_id,
+                "session_id": session_id
+            })),
+        ),
+        other => (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "type": "UnexpectedResponse",
+                "payload": other,
+            })),
+        ),
+    }
+}
+
+fn http_json_error(
+    status: StatusCode,
+    code: &str,
+    message: &str,
+) -> (StatusCode, Json<serde_json::Value>) {
+    (
+        status,
+        Json(serde_json::json!({
+            "type": "Error",
+            "code": code,
+            "message": message,
+        })),
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -1509,6 +1859,9 @@ mod tests {
     use super::*;
     use crate::pairing::PairingGuard;
     use crate::protocol::SessionConfig;
+    use axum::body::{to_bytes, Body};
+    use axum::http::{header, Request, StatusCode};
+    use tower::ServiceExt;
 
     /// A mock RunnerHandle for testing message routing logic.
     struct MockRunner {
@@ -1734,6 +2087,25 @@ mod tests {
         let (standard_tx, _standard_rx) = mpsc::channel(16);
         let (priority_tx, _priority_rx) = mpsc::channel(16);
         (standard_tx, priority_tx)
+    }
+
+    fn paired_token(state: &AppState) -> String {
+        let code = state.pairing.pairing_code().expect("pairing code");
+        state
+            .pairing
+            .try_pair(&code)
+            .expect("pair should succeed")
+            .expect("token expected")
+    }
+
+    async fn request_json(app: Router, request: Request<Body>) -> (StatusCode, serde_json::Value) {
+        let response = app.oneshot(request).await.expect("router response");
+        let status = response.status();
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("response bytes");
+        let json: serde_json::Value = serde_json::from_slice(&body).expect("response json");
+        (status, json)
     }
 
     // --- Ping/Pong ---
@@ -2975,6 +3347,115 @@ mod tests {
             GatewayResponse::SessionTerminated { .. }
         ));
         assert!(state.channel_routes.read().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_channel_webhook_http_requires_auth_token() {
+        let state = make_state(MockRunner::ok(), true);
+        let app = build_router(state);
+
+        let request = Request::builder()
+            .method("POST")
+            .uri("/channels/webhook")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(
+                r#"{"channel":"webhook","account_id":"acct-1","external_user_id":"user-1","text":"hello"}"#,
+            ))
+            .expect("request");
+
+        let (status, body) = request_json(app, request).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(body["code"], serde_json::json!("auth_required"));
+    }
+
+    #[tokio::test]
+    async fn test_channel_webhook_http_routes_with_bearer_token() {
+        let state = make_state(MockRunner::ok(), true);
+        let token = paired_token(&state);
+        let app = build_router(state);
+
+        let request = Request::builder()
+            .method("POST")
+            .uri("/channels/webhook")
+            .header(header::CONTENT_TYPE, "application/json")
+            .header(header::AUTHORIZATION, format!("Bearer {}", token))
+            .body(Body::from(
+                r#"{"channel":"webhook","account_id":"acct-1","external_user_id":"user-1","text":"hello webhook"}"#,
+            ))
+            .expect("request");
+
+        let (status, body) = request_json(app, request).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["type"], serde_json::json!("ChannelRouted"));
+        assert_eq!(body["channel"], serde_json::json!("webhook"));
+        assert!(body["session_id"].as_str().is_some());
+    }
+
+    #[tokio::test]
+    async fn test_channel_slack_http_routes_message_event() {
+        let state = make_state(MockRunner::ok(), true);
+        let token = paired_token(&state);
+        let app = build_router(state);
+
+        let request = Request::builder()
+            .method("POST")
+            .uri("/channels/slack/events")
+            .header(header::CONTENT_TYPE, "application/json")
+            .header(header::AUTHORIZATION, format!("Bearer {}", token))
+            .body(Body::from(
+                r#"{"team_id":"T123","event":{"type":"message","user":"U77","text":"hello from slack"}}"#,
+            ))
+            .expect("request");
+
+        let (status, body) = request_json(app, request).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["type"], serde_json::json!("ChannelRouted"));
+        assert_eq!(body["channel"], serde_json::json!("slack"));
+        assert_eq!(body["account_id"], serde_json::json!("T123"));
+        assert_eq!(body["external_user_id"], serde_json::json!("U77"));
+    }
+
+    #[tokio::test]
+    async fn test_channel_slack_http_url_verification_returns_challenge() {
+        let state = make_state(MockRunner::ok(), true);
+        let app = build_router(state);
+
+        let request = Request::builder()
+            .method("POST")
+            .uri("/channels/slack/events")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(
+                r#"{"type":"url_verification","challenge":"abc123"}"#,
+            ))
+            .expect("request");
+
+        let (status, body) = request_json(app, request).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["challenge"], serde_json::json!("abc123"));
+    }
+
+    #[tokio::test]
+    async fn test_channel_telegram_http_routes_message() {
+        let state = make_state(MockRunner::ok(), true);
+        let token = paired_token(&state);
+        let app = build_router(state);
+
+        let request = Request::builder()
+            .method("POST")
+            .uri("/channels/telegram/update")
+            .header(header::CONTENT_TYPE, "application/json")
+            .header(header::AUTHORIZATION, format!("Bearer {}", token))
+            .body(Body::from(
+                r#"{"message":{"text":"hello from telegram","chat":{"id":4455},"from":{"id":7788}}}"#,
+            ))
+            .expect("request");
+
+        let (status, body) = request_json(app, request).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["type"], serde_json::json!("ChannelRouted"));
+        assert_eq!(body["channel"], serde_json::json!("telegram"));
+        assert_eq!(body["account_id"], serde_json::json!("4455"));
+        assert_eq!(body["external_user_id"], serde_json::json!("7788"));
     }
 
     // --- Base64 helpers ---

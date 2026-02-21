@@ -40,6 +40,7 @@ Track ADK-Rust crate/API usage for each roadmap milestone and explicitly documen
 3. `scripts/demo/m1_voice_e2e_live.sh` passed in isolated mode with provider-backed audio/transcript roundtrip.
 4. No open ADK gap blockers remain for closeout phases.
 5. Channel ingress (`ChannelInbound`) now routes through authenticated gateway sessions and continues on the existing `adk-runner` + `adk-realtime` session path (no parallel runtime pipeline added).
+6. HTTP adapter endpoints (`/channels/webhook`, `/channels/slack/events`, `/channels/telegram/update`) now translate external payloads into the same authenticated `ChannelInbound` session path.
 
 ## Open ADK Gap Log
 
