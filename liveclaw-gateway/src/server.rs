@@ -3100,6 +3100,69 @@ mod tests {
         }
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn test_concurrent_create_session_burst_updates_health_and_ownership() {
+        let state = make_state(MockRunner::ok(), false);
+        let task_count = 64usize;
+        let mut handles = Vec::with_capacity(task_count);
+
+        for idx in 0..task_count {
+            let state = state.clone();
+            handles.push(tokio::spawn(async move {
+                let mut conn = ConnectionState {
+                    authenticated: true,
+                    token: Some(format!("tok-{}", idx)),
+                    principal_id: Some(format!("principal-{}", idx % 4)),
+                    owned_sessions: Vec::new(),
+                };
+                let (ws_tx, ws_priority_tx) = dummy_ws_txs();
+                handle_message(
+                    GatewayMessage::CreateSession { config: None },
+                    &state,
+                    &mut conn,
+                    &ws_tx,
+                    &ws_priority_tx,
+                )
+                .await
+            }));
+        }
+
+        let mut session_ids = std::collections::HashSet::new();
+        for handle in handles {
+            let response = handle.await.expect("join create-session task");
+            match response {
+                GatewayResponse::SessionCreated { session_id } => {
+                    assert!(
+                        session_ids.insert(session_id),
+                        "duplicate session_id emitted during concurrent burst"
+                    );
+                }
+                other => panic!("Expected SessionCreated, got {:?}", other),
+            }
+        }
+        assert_eq!(session_ids.len(), task_count);
+        assert_eq!(state.session_owners.read().await.len(), task_count);
+
+        let mut conn = unauthed_conn();
+        let (ws_tx, ws_priority_tx) = dummy_ws_txs();
+        let health = handle_message(
+            GatewayMessage::GetGatewayHealth,
+            &state,
+            &mut conn,
+            &ws_tx,
+            &ws_priority_tx,
+        )
+        .await;
+        match health {
+            GatewayResponse::GatewayHealth { data } => {
+                assert_eq!(data.active_sessions, task_count);
+                assert_eq!(data.active_ws_bindings, task_count);
+                assert_eq!(data.active_priority_bindings, task_count);
+            }
+            other => panic!("Expected GatewayHealth response, got {:?}", other),
+        }
+    }
+
     #[tokio::test]
     async fn test_priority_probe_requires_auth() {
         let state = make_state(MockRunner::ok(), true);

@@ -176,6 +176,14 @@ Status scale: `NOT_STARTED`, `IN_PROGRESS`, `AT_RISK`, `BLOCKED`, `DONE`
 | Extend M6 release-flow checks for scheduler surfaces | DONE | `scripts/demo/m6_release_flow.sh` includes protocol + server tests for channel job messages/responses and lifecycle |
 | Deliver remaining tooling/automation closeout surfaces (policy-controlled browser/http/cron) | DONE | `liveclaw-gateway/src/server.rs` adds cron tick execution coverage (`test_channel_job_tick_routes_text_for_owner_principal`, `test_channel_job_tick_honors_create_response_flag`) and `scripts/demo/m6_release_flow.sh` validates the checks end-to-end |
 
+## Sprint 15 Checklist (IN_PROGRESS)
+
+| Item | Status | Evidence |
+|---|---|---|
+| Add concurrent-session load test evidence and publish operational limits | IN_PROGRESS | `liveclaw-gateway/src/server.rs` adds `test_concurrent_create_session_burst_updates_health_and_ownership` and `scripts/demo/m6_release_flow.sh` now exercises the burst path |
+| Create release runbook, deployment guide, and rollback playbook | DONE | `docs/release-runbook.md`, `docs/deployment-guide.md`, `docs/rollback-playbook.md` |
+| Finalize smoke suite and CI sign-off path | IN_PROGRESS | `scripts/run_quality_gate.sh` + `scripts/demo/run_all.sh` as sign-off gates; release RC sign-off record still open |
+
 ## Closeout Phase 1 Kickoff (2026-02-21)
 
 | Item | Status | Evidence |

@@ -28,9 +28,8 @@ Close the remaining parity and release-candidate scope so the project can be dec
 
 ## Remaining Blockers
 
-1. Release candidate artifacts:
-   - Runbook, deployment guide, rollback playbook.
-   - Concurrent-session load test evidence and smoke-suite sign-off.
+1. Publish concurrent-session operational limits from RC load evidence.
+2. Complete final smoke-suite release sign-off record.
 
 ## Phase Plan and Sprints
 
@@ -61,7 +60,9 @@ Close the remaining parity and release-candidate scope so the project can be dec
 ## Phase 4: RC Hardening (Sprint 15, 2026-04-06 to 2026-04-17)
 
 1. Add concurrent-session load tests and publish limits.
+   - Status: concurrent burst coverage added in gateway tests; limits publication pending.
 2. Create release runbook, deployment guide, and rollback playbook.
+   - Status: delivered (`docs/release-runbook.md`, `docs/deployment-guide.md`, `docs/rollback-playbook.md`).
 3. Finalize smoke suite and CI sign-off path.
 4. Exit criteria:
    - RC checklist is complete and reproducible.
@@ -96,3 +97,5 @@ Close the remaining parity and release-candidate scope so the project can be dec
 9. 2026-02-21: completed HTTP channel-job surface (`/channels/jobs/create`, `/channels/jobs/list`, `/channels/jobs/cancel`) with token-authenticated policy checks and release-flow test coverage.
 10. 2026-02-21: completed webhook-supervised trigger path (`/channels/webhook/supervised-action`) that forces `SessionConfig.role=supervised`, executes `SessionToolCall` through the graph path, and returns action results via HTTP.
 11. 2026-02-21: closed cron/operator policy evidence by adding deterministic channel-job tick execution tests (`test_channel_job_tick_routes_text_for_owner_principal`, `test_channel_job_tick_honors_create_response_flag`) and wiring them into `scripts/demo/m6_release_flow.sh`.
+12. 2026-02-21: started Phase 4 RC hardening by adding concurrent session burst coverage (`test_concurrent_create_session_burst_updates_health_and_ownership`) and wiring it into `scripts/demo/m6_release_flow.sh`.
+13. 2026-02-21: published RC operation artifacts (`docs/release-runbook.md`, `docs/deployment-guide.md`, `docs/rollback-playbook.md`).

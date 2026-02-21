@@ -110,6 +110,12 @@ cargo clippy
 cargo fmt --check
 ```
 
+## RC Operations Docs
+
+- Runbook: [`docs/release-runbook.md`](docs/release-runbook.md)
+- Deployment guide: [`docs/deployment-guide.md`](docs/deployment-guide.md)
+- Rollback playbook: [`docs/rollback-playbook.md`](docs/rollback-playbook.md)
+
 ## Browser WS Client
 
 LiveClaw includes a reusable browser WebSocket client for pairing, auth,
