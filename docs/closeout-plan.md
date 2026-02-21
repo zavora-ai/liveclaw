@@ -30,7 +30,7 @@ Close the remaining parity and release-candidate scope so the project can be dec
 
 1. OpenClaw-track scope not yet implemented end-to-end:
    - Browser/HTTP/Cron baseline tool surfaces with policy controls.
-   - Background scheduling and webhook-triggered supervised actions.
+   - Webhook-triggered supervised actions and cron/operator policy evidence (interval scheduling implemented, but closeout evidence is incomplete).
 2. Release candidate artifacts:
    - Runbook, deployment guide, rollback playbook.
    - Concurrent-session load test evidence and smoke-suite sign-off.
@@ -56,6 +56,7 @@ Close the remaining parity and release-candidate scope so the project can be dec
 
 1. Deliver browser, HTTP, and cron tool surfaces with policy controls.
 2. Add background scheduling and webhook-trigger start path.
+   - Status: interval-based channel scheduling delivered; webhook-supervised trigger policy path remains.
 3. Add operator visibility for active sessions and jobs.
 4. Exit criteria:
    - Tooling/automation demo script passes with policy checks.
@@ -94,3 +95,4 @@ Close the remaining parity and release-candidate scope so the project can be dec
 5. 2026-02-21: started channel parity closeout slice by adding authenticated `ChannelInbound` routing with principal/channel/account/user isolation, browser WS client controls, and M6 demo/test coverage.
 6. 2026-02-21: completed HTTP ingress adapter slice for Webhook/Slack/Telegram in gateway with token-authenticated routing into `ChannelInbound` and route-level smoke tests.
 7. 2026-02-21: completed outbound delivery contract slice by adding channel-scoped outbound queueing for final transcripts and retrieval via WS (`GetChannelOutbound`) and HTTP (`/channels/outbound/poll`).
+8. 2026-02-21: completed channel scheduler slice by adding principal-scoped `CreateChannelJob` / `ListChannelJobs` / `CancelChannelJob`, `active_channel_jobs` health visibility, and browser WS client controls with M6 demo coverage.

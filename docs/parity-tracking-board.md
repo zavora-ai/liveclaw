@@ -163,6 +163,17 @@ Status scale: `NOT_STARTED`, `IN_PROGRESS`, `AT_RISK`, `BLOCKED`, `DONE`
 | Implement outbound channel delivery contract | DONE | `liveclaw-gateway/src/protocol.rs` adds `GetChannelOutbound`/`ChannelOutboundBatch`; `liveclaw-gateway/src/server.rs` queues final transcripts per channel route and exposes WS + HTTP outbound poll (`/channels/outbound/poll`) |
 | Keep browser WS client aligned for outbound contract validation | DONE | `tools/ws-client/index.html` adds outbound poll controls and `ChannelOutboundBatch` activity view |
 
+## Sprint 14 Checklist (IN_PROGRESS)
+
+| Item | Status | Evidence |
+|---|---|---|
+| Add gateway protocol surfaces for channel job lifecycle | DONE | `liveclaw-gateway/src/protocol.rs` adds `CreateChannelJob` / `CancelChannelJob` / `ListChannelJobs` and `ChannelJobCreated` / `ChannelJobCanceled` / `ChannelJobs` |
+| Implement principal-scoped background channel scheduler | DONE | `liveclaw-gateway/src/server.rs` adds `channel_jobs` runtime map, interval job worker, ownership checks, and health integration |
+| Add scheduler lifecycle tests (auth, validation, owner isolation) | DONE | `liveclaw-gateway/src/server.rs` tests `test_create_channel_job_requires_auth`, `test_channel_job_lifecycle_create_list_cancel`, `test_cancel_channel_job_rejects_non_owner`, plus interval validation checks |
+| Keep browser WS client aligned for channel job operations | DONE | `tools/ws-client/index.html` adds Channel Job controls, activity pane, response rendering, and raw templates for create/list/cancel |
+| Extend M6 release-flow checks for scheduler surfaces | DONE | `scripts/demo/m6_release_flow.sh` includes protocol + server tests for channel job messages/responses and lifecycle |
+| Deliver remaining tooling/automation closeout surfaces (policy-controlled browser/http/cron) | IN_PROGRESS | Tracked in `docs/closeout-plan.md` Phase 3 |
+
 ## Closeout Phase 1 Kickoff (2026-02-21)
 
 | Item | Status | Evidence |

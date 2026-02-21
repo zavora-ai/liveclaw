@@ -642,6 +642,20 @@
                 <button id="pollChannelOutboundBtn" class="soft">Poll Channel Outbound</button>
               </div>
             </div>
+            <div class="field-row triple">
+              <div class="field-stack">
+                <label for="channelJobInterval">Job Interval Seconds</label>
+                <input id="channelJobInterval" type="number" min="1" value="60" />
+              </div>
+              <div class="field-stack">
+                <label for="channelJobId">Channel Job ID</label>
+                <input id="channelJobId" placeholder="auto-filled from ChannelJobCreated" />
+              </div>
+              <div class="field-stack">
+                <label>&nbsp;</label>
+                <button id="listChannelJobsBtn" class="soft">List Channel Jobs</button>
+              </div>
+            </div>
             <div class="field-stack">
               <label for="channelText">Inbound Text</label>
               <textarea id="channelText" placeholder="Message from channel user">Hello from channel bridge.</textarea>
@@ -650,8 +664,21 @@
               <input id="channelCreateResponse" type="checkbox" checked />
               Create model response after route
             </label>
+            <div class="field-row compact">
+              <button id="createChannelJobBtn" class="primary">Create Channel Job</button>
+              <button id="cancelChannelJobBtn" class="warn">Cancel Channel Job</button>
+            </div>
             <div class="field-row">
               <button id="routeChannelBtn" class="primary">Route Channel Inbound</button>
+            </div>
+            <div class="field-stack">
+              <label for="channelJobView">Channel Job Activity</label>
+              <textarea
+                id="channelJobView"
+                class="output-pane"
+                readonly
+                placeholder="ChannelJobCreated / ChannelJobs / ChannelJobCanceled events appear here."
+              ></textarea>
             </div>
             <div class="field-stack">
               <label for="channelRouteView">Channel Route Activity</label>
@@ -672,7 +699,7 @@
               ></textarea>
             </div>
             <p class="hint">
-              Routes are isolated by principal + channel + account_id + external_user_id. Reusing the same key should return the same session.
+              Routes are isolated by principal + channel + account_id + external_user_id. Channel jobs reuse the same route key and run on the configured interval.
             </p>
           </div>
         </article>
@@ -697,6 +724,9 @@
                   <option value="SessionPrompt">SessionPrompt</option>
                   <option value="ChannelInbound">ChannelInbound</option>
                   <option value="GetChannelOutbound">GetChannelOutbound</option>
+                  <option value="CreateChannelJob">CreateChannelJob</option>
+                  <option value="CancelChannelJob">CancelChannelJob</option>
+                  <option value="ListChannelJobs">ListChannelJobs</option>
                   <option value="SessionToolCall">SessionToolCall</option>
                 </select>
               </div>
@@ -792,9 +822,15 @@
           channelAccountId: $("channelAccountId"),
           channelExternalUserId: $("channelExternalUserId"),
           channelOutboundMax: $("channelOutboundMax"),
+          channelJobInterval: $("channelJobInterval"),
+          channelJobId: $("channelJobId"),
           pollChannelOutboundBtn: $("pollChannelOutboundBtn"),
+          listChannelJobsBtn: $("listChannelJobsBtn"),
           channelText: $("channelText"),
           channelCreateResponse: $("channelCreateResponse"),
+          createChannelJobBtn: $("createChannelJobBtn"),
+          cancelChannelJobBtn: $("cancelChannelJobBtn"),
+          channelJobView: $("channelJobView"),
           routeChannelBtn: $("routeChannelBtn"),
           channelRouteView: $("channelRouteView"),
           channelOutboundView: $("channelOutboundView"),
@@ -818,6 +854,10 @@
           channelAccountId: "liveclaw.ws.channel_account_id",
           channelExternalUserId: "liveclaw.ws.channel_external_user_id",
           channelOutboundMax: "liveclaw.ws.channel_outbound_max",
+          channelJobInterval: "liveclaw.ws.channel_job_interval",
+          channelJobId: "liveclaw.ws.channel_job_id",
+          channelText: "liveclaw.ws.channel_text",
+          channelCreateResponse: "liveclaw.ws.channel_create_response",
         };
 
         const DEFAULT_SAMPLE_RATE = 24000;
@@ -889,6 +929,10 @@
           const num = Number(value);
           if (!Number.isFinite(num) || num <= 0) return fallback;
           return Math.floor(num);
+        }
+
+        function clampInt(value, fallback, min, max) {
+          return Math.min(max, Math.max(min, parseRate(value, fallback)));
         }
 
         function activeSessionId() {
@@ -1012,6 +1056,7 @@
           els.graphTraceView.value = "";
           els.promptToolActivityView.value = "";
           els.channelRouteView.value = "";
+          els.channelJobView.value = "";
           els.channelOutboundView.value = "";
           els.m4EvidenceView.value = "";
           els.audioProgress.textContent = "idle";
@@ -1031,6 +1076,10 @@
           localStorage.setItem(keys.channelAccountId, els.channelAccountId.value.trim());
           localStorage.setItem(keys.channelExternalUserId, els.channelExternalUserId.value.trim());
           localStorage.setItem(keys.channelOutboundMax, els.channelOutboundMax.value.trim());
+          localStorage.setItem(keys.channelJobInterval, els.channelJobInterval.value.trim());
+          localStorage.setItem(keys.channelJobId, els.channelJobId.value.trim());
+          localStorage.setItem(keys.channelText, els.channelText.value);
+          localStorage.setItem(keys.channelCreateResponse, String(Boolean(els.channelCreateResponse.checked)));
         }
 
         function loadPrefs() {
@@ -1045,6 +1094,10 @@
           const channelAccountId = localStorage.getItem(keys.channelAccountId);
           const channelExternalUserId = localStorage.getItem(keys.channelExternalUserId);
           const channelOutboundMax = localStorage.getItem(keys.channelOutboundMax);
+          const channelJobInterval = localStorage.getItem(keys.channelJobInterval);
+          const channelJobId = localStorage.getItem(keys.channelJobId);
+          const channelText = localStorage.getItem(keys.channelText);
+          const channelCreateResponse = localStorage.getItem(keys.channelCreateResponse);
           if (url) els.wsUrl.value = url;
           if (token) els.tokenInput.value = token;
           if (sid) els.sessionId.value = sid;
@@ -1062,6 +1115,12 @@
           if (channelAccountId) els.channelAccountId.value = channelAccountId;
           if (channelExternalUserId) els.channelExternalUserId.value = channelExternalUserId;
           if (channelOutboundMax) els.channelOutboundMax.value = channelOutboundMax;
+          if (channelJobInterval) els.channelJobInterval.value = channelJobInterval;
+          if (channelJobId) els.channelJobId.value = channelJobId;
+          if (channelText) els.channelText.value = channelText;
+          if (channelCreateResponse !== null) {
+            els.channelCreateResponse.checked = channelCreateResponse === "true";
+          }
           updateBadges();
           updateM4EvidenceView();
         }
@@ -1181,8 +1240,25 @@
                 channel: els.channelType.value || "telegram",
                 account_id: els.channelAccountId.value.trim() || "acct-1",
                 external_user_id: els.channelExternalUserId.value.trim() || "user-1",
-                max_items: parseRate(els.channelOutboundMax.value, 20),
+                max_items: clampInt(els.channelOutboundMax.value, 20, 1, 500),
               };
+            case "CreateChannelJob":
+              return {
+                type: "CreateChannelJob",
+                channel: els.channelType.value || "telegram",
+                account_id: els.channelAccountId.value.trim() || "acct-1",
+                external_user_id: els.channelExternalUserId.value.trim() || "user-1",
+                text: els.channelText.value.trim() || "Hello from scheduled channel job.",
+                interval_seconds: clampInt(els.channelJobInterval.value, 60, 1, 86400),
+                create_response: Boolean(els.channelCreateResponse.checked),
+              };
+            case "CancelChannelJob":
+              return {
+                type: "CancelChannelJob",
+                job_id: els.channelJobId.value.trim() || "<JOB_ID>",
+              };
+            case "ListChannelJobs":
+              return { type: "ListChannelJobs" };
             case "SessionToolCall": {
               const toolName = els.toolName.value.trim() || "echo_text";
               const parsedArgs = parseJson(els.toolArgs.value) || { text: "hello from graph" };
@@ -1265,6 +1341,13 @@
           const existing = els.channelOutboundView.value;
           els.channelOutboundView.value = existing ? `${existing}\n${text}` : text;
           els.channelOutboundView.scrollTop = els.channelOutboundView.scrollHeight;
+        }
+
+        function appendChannelJobActivity(text) {
+          if (!text) return;
+          const existing = els.channelJobView.value;
+          els.channelJobView.value = existing ? `${existing}\n${text}` : text;
+          els.channelJobView.scrollTop = els.channelJobView.scrollHeight;
         }
 
         function describeToolResultForActivity(parsed) {
@@ -1808,6 +1891,43 @@
               recordM4Snapshot(`channel outbound batch ${channel} count=${items.length}`);
             }
 
+            if (parsed.type === "ChannelJobCreated" && parsed.job) {
+              const job = parsed.job;
+              if (job.job_id) {
+                els.channelJobId.value = job.job_id;
+                savePrefs();
+              }
+              appendChannelJobActivity(
+                `[${now()}] created job=${job.job_id || "n/a"} channel=${job.channel || "n/a"} account=${job.account_id || "n/a"} user=${job.external_user_id || "n/a"} interval=${Number(job.interval_seconds || 0)}s create_response=${Boolean(job.create_response)}`
+              );
+              recordM4Snapshot(`channel job created ${job.job_id || "unknown"}`);
+            }
+
+            if (parsed.type === "ChannelJobs") {
+              const jobs = Array.isArray(parsed.jobs) ? parsed.jobs : [];
+              appendChannelJobActivity(`[${now()}] listed jobs count=${jobs.length}`);
+              for (const job of jobs) {
+                appendChannelJobActivity(
+                  `  - ${job.job_id || "n/a"} ${job.channel || "n/a"} ${job.account_id || "n/a"}:${job.external_user_id || "n/a"} every ${Number(job.interval_seconds || 0)}s create_response=${Boolean(job.create_response)}`
+                );
+              }
+              if (jobs.length === 1 && jobs[0]?.job_id) {
+                els.channelJobId.value = jobs[0].job_id;
+                savePrefs();
+              }
+              recordM4Snapshot(`channel jobs listed count=${jobs.length}`);
+            }
+
+            if (parsed.type === "ChannelJobCanceled") {
+              const jobId = parsed.job_id || "n/a";
+              appendChannelJobActivity(`[${now()}] canceled job=${jobId}`);
+              if (els.channelJobId.value.trim() === jobId) {
+                els.channelJobId.value = "";
+                savePrefs();
+              }
+              recordM4Snapshot(`channel job canceled ${jobId}`);
+            }
+
             if (parsed.type === "SessionTerminated" && parsed.session_id) {
               if (parsed.session_id === activeSessionId() || parsed.session_id === flowState.readySessionId) {
                 els.sessionId.value = "";
@@ -1847,15 +1967,18 @@
               const pairing = h.require_pairing ? "pair" : "open";
               const up = Number(h.uptime_seconds || 0);
               const sessions = Number(h.active_sessions || 0);
+              const jobs = Number(h.active_channel_jobs || 0);
               const p = Number(h.active_priority_bindings || 0);
-              els.healthBadge.textContent = `gw: up=${up}s s=${sessions} p=${p} ${pairing}`;
+              els.healthBadge.textContent = `gw: up=${up}s s=${sessions} j=${jobs} p=${p} ${pairing}`;
               flowState.requirePairing = Boolean(h.require_pairing);
               if (!flowState.requirePairing) {
                 flowState.paired = true;
                 flowState.authenticated = true;
               }
               updateBadges();
-              recordM4Snapshot(`gateway health require_pairing=${flowState.requirePairing}`);
+              recordM4Snapshot(
+                `gateway health require_pairing=${flowState.requirePairing} active_channel_jobs=${jobs}`
+              );
             }
 
             if (parsed.type === "PriorityNotice" && parsed.data) {
@@ -2208,6 +2331,35 @@
           savePrefs();
         });
 
+        els.createChannelJobBtn.addEventListener("click", () => {
+          const message = templateForType("CreateChannelJob");
+          if (!message.account_id || !message.external_user_id || !message.text) {
+            log("error", "CreateChannelJob requires account_id, external_user_id, and text.");
+            return;
+          }
+          if (!Number.isFinite(message.interval_seconds) || message.interval_seconds <= 0) {
+            log("error", "CreateChannelJob requires interval_seconds > 0.");
+            return;
+          }
+          sendObject(message);
+          savePrefs();
+        });
+
+        els.listChannelJobsBtn.addEventListener("click", () => {
+          sendObject({ type: "ListChannelJobs" });
+          savePrefs();
+        });
+
+        els.cancelChannelJobBtn.addEventListener("click", () => {
+          const message = templateForType("CancelChannelJob");
+          if (!message.job_id || message.job_id === "<JOB_ID>") {
+            log("error", "CancelChannelJob requires a job_id.");
+            return;
+          }
+          sendObject(message);
+          savePrefs();
+        });
+
         els.sendPromptBtn.addEventListener("click", () => {
           const sid = activeSessionId();
           if (!sid) {
@@ -2292,6 +2444,8 @@
           els.channelAccountId,
           els.channelExternalUserId,
           els.channelOutboundMax,
+          els.channelJobInterval,
+          els.channelJobId,
         ].forEach((el) => {
           el.addEventListener("input", () => {
             savePrefs();

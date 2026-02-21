@@ -128,6 +128,7 @@ The client now supports:
 - One-click memory/artifact `read_workspace_file` probes plus live diagnostics counters in the UI
 - Channel bridge panel for `ChannelInbound` routing tests (telegram/slack/webhook keys)
 - Channel outbound poll controls for `GetChannelOutbound` validation
+- Channel job scheduler controls for `CreateChannelJob` / `ListChannelJobs` / `CancelChannelJob`
 
 ```bash
 cd /Users/jameskaranja/Developer/projects/liveclaw
@@ -216,6 +217,9 @@ Clients connect via WebSocket and exchange JSON messages:
 { "type": "SessionPrompt", "session_id": "...", "prompt": "Use add_numbers with a=12 and b=30", "create_response": true }
 { "type": "ChannelInbound", "channel": "slack", "account_id": "T123", "external_user_id": "U77", "text": "hello", "create_response": true }
 { "type": "GetChannelOutbound", "channel": "slack", "account_id": "T123", "external_user_id": "U77", "max_items": 20 }
+{ "type": "CreateChannelJob", "channel": "slack", "account_id": "T123", "external_user_id": "U77", "text": "scheduled check", "interval_seconds": 60, "create_response": false }
+{ "type": "ListChannelJobs" }
+{ "type": "CancelChannelJob", "job_id": "..." }
 { "type": "SessionToolCall", "session_id": "...", "tool_name": "echo_text", "arguments": {"text":"hello"} }
 { "type": "TerminateSession", "session_id": "..." }
 { "type": "GetGatewayHealth" }
@@ -233,12 +237,15 @@ Clients connect via WebSocket and exchange JSON messages:
 { "type": "PromptAccepted", "session_id": "..." }
 { "type": "ChannelRouted", "channel": "slack", "account_id": "T123", "external_user_id": "U77", "session_id": "..." }
 { "type": "ChannelOutboundBatch", "channel": "slack", "account_id": "T123", "external_user_id": "U77", "items": [ {"id":"...","session_id":"...","text":"...","created_at_unix_ms":0} ] }
+{ "type": "ChannelJobCreated", "job": { "job_id":"...", "channel":"slack", "account_id":"T123", "external_user_id":"U77", "text":"scheduled check", "interval_seconds":60, "create_response":false, "created_at_unix_ms":0 } }
+{ "type": "ChannelJobs", "jobs": [ { "job_id":"...", "channel":"slack", "account_id":"T123", "external_user_id":"U77", "text":"scheduled check", "interval_seconds":60, "create_response":false, "created_at_unix_ms":0 } ] }
+{ "type": "ChannelJobCanceled", "job_id": "..." }
 { "type": "SessionToolResult", "session_id": "...", "tool_name": "echo_text", "result": {"status":"ok","result":{"text":"hello","length":5}}, "graph": {"thread_id":"...","completed":true,"interrupted":false,"events":[...],"final_state":{...}} }
 { "type": "AudioOutput", "session_id": "...", "audio": "<base64>" }
 { "type": "TranscriptUpdate", "session_id": "...", "text": "...", "is_final": true }
 { "type": "PriorityProbeAccepted", "queued_standard": true, "queued_priority": true }
 { "type": "PriorityNotice", "data": { "level": "info", "code": "priority_probe", "message": "Priority channel is active", "session_id": "..." } }
-{ "type": "GatewayHealth", "data": { "uptime_seconds": 123, "active_sessions": 1, "active_priority_bindings": 1, "require_pairing": true } }
+{ "type": "GatewayHealth", "data": { "protocol_version":"2026-02-20", "uptime_seconds": 123, "active_sessions": 1, "active_ws_bindings": 1, "active_priority_bindings": 1, "active_channel_jobs": 1, "require_pairing": true } }
 { "type": "Diagnostics", "data": { "...": "runtime/provider/reconnect/compaction snapshot", "protocol_version": "...", "supported_client_messages": ["..."] } }
 { "type": "Pong" }
 ```
