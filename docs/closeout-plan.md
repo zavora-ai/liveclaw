@@ -109,3 +109,4 @@ Close the remaining parity and release-candidate scope so the project can be dec
 18. 2026-02-21: closed onboarding/service parity deltas by adding `onboard` and `service` CLI command groups in `liveclaw-app`, plus README + parity-board evidence updates.
 19. 2026-02-21: closed operator UX parity slice by adding saved connection profiles and guided bootstrap/ops/README-summary workflows to the reusable browser WS client, with README + parity-board evidence updates.
 20. 2026-02-21: closed service-ergonomics parity slice by adding `service logs` and `service doctor` shortcuts in `liveclaw-app`, with parser tests and README/parity documentation updates.
+21. 2026-02-21: improved install-path parity by adding `scripts/bootstrap_local.sh` for one-command local setup + non-interactive onboarding, and aligned README/parity tracking docs.

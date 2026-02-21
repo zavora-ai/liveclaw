@@ -220,6 +220,14 @@ Status scale: `NOT_STARTED`, `IN_PROGRESS`, `AT_RISK`, `BLOCKED`, `DONE`
 | Add parser test coverage for new service commands | DONE | `tests::test_parse_service_logs_args_supports_lines_follow_and_stream`, `tests::test_parse_service_doctor_alias_supports_config`, `tests::test_parse_service_logs_rejects_zero_lines` |
 | Update user docs and parity comparison for service ergonomics | DONE | `README.md` service diagnostics/logs examples and `docs/openclaw-zeroclaw-parity-comparison.md` updates |
 
+## Sprint 20 Checklist (DONE)
+
+| Item | Status | Evidence |
+|---|---|---|
+| Add one-command local bootstrap path for setup + onboarding | DONE | `scripts/bootstrap_local.sh` wraps `dev/setup.sh` + `liveclaw-app onboard --non-interactive` + optional doctor/quality-gate |
+| Keep quick-start docs aligned to bootstrap path | DONE | `README.md` Quick Start now includes `scripts/bootstrap_local.sh` flow |
+| Keep parity comparison aligned to install-path improvements | DONE | `docs/openclaw-zeroclaw-parity-comparison.md` primary install row + install use-case notes updated |
+
 ## Closeout Phase 1 Kickoff (2026-02-21)
 
 | Item | Status | Evidence |

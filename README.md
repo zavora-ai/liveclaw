@@ -42,21 +42,17 @@ cd ..
 git clone <adk-rust-repo-url> adk-rust
 cd liveclaw
 
-# Run the dev setup script
-chmod +x dev/setup.sh
-./dev/setup.sh
-
-# Guided onboarding (interactive)
-cargo run -p liveclaw-app -- onboard
-
-# Or non-interactive onboarding
-LIVECLAW_API_KEY=sk-... cargo run -p liveclaw-app -- onboard liveclaw.toml \
-  --non-interactive \
+# One-command bootstrap (setup + non-interactive onboard + doctor)
+LIVECLAW_API_KEY=sk-... ./scripts/bootstrap_local.sh \
   --provider-profile openai \
   --model gpt-4o-realtime-preview-2024-12-17 \
   --gateway-host 127.0.0.1 \
   --gateway-port 8420 \
   --require-pairing true
+
+# Or run setup + onboarding step-by-step
+./dev/setup.sh
+cargo run -p liveclaw-app -- onboard
 
 # Run gateway from config
 cargo run -p liveclaw-app -- liveclaw.toml

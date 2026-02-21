@@ -35,7 +35,7 @@ Status legend:
 
 | Dimension | LiveClaw | OpenClaw | ZeroClaw |
 |---|---|---|---|
-| Primary install path | `cargo` workspace setup with ADK-Rust sibling + `dev/setup.sh` | install script or npm/pnpm global install (`openclaw`) | Homebrew/bootstrap/cargo install paths |
+| Primary install path | `cargo` workspace setup with ADK-Rust sibling + one-command local bootstrap (`scripts/bootstrap_local.sh`) | install script or npm/pnpm global install (`openclaw`) | Homebrew/bootstrap/cargo install paths |
 | First-time onboarding UX | Guided onboarding via `liveclaw-app onboard` (interactive/non-interactive) with config validation + optional service install/start | Strong guided onboarding (`openclaw onboard`, macOS app onboarding) | Guided onboarding (`zeroclaw onboard --interactive` and quick onboarding flags) |
 | First run command | `cargo run -p liveclaw-app -- liveclaw.toml` | `openclaw onboard --install-daemon`, then `openclaw dashboard`/`openclaw gateway` | `zeroclaw onboard ...`, then `zeroclaw daemon` or `zeroclaw gateway` |
 | Foreground runtime mode | Full | Full | Full |
@@ -50,7 +50,7 @@ Status legend:
 
 | # | Common User Use Case | LiveClaw | OpenClaw | ZeroClaw | Evidence Notes |
 |---|---|---|---|---|---|
-| 1 | Install from scratch on macOS/Linux | Partial | Full | Full | LiveClaw currently assumes Rust + ADK sibling workflow; OpenClaw and ZeroClaw provide clearer turnkey install paths |
+| 1 | Install from scratch on macOS/Linux | Partial | Full | Full | LiveClaw now has one-command local bootstrap, but still assumes Rust + ADK sibling workflow |
 | 2 | Guided onboarding wizard | Full | Full | Full | LiveClaw now provides `onboard` with interactive/non-interactive flows, config generation, validation, and optional service wiring |
 | 3 | Start long-running background service | Full | Full | Full | LiveClaw now provides first-class `service` command group for lifecycle operations |
 | 4 | Check health/status quickly | Full | Full | Full | All three have operator-visible health/diagnostic flow |
