@@ -37,20 +37,16 @@ The runtime delegates heavily to ADK-Rust crates for voice orchestration (`adk-r
 ## Quick Start
 
 ```bash
-# Clone ADK-Rust as a sibling
-cd ..
-git clone <adk-rust-repo-url> adk-rust
-cd liveclaw
-
 # One-command bootstrap (setup + non-interactive onboard + doctor)
 LIVECLAW_API_KEY=sk-... ./scripts/bootstrap_local.sh \
+  --clone-adk https://github.com/zavora-ai/adk-rust.git \
   --provider-profile openai \
   --model gpt-4o-realtime-preview-2024-12-17 \
   --gateway-host 127.0.0.1 \
   --gateway-port 8420 \
   --require-pairing true
 
-# Or run setup + onboarding step-by-step
+# Or run setup + onboarding step-by-step (after cloning adk-rust as ../adk-rust)
 ./dev/setup.sh
 cargo run -p liveclaw-app -- onboard
 

@@ -8,6 +8,8 @@ CONFIG_PATH="liveclaw.toml"
 RUN_SETUP=1
 RUN_DOCTOR=1
 RUN_QUALITY_GATE=0
+ADK_PATH="${PROJECT_ROOT}/../adk-rust"
+ADK_CLONE_URL=""
 ONBOARD_ARGS=()
 
 print_usage() {
@@ -17,6 +19,7 @@ Usage:
 
 Options:
   --config PATH                Onboarding config path (default: liveclaw.toml)
+  --clone-adk URL              Clone adk-rust into ../adk-rust when missing
   --api-key KEY                API key passed to onboarding
   --model MODEL                Model id passed to onboarding
   --provider-profile PROFILE   Provider profile (legacy|openai|openai_compatible)
@@ -55,6 +58,11 @@ while [[ $# -gt 0 ]]; do
       CONFIG_PATH="$2"
       shift 2
       ;;
+    --clone-adk)
+      require_value "$1" "${2:-}"
+      ADK_CLONE_URL="$2"
+      shift 2
+      ;;
     --api-key|--model|--provider-profile|--base-url|--gateway-host|--gateway-port|--require-pairing)
       require_value "$1" "${2:-}"
       ONBOARD_ARGS+=("$1" "$2")
@@ -90,6 +98,22 @@ while [[ $# -gt 0 ]]; do
 done
 
 cd "${PROJECT_ROOT}"
+
+if [[ ! -d "${ADK_PATH}/adk-core" ]]; then
+  if [[ -n "${ADK_CLONE_URL}" ]]; then
+    if [[ -e "${ADK_PATH}" ]]; then
+      echo "ADK path exists but is incomplete: ${ADK_PATH}" >&2
+      echo "Remove it or provide a valid adk-rust clone at that path." >&2
+      exit 1
+    fi
+    echo "Cloning adk-rust to ${ADK_PATH}..."
+    git clone "${ADK_CLONE_URL}" "${ADK_PATH}"
+  else
+    echo "Missing adk-rust at ${ADK_PATH}" >&2
+    echo "Provide --clone-adk <repo-url> or clone adk-rust as a sibling manually." >&2
+    exit 1
+  fi
+fi
 
 if [[ "${RUN_SETUP}" -eq 1 ]]; then
   "${PROJECT_ROOT}/dev/setup.sh"

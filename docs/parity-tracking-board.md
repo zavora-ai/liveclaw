@@ -224,7 +224,7 @@ Status scale: `NOT_STARTED`, `IN_PROGRESS`, `AT_RISK`, `BLOCKED`, `DONE`
 
 | Item | Status | Evidence |
 |---|---|---|
-| Add one-command local bootstrap path for setup + onboarding | DONE | `scripts/bootstrap_local.sh` wraps `dev/setup.sh` + `liveclaw-app onboard --non-interactive` + optional doctor/quality-gate |
+| Add one-command local bootstrap path for setup + onboarding | DONE | `scripts/bootstrap_local.sh` wraps `dev/setup.sh` + `liveclaw-app onboard --non-interactive` + optional doctor/quality-gate + `--clone-adk <url>` auto-clone path |
 | Keep quick-start docs aligned to bootstrap path | DONE | `README.md` Quick Start now includes `scripts/bootstrap_local.sh` flow |
 | Keep parity comparison aligned to install-path improvements | DONE | `docs/openclaw-zeroclaw-parity-comparison.md` primary install row + install use-case notes updated |
 
