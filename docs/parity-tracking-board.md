@@ -81,7 +81,7 @@ Status scale: `NOT_STARTED`, `IN_PROGRESS`, `AT_RISK`, `BLOCKED`, `DONE`
 | Persist transcript and audio artifacts from realtime callbacks | DONE | `liveclaw-app/src/main.rs` `persist_transcript_artifact` + `persist_audio_artifact` |
 | Add M4 demo checks for memory/artifact persistence | DONE | `scripts/demo/m4_memory_artifacts.sh` |
 
-## Sprint 6 Checklist (In Progress)
+## Sprint 6 Checklist (DONE)
 
 | Item | Status | Evidence |
 |---|---|---|
@@ -89,7 +89,7 @@ Status scale: `NOT_STARTED`, `IN_PROGRESS`, `AT_RISK`, `BLOCKED`, `DONE`
 | Enable config-driven memory compaction behavior | DONE | `liveclaw-app/src/main.rs` `MemoryCompactionPolicy` + `compact_memory_entries()` applied in transcript persistence path |
 | Add reliability tests for reconnect recovery and retry exhaustion | DONE | `tests::test_runtime_loop_recovers_from_interrupted_provider_session`, `tests::test_runtime_loop_stops_when_reconnect_budget_exhausted` |
 | Add Sprint 6 checks to M4 demo script | DONE | `scripts/demo/m4_memory_artifacts.sh` now runs compaction + reconnect tests |
-| Keep lifecycle and compaction execution in `adk-runner` orchestration path | IN_PROGRESS | `liveclaw-app/src/runner.rs` already exposes `EventsCompactionConfig`; active gateway path still needs full adoption |
+| Keep lifecycle and compaction execution in `adk-runner` orchestration path | DONE | `liveclaw-app/src/main.rs` `SessionLifecycleManager` now initializes session lifecycle through `adk-runner::Runner`, ingests transcript events via runner invocations, and snapshots compaction-aware memory entries; covered by `test_session_lifecycle_manager_records_transcript_entries` and `test_session_lifecycle_manager_reports_compaction_delta` |
 
 ## Sprint 7 Checklist (DONE)
 

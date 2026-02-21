@@ -7,6 +7,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
 use async_trait::async_trait;
+use futures::StreamExt;
 use tokio::sync::{mpsc, RwLock};
 use tokio::task::JoinHandle;
 use tracing::{info, warn};
@@ -14,8 +15,8 @@ use tracing::{info, warn};
 use adk_artifact::{ArtifactService, SaveRequest};
 use adk_auth::{AccessControl, AuthMiddleware, FileAuditSink, Permission, Role};
 use adk_core::{
-    CallbackContext, Content, EventActions, MemoryEntry as CoreMemoryEntry, Part, ReadonlyContext,
-    Tool, ToolContext,
+    Agent, CallbackContext, Content, Event, EventActions, EventCompaction,
+    MemoryEntry as CoreMemoryEntry, Part, ReadonlyContext, Tool, ToolContext,
 };
 use adk_graph::{
     ExecutionConfig as GraphExecutionConfig, GraphAgent, GraphError, MemoryCheckpointer,
@@ -28,6 +29,8 @@ use adk_realtime::events::ToolCall;
 use adk_realtime::openai::OpenAIRealtimeModel;
 use adk_realtime::runner::{EventHandler, ToolHandler};
 use adk_realtime::{RealtimeConfig, RealtimeRunner};
+use adk_runner::EventsCompactionConfig;
+use adk_session::{CreateRequest, GetRequest, InMemorySessionService, SessionService};
 use adk_telemetry::{init_telemetry, init_with_otlp};
 use serde_json::{json, Value};
 
@@ -35,6 +38,7 @@ use liveclaw_app::config::{
     CompactionConfig, LiveClawConfig, ProviderProfileConfig, ProvidersConfig, ResilienceConfig,
     RuntimeKind, SecurityConfig as AppSecurityConfig, VoiceConfig,
 };
+use liveclaw_app::runner::build_runner;
 use liveclaw_app::storage::{build_memory_service, FileArtifactService};
 use liveclaw_app::tools::{build_baseline_tools_with_workspace, WorkspaceToolPolicy};
 use liveclaw_gateway::pairing::PairingGuard;
@@ -228,6 +232,288 @@ impl From<&CompactionConfig> for MemoryCompactionPolicy {
             enabled: value.enable_compaction,
             max_events_threshold: value.max_events_threshold,
         }
+    }
+}
+
+struct LifecycleNoopAgent;
+
+#[async_trait]
+impl Agent for LifecycleNoopAgent {
+    fn name(&self) -> &str {
+        "liveclaw-lifecycle-ingest"
+    }
+
+    fn description(&self) -> &str {
+        "No-op agent used to persist transcript events through adk-runner lifecycle."
+    }
+
+    fn sub_agents(&self) -> &[Arc<dyn Agent>] {
+        &[]
+    }
+
+    async fn run(
+        &self,
+        _ctx: Arc<dyn adk_core::InvocationContext>,
+    ) -> adk_core::Result<adk_core::EventStream> {
+        Ok(Box::pin(futures::stream::empty::<adk_core::Result<Event>>()))
+    }
+}
+
+struct TranscriptCompactionSummarizer;
+
+#[async_trait]
+impl adk_core::BaseEventsSummarizer for TranscriptCompactionSummarizer {
+    async fn summarize_events(&self, events: &[Event]) -> adk_core::Result<Option<Event>> {
+        if events.is_empty() {
+            return Ok(None);
+        }
+
+        let mut summary_chunks = Vec::new();
+        for event in events {
+            let Some(content) = &event.llm_response.content else {
+                continue;
+            };
+            if let Some(text) = content
+                .parts
+                .iter()
+                .find_map(|part| part.text().map(str::trim))
+                .filter(|text| !text.is_empty())
+            {
+                summary_chunks.push(text.to_string());
+            }
+        }
+
+        let mut summary_text = if summary_chunks.is_empty() {
+            format!("compaction_summary: compacted {} events", events.len())
+        } else {
+            format!("compaction_summary: {}", summary_chunks.join(" "))
+        };
+        if summary_text.len() > 4_096 {
+            summary_text.truncate(4_096);
+        }
+
+        let compacted_content = Content::new("system").with_text(summary_text);
+        let mut compaction_event = Event::new("liveclaw-compaction");
+        compaction_event.author = "system".to_string();
+        compaction_event.llm_response.content = Some(compacted_content.clone());
+        compaction_event.actions = EventActions {
+            compaction: Some(EventCompaction {
+                start_timestamp: events.first().expect("events is non-empty").timestamp,
+                end_timestamp: events.last().expect("events is non-empty").timestamp,
+                compacted_content,
+            }),
+            ..Default::default()
+        };
+        Ok(Some(compaction_event))
+    }
+}
+
+struct SessionLifecycleManager {
+    app_name: String,
+    runner: Arc<adk_runner::Runner>,
+    session_service: Arc<dyn SessionService>,
+    compaction_counts: Arc<RwLock<HashMap<String, usize>>>,
+}
+
+impl SessionLifecycleManager {
+    fn new(app_name: &str, policy: &MemoryCompactionPolicy) -> Result<Self> {
+        let session_service: Arc<dyn SessionService> = Arc::new(InMemorySessionService::new());
+        let compaction_config = if policy.enabled {
+            Some(EventsCompactionConfig {
+                compaction_interval: policy.max_events_threshold.max(1) as u32,
+                overlap_size: 0,
+                summarizer: Arc::new(TranscriptCompactionSummarizer),
+            })
+        } else {
+            None
+        };
+
+        let runner = Arc::new(build_runner(
+            Arc::new(LifecycleNoopAgent),
+            session_service.clone(),
+            None,
+            None,
+            None,
+            compaction_config,
+        )?);
+
+        Ok(Self {
+            app_name: app_name.to_string(),
+            runner,
+            session_service,
+            compaction_counts: Arc::new(RwLock::new(HashMap::new())),
+        })
+    }
+
+    async fn initialize_session(&self, user_id: &str, session_id: &str) -> Result<()> {
+        let get_result = self
+            .session_service
+            .get(GetRequest {
+                app_name: self.app_name.clone(),
+                user_id: user_id.to_string(),
+                session_id: session_id.to_string(),
+                num_recent_events: None,
+                after: None,
+            })
+            .await;
+        if get_result.is_err() {
+            self.session_service
+                .create(CreateRequest {
+                    app_name: self.app_name.clone(),
+                    user_id: user_id.to_string(),
+                    session_id: Some(session_id.to_string()),
+                    state: HashMap::new(),
+                })
+                .await?;
+        }
+        self.compaction_counts
+            .write()
+            .await
+            .entry(session_id.to_string())
+            .or_insert(0);
+        Ok(())
+    }
+
+    async fn record_transcript(
+        &self,
+        user_id: &str,
+        session_id: &str,
+        transcript: &str,
+    ) -> Result<u64> {
+        let trimmed = transcript.trim();
+        if trimmed.is_empty() {
+            return Ok(0);
+        }
+
+        self.initialize_session(user_id, session_id).await?;
+        let mut stream = self
+            .runner
+            .run(
+                user_id.to_string(),
+                session_id.to_string(),
+                Content::new("user").with_text(trimmed.to_string()),
+            )
+            .await
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "Failed to run lifecycle ingest session '{}': {}",
+                    session_id,
+                    e
+                )
+            })?;
+        while let Some(event) = stream.next().await {
+            event.map_err(|e| {
+                anyhow::anyhow!(
+                    "Lifecycle ingest stream failed for session '{}': {}",
+                    session_id,
+                    e
+                )
+            })?;
+        }
+
+        let current = self.current_compaction_count(user_id, session_id).await?;
+        let mut guard = self.compaction_counts.write().await;
+        let previous = guard.insert(session_id.to_string(), current).unwrap_or(0);
+        Ok(current.saturating_sub(previous) as u64)
+    }
+
+    async fn snapshot_memory_entries(
+        &self,
+        user_id: &str,
+        session_id: &str,
+    ) -> Result<Vec<adk_memory::MemoryEntry>> {
+        let session = self
+            .session_service
+            .get(GetRequest {
+                app_name: self.app_name.clone(),
+                user_id: user_id.to_string(),
+                session_id: session_id.to_string(),
+                num_recent_events: None,
+                after: None,
+            })
+            .await?;
+
+        Ok(Self::memory_entries_from_session_events(
+            session.events().all(),
+        ))
+    }
+
+    async fn clear_tracking(&self, session_id: &str) {
+        self.compaction_counts.write().await.remove(session_id);
+    }
+
+    async fn current_compaction_count(&self, user_id: &str, session_id: &str) -> Result<usize> {
+        let session = self
+            .session_service
+            .get(GetRequest {
+                app_name: self.app_name.clone(),
+                user_id: user_id.to_string(),
+                session_id: session_id.to_string(),
+                num_recent_events: None,
+                after: None,
+            })
+            .await?;
+
+        Ok(session
+            .events()
+            .all()
+            .iter()
+            .filter(|event| event.actions.compaction.is_some())
+            .count())
+    }
+
+    fn memory_entries_from_session_events(events: Vec<Event>) -> Vec<adk_memory::MemoryEntry> {
+        let latest_compaction = events
+            .iter()
+            .rev()
+            .find_map(|event| event.actions.compaction.clone());
+        let boundary = latest_compaction
+            .as_ref()
+            .map(|compaction| compaction.end_timestamp);
+
+        let mut entries = Vec::new();
+        if let Some(compaction) = latest_compaction {
+            entries.push(adk_memory::MemoryEntry {
+                content: compaction.compacted_content,
+                author: "system".to_string(),
+                timestamp: compaction.end_timestamp,
+            });
+        }
+
+        for event in events {
+            if event.actions.compaction.is_some() {
+                continue;
+            }
+            if let Some(boundary_ts) = boundary {
+                if event.timestamp <= boundary_ts {
+                    continue;
+                }
+            }
+            let Some(content) = event.llm_response.content else {
+                continue;
+            };
+            let has_text = content.parts.iter().any(|part| {
+                part.text()
+                    .map(str::trim)
+                    .is_some_and(|text| !text.is_empty())
+            });
+            if !has_text {
+                continue;
+            }
+
+            let author = if event.author.trim().is_empty() {
+                "assistant".to_string()
+            } else {
+                event.author
+            };
+            entries.push(adk_memory::MemoryEntry {
+                content,
+                author,
+                timestamp: event.timestamp,
+            });
+        }
+
+        entries
     }
 }
 
@@ -906,6 +1192,7 @@ struct GatewayEventForwarder {
     user_id: String,
     memory_store: Arc<dyn MemoryService>,
     session_memory_entries: Arc<RwLock<HashMap<String, Vec<adk_memory::MemoryEntry>>>>,
+    session_lifecycle: Option<Arc<SessionLifecycleManager>>,
     artifact_service: Option<Arc<dyn ArtifactService>>,
     memory_compaction: MemoryCompactionPolicy,
     runtime_diagnostics: Arc<RuntimeDiagnosticsCounters>,
@@ -922,6 +1209,66 @@ impl GatewayEventForwarder {
             author: "assistant".to_string(),
             timestamp: chrono::Utc::now(),
         };
+
+        if let Some(lifecycle) = &self.session_lifecycle {
+            match lifecycle
+                .record_transcript(&self.user_id, &self.session_id, transcript)
+                .await
+            {
+                Ok(new_compactions) if new_compactions > 0 => {
+                    self.runtime_diagnostics
+                        .compactions_applied_total
+                        .fetch_add(new_compactions, Ordering::SeqCst);
+                    info!(
+                        session_id = %self.session_id,
+                        compactions = new_compactions,
+                        "Applied transcript compaction via adk-runner lifecycle path"
+                    );
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    warn!(
+                        session_id = %self.session_id,
+                        user_id = %self.user_id,
+                        error = %e,
+                        "Failed to record transcript in adk-runner lifecycle path"
+                    );
+                }
+            }
+
+            match lifecycle
+                .snapshot_memory_entries(&self.user_id, &self.session_id)
+                .await
+            {
+                Ok(session_entries) => {
+                    self.session_memory_entries
+                        .write()
+                        .await
+                        .insert(self.session_id.clone(), session_entries.clone());
+                    if let Err(e) = self
+                        .memory_store
+                        .add_session("liveclaw", &self.user_id, &self.session_id, session_entries)
+                        .await
+                    {
+                        warn!(
+                            session_id = %self.session_id,
+                            user_id = %self.user_id,
+                            error = %e,
+                            "Failed to persist transcript memory from adk-runner lifecycle snapshot"
+                        );
+                    }
+                    return;
+                }
+                Err(e) => {
+                    warn!(
+                        session_id = %self.session_id,
+                        user_id = %self.user_id,
+                        error = %e,
+                        "Failed to build lifecycle memory snapshot; falling back to local transcript memory path"
+                    );
+                }
+            }
+        }
 
         let session_entries = {
             let mut guard = self.session_memory_entries.write().await;
@@ -1096,6 +1443,7 @@ struct RunnerAdapter {
     artifact_service: Option<Arc<dyn ArtifactService>>,
     reconnect_policy: ReconnectPolicy,
     memory_compaction_policy: MemoryCompactionPolicy,
+    session_lifecycle: Option<Arc<SessionLifecycleManager>>,
     graph_default_enabled: bool,
     graph_recursion_limit: usize,
     sessions: Arc<RwLock<HashMap<String, RealtimeSession>>>,
@@ -1123,6 +1471,20 @@ impl RunnerAdapter {
         security_cfg: &AppSecurityConfig,
         init: RunnerAdapterInit,
     ) -> Self {
+        let session_lifecycle = match SessionLifecycleManager::new(
+            "liveclaw",
+            &init.memory_compaction_policy,
+        ) {
+            Ok(manager) => Some(Arc::new(manager)),
+            Err(e) => {
+                warn!(
+                    error = %e,
+                    "Failed to initialize adk-runner lifecycle manager; falling back to local transcript lifecycle path"
+                );
+                None
+            }
+        };
+
         Self {
             runtime_kind: init.runtime_kind,
             provider: init.provider,
@@ -1136,6 +1498,7 @@ impl RunnerAdapter {
             artifact_service: init.artifact_service,
             reconnect_policy: init.reconnect_policy,
             memory_compaction_policy: init.memory_compaction_policy,
+            session_lifecycle,
             graph_default_enabled: init.graph_default_enabled,
             graph_recursion_limit: init.graph_recursion_limit.max(1),
             sessions: Arc::new(RwLock::new(HashMap::new())),
@@ -1242,6 +1605,18 @@ impl RunnerHandle for RunnerAdapter {
             );
         }
 
+        if let Some(lifecycle) = &self.session_lifecycle {
+            lifecycle
+                .initialize_session(user_id, session_id)
+                .await
+                .with_context(|| {
+                    format!(
+                        "Failed to initialize adk-runner lifecycle session '{}'",
+                        session_id
+                    )
+                })?;
+        }
+
         if self.provider.api_key.trim().is_empty() {
             bail!("Missing API key. Set [voice].api_key or LIVECLAW_API_KEY / OPENAI_API_KEY.");
         }
@@ -1321,6 +1696,7 @@ impl RunnerHandle for RunnerAdapter {
                 user_id: user_id.to_string(),
                 memory_store: self.memory_store.clone(),
                 session_memory_entries: self.session_memory_entries.clone(),
+                session_lifecycle: self.session_lifecycle.clone(),
                 artifact_service: self.artifact_service.clone(),
                 memory_compaction: self.memory_compaction_policy.clone(),
                 runtime_diagnostics: self.runtime_diagnostics.clone(),
@@ -1406,6 +1782,10 @@ impl RunnerHandle for RunnerAdapter {
         };
 
         shutdown.store(true, Ordering::SeqCst);
+
+        if let Some(lifecycle) = &self.session_lifecycle {
+            lifecycle.clear_tracking(session_id).await;
+        }
 
         if let Err(e) = runtime.close().await {
             warn!(session_id = session_id, error = %e, "Failed to close realtime session cleanly");
@@ -2064,6 +2444,7 @@ mod tests {
             user_id: "user-42".to_string(),
             memory_store,
             session_memory_entries: Arc::new(RwLock::new(HashMap::new())),
+            session_lifecycle: None,
             artifact_service: None,
             memory_compaction: MemoryCompactionPolicy {
                 enabled: false,
@@ -2121,6 +2502,7 @@ mod tests {
             user_id: "user-art-1".to_string(),
             memory_store: memory_store.clone(),
             session_memory_entries: Arc::new(RwLock::new(HashMap::new())),
+            session_lifecycle: None,
             artifact_service: Some(artifact_service.clone()),
             memory_compaction: MemoryCompactionPolicy {
                 enabled: false,
@@ -2479,6 +2861,79 @@ mod tests {
             .unwrap_or_default();
         assert!(summary.contains("compaction_summary"));
         assert!(summary.contains("alpha one"));
+    }
+
+    #[tokio::test]
+    async fn test_session_lifecycle_manager_records_transcript_entries() {
+        let manager = SessionLifecycleManager::new(
+            "liveclaw",
+            &MemoryCompactionPolicy {
+                enabled: false,
+                max_events_threshold: 8,
+            },
+        )
+        .unwrap();
+
+        manager
+            .initialize_session("principal-1", "sess-lifecycle-1")
+            .await
+            .unwrap();
+        let compactions = manager
+            .record_transcript("principal-1", "sess-lifecycle-1", "hello lifecycle")
+            .await
+            .unwrap();
+        assert_eq!(compactions, 0);
+
+        let snapshot = manager
+            .snapshot_memory_entries("principal-1", "sess-lifecycle-1")
+            .await
+            .unwrap();
+        assert_eq!(snapshot.len(), 1);
+        let text = snapshot[0]
+            .content
+            .parts
+            .iter()
+            .find_map(Part::text)
+            .unwrap_or_default();
+        assert!(text.contains("hello lifecycle"));
+    }
+
+    #[tokio::test]
+    async fn test_session_lifecycle_manager_reports_compaction_delta() {
+        let manager = SessionLifecycleManager::new(
+            "liveclaw",
+            &MemoryCompactionPolicy {
+                enabled: true,
+                max_events_threshold: 1,
+            },
+        )
+        .unwrap();
+
+        manager
+            .initialize_session("principal-2", "sess-lifecycle-2")
+            .await
+            .unwrap();
+        let compactions = manager
+            .record_transcript("principal-2", "sess-lifecycle-2", "compact me")
+            .await
+            .unwrap();
+        assert!(
+            compactions > 0,
+            "expected at least one compaction event when compaction interval is 1"
+        );
+
+        let snapshot = manager
+            .snapshot_memory_entries("principal-2", "sess-lifecycle-2")
+            .await
+            .unwrap();
+        assert!(!snapshot.is_empty(), "expected compaction summary entry");
+        let summary = snapshot[0]
+            .content
+            .parts
+            .iter()
+            .find_map(Part::text)
+            .unwrap_or_default();
+        assert!(summary.contains("compaction_summary"));
     }
 
     #[derive(Clone, Copy)]

@@ -20,6 +20,8 @@ demo_header "M4 Memory, Artifacts, Resilience"
 
   # Config-driven transcript compaction keeps memory bounded.
   cargo test -p liveclaw-app --bin liveclaw-app tests::test_compact_memory_entries_reduces_history_when_threshold_exceeded -- --exact
+  cargo test -p liveclaw-app --bin liveclaw-app tests::test_session_lifecycle_manager_records_transcript_entries -- --exact
+  cargo test -p liveclaw-app --bin liveclaw-app tests::test_session_lifecycle_manager_reports_compaction_delta -- --exact
 
   # Reconnect/backoff policy recovers from interrupted provider sessions.
   cargo test -p liveclaw-app --bin liveclaw-app tests::test_runtime_loop_recovers_from_interrupted_provider_session -- --exact

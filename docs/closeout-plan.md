@@ -28,15 +28,13 @@ Close the remaining parity and release-candidate scope so the project can be dec
 
 ## Remaining Blockers
 
-1. ADK lifecycle parity:
-   - `ADK-GAP-004` active session lifecycle and compaction fully on `adk-runner::Runner`.
-2. Docker runtime parity:
+1. Docker runtime parity:
    - `ADK-GAP-005` containerized runtime execution path beyond compatibility mode.
-3. OpenClaw-track scope not yet implemented end-to-end:
+2. OpenClaw-track scope not yet implemented end-to-end:
    - Telegram, Slack, Webhook channel adapters.
    - Browser/HTTP/Cron baseline tool surfaces with policy controls.
    - Background scheduling and webhook-triggered supervised actions.
-4. Release candidate artifacts:
+3. Release candidate artifacts:
    - Runbook, deployment guide, rollback playbook.
    - Concurrent-session load test evidence and smoke-suite sign-off.
 
@@ -50,14 +48,7 @@ Close the remaining parity and release-candidate scope so the project can be dec
    - Tracking docs reflect current state without stale open items.
    - Remaining blockers are explicitly mapped to execution phases.
 
-## Phase 2: ADK Lifecycle Closeout (Sprint 12, 2026-02-24 to 2026-03-06)
-
-1. Migrate lifecycle and compaction execution to `adk-runner::Runner`.
-2. Add integration tests proving parity vs existing realtime path.
-3. Exit criteria:
-   - `ADK-GAP-004` closed with tests and demo evidence.
-
-## Phase 3: Runtime and Channel Parity (Sprint 13, 2026-03-09 to 2026-03-20)
+## Phase 2: Runtime and Channel Parity (Sprint 13, 2026-03-09 to 2026-03-20)
 
 1. Implement Docker runtime execution bridge for `runtime.kind=docker`.
 2. Implement Telegram, Slack, and Webhook channel adapters.
@@ -66,7 +57,7 @@ Close the remaining parity and release-candidate scope so the project can be dec
    - `ADK-GAP-005` closed.
    - Channel demo script passes with auth/routing evidence.
 
-## Phase 4: Tooling and Automation Surfaces (Sprint 14, 2026-03-23 to 2026-04-03)
+## Phase 3: Tooling and Automation Surfaces (Sprint 14, 2026-03-23 to 2026-04-03)
 
 1. Deliver browser, HTTP, and cron tool surfaces with policy controls.
 2. Add background scheduling and webhook-trigger start path.
@@ -74,7 +65,7 @@ Close the remaining parity and release-candidate scope so the project can be dec
 4. Exit criteria:
    - Tooling/automation demo script passes with policy checks.
 
-## Phase 5: RC Hardening (Sprint 15, 2026-04-06 to 2026-04-17)
+## Phase 4: RC Hardening (Sprint 15, 2026-04-06 to 2026-04-17)
 
 1. Add concurrent-session load tests and publish limits.
 2. Create release runbook, deployment guide, and rollback playbook.
@@ -82,7 +73,7 @@ Close the remaining parity and release-candidate scope so the project can be dec
 4. Exit criteria:
    - RC checklist is complete and reproducible.
 
-## Phase 6: Closure and Tagging (Sprint 16, 2026-04-20 to 2026-04-24)
+## Phase 5: Closure and Tagging (Sprint 16, 2026-04-20 to 2026-04-24)
 
 1. Mark milestone board complete.
 2. Publish final parity closeout summary and ADK delta report.
@@ -103,3 +94,4 @@ Close the remaining parity and release-candidate scope so the project can be dec
 
 1. 2026-02-21: created closeout plan document.
 2. 2026-02-21: began Phase 1 by reconciling parity, defect, and ADK tracking docs with current verification evidence.
+3. 2026-02-21: completed ADK lifecycle closeout (`ADK-GAP-004`) by wiring transcript lifecycle and compaction snapshots through `adk-runner::Runner` in the active gateway path.
