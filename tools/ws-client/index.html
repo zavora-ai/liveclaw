@@ -632,6 +632,16 @@
                 <input id="channelExternalUserId" value="user-1" placeholder="channel user id" />
               </div>
             </div>
+            <div class="field-row compact">
+              <div class="field-stack">
+                <label for="channelOutboundMax">Outbound Poll Max</label>
+                <input id="channelOutboundMax" type="number" min="1" max="500" value="20" />
+              </div>
+              <div class="field-stack">
+                <label>&nbsp;</label>
+                <button id="pollChannelOutboundBtn" class="soft">Poll Channel Outbound</button>
+              </div>
+            </div>
             <div class="field-stack">
               <label for="channelText">Inbound Text</label>
               <textarea id="channelText" placeholder="Message from channel user">Hello from channel bridge.</textarea>
@@ -650,6 +660,15 @@
                 class="output-pane"
                 readonly
                 placeholder="ChannelRouted events will appear here."
+              ></textarea>
+            </div>
+            <div class="field-stack">
+              <label for="channelOutboundView">Channel Outbound Activity</label>
+              <textarea
+                id="channelOutboundView"
+                class="output-pane"
+                readonly
+                placeholder="ChannelOutboundBatch items will appear here."
               ></textarea>
             </div>
             <p class="hint">
@@ -677,6 +696,7 @@
                   <option value="SessionResponseInterrupt">SessionResponseInterrupt</option>
                   <option value="SessionPrompt">SessionPrompt</option>
                   <option value="ChannelInbound">ChannelInbound</option>
+                  <option value="GetChannelOutbound">GetChannelOutbound</option>
                   <option value="SessionToolCall">SessionToolCall</option>
                 </select>
               </div>
@@ -771,10 +791,13 @@
           channelType: $("channelType"),
           channelAccountId: $("channelAccountId"),
           channelExternalUserId: $("channelExternalUserId"),
+          channelOutboundMax: $("channelOutboundMax"),
+          pollChannelOutboundBtn: $("pollChannelOutboundBtn"),
           channelText: $("channelText"),
           channelCreateResponse: $("channelCreateResponse"),
           routeChannelBtn: $("routeChannelBtn"),
           channelRouteView: $("channelRouteView"),
+          channelOutboundView: $("channelOutboundView"),
           sendPromptBtn: $("sendPromptBtn"),
           rawJson: $("rawJson"),
           sendRawBtn: $("sendRawBtn"),
@@ -794,6 +817,7 @@
           channelType: "liveclaw.ws.channel_type",
           channelAccountId: "liveclaw.ws.channel_account_id",
           channelExternalUserId: "liveclaw.ws.channel_external_user_id",
+          channelOutboundMax: "liveclaw.ws.channel_outbound_max",
         };
 
         const DEFAULT_SAMPLE_RATE = 24000;
@@ -988,6 +1012,7 @@
           els.graphTraceView.value = "";
           els.promptToolActivityView.value = "";
           els.channelRouteView.value = "";
+          els.channelOutboundView.value = "";
           els.m4EvidenceView.value = "";
           els.audioProgress.textContent = "idle";
           setPlaybackStatus("idle");
@@ -1005,6 +1030,7 @@
           localStorage.setItem(keys.channelType, els.channelType.value.trim());
           localStorage.setItem(keys.channelAccountId, els.channelAccountId.value.trim());
           localStorage.setItem(keys.channelExternalUserId, els.channelExternalUserId.value.trim());
+          localStorage.setItem(keys.channelOutboundMax, els.channelOutboundMax.value.trim());
         }
 
         function loadPrefs() {
@@ -1018,6 +1044,7 @@
           const channelType = localStorage.getItem(keys.channelType);
           const channelAccountId = localStorage.getItem(keys.channelAccountId);
           const channelExternalUserId = localStorage.getItem(keys.channelExternalUserId);
+          const channelOutboundMax = localStorage.getItem(keys.channelOutboundMax);
           if (url) els.wsUrl.value = url;
           if (token) els.tokenInput.value = token;
           if (sid) els.sessionId.value = sid;
@@ -1034,6 +1061,7 @@
           }
           if (channelAccountId) els.channelAccountId.value = channelAccountId;
           if (channelExternalUserId) els.channelExternalUserId.value = channelExternalUserId;
+          if (channelOutboundMax) els.channelOutboundMax.value = channelOutboundMax;
           updateBadges();
           updateM4EvidenceView();
         }
@@ -1147,6 +1175,14 @@
                 text: els.channelText.value.trim() || "Hello from channel bridge.",
                 create_response: Boolean(els.channelCreateResponse.checked),
               };
+            case "GetChannelOutbound":
+              return {
+                type: "GetChannelOutbound",
+                channel: els.channelType.value || "telegram",
+                account_id: els.channelAccountId.value.trim() || "acct-1",
+                external_user_id: els.channelExternalUserId.value.trim() || "user-1",
+                max_items: parseRate(els.channelOutboundMax.value, 20),
+              };
             case "SessionToolCall": {
               const toolName = els.toolName.value.trim() || "echo_text";
               const parsedArgs = parseJson(els.toolArgs.value) || { text: "hello from graph" };
@@ -1222,6 +1258,13 @@
           const existing = els.channelRouteView.value;
           els.channelRouteView.value = existing ? `${existing}\n${text}` : text;
           els.channelRouteView.scrollTop = els.channelRouteView.scrollHeight;
+        }
+
+        function appendChannelOutboundActivity(text) {
+          if (!text) return;
+          const existing = els.channelOutboundView.value;
+          els.channelOutboundView.value = existing ? `${existing}\n${text}` : text;
+          els.channelOutboundView.scrollTop = els.channelOutboundView.scrollHeight;
         }
 
         function describeToolResultForActivity(parsed) {
@@ -1749,6 +1792,22 @@
               recordM4Snapshot(`channel routed ${parsed.channel || "unknown"} -> ${parsed.session_id}`);
             }
 
+            if (parsed.type === "ChannelOutboundBatch") {
+              const channel = parsed.channel || "n/a";
+              const accountId = parsed.account_id || "n/a";
+              const externalUserId = parsed.external_user_id || "n/a";
+              const items = Array.isArray(parsed.items) ? parsed.items : [];
+              appendChannelOutboundActivity(
+                `[${now()}] batch channel=${channel} account=${accountId} user=${externalUserId} count=${items.length}`
+              );
+              for (const item of items) {
+                const sid = item?.session_id || "n/a";
+                const text = item?.text || "";
+                appendChannelOutboundActivity(`  - [${sid}] ${text}`);
+              }
+              recordM4Snapshot(`channel outbound batch ${channel} count=${items.length}`);
+            }
+
             if (parsed.type === "SessionTerminated" && parsed.session_id) {
               if (parsed.session_id === activeSessionId() || parsed.session_id === flowState.readySessionId) {
                 els.sessionId.value = "";
@@ -2139,6 +2198,16 @@
           savePrefs();
         });
 
+        els.pollChannelOutboundBtn.addEventListener("click", () => {
+          const message = templateForType("GetChannelOutbound");
+          if (!message.account_id || !message.external_user_id) {
+            log("error", "GetChannelOutbound requires account_id and external_user_id.");
+            return;
+          }
+          sendObject(message);
+          savePrefs();
+        });
+
         els.sendPromptBtn.addEventListener("click", () => {
           const sid = activeSessionId();
           if (!sid) {
@@ -2222,6 +2291,7 @@
           els.channelType,
           els.channelAccountId,
           els.channelExternalUserId,
+          els.channelOutboundMax,
         ].forEach((el) => {
           el.addEventListener("input", () => {
             savePrefs();

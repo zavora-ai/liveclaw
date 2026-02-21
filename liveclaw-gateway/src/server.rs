@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use axum::extract::ws::{Message, WebSocket};
@@ -17,8 +17,8 @@ use tracing::{error, info, warn};
 
 use crate::pairing::PairingGuard;
 use crate::protocol::{
-    GatewayHealth, GatewayMessage, GatewayResponse, GraphExecutionReport, PriorityNotice,
-    RuntimeDiagnostics, SessionConfig, PROTOCOL_VERSION,
+    ChannelOutboundItem, GatewayHealth, GatewayMessage, GatewayResponse, GraphExecutionReport,
+    PriorityNotice, RuntimeDiagnostics, SessionConfig, PROTOCOL_VERSION,
 };
 
 // ---------------------------------------------------------------------------
@@ -132,6 +132,10 @@ struct AppState {
     ws_priority_senders: Arc<RwLock<HashMap<String, mpsc::Sender<GatewayResponse>>>>,
     /// Channel/account/user routing table scoped by authenticated principal.
     channel_routes: Arc<RwLock<HashMap<ChannelRouteKey, String>>>,
+    /// Reverse index from session ID to channel route metadata.
+    session_channel_routes: Arc<RwLock<HashMap<String, ChannelRouteKey>>>,
+    /// Buffered outbound events waiting for adapter delivery.
+    channel_outbox: Arc<RwLock<HashMap<ChannelRouteKey, Vec<ChannelOutboundItem>>>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -150,6 +154,13 @@ struct ChannelInboundRequest<'a> {
     create_response: bool,
 }
 
+struct ChannelOutboundPollRequest<'a> {
+    channel: &'a str,
+    account_id: &'a str,
+    external_user_id: &'a str,
+    max_items: Option<usize>,
+}
+
 #[derive(Debug, Clone, Deserialize, Default)]
 struct ChannelIngressQuery {
     token: Option<String>,
@@ -163,6 +174,14 @@ struct WebhookInboundPayload {
     external_user_id: String,
     text: String,
     create_response: Option<bool>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct ChannelOutboundPollPayload {
+    channel: String,
+    account_id: String,
+    external_user_id: String,
+    max_items: Option<usize>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -297,6 +316,8 @@ impl Gateway {
             ws_response_senders: ws_response_senders.clone(),
             ws_priority_senders,
             channel_routes: Arc::new(RwLock::new(HashMap::new())),
+            session_channel_routes: Arc::new(RwLock::new(HashMap::new())),
+            channel_outbox: Arc::new(RwLock::new(HashMap::new())),
         };
 
         // Spawn background task to consume audio output and route to WebSocket clients
@@ -322,11 +343,12 @@ impl Gateway {
         // Spawn background task to consume transcript output and route to WebSocket clients
         if let Some(mut transcript_rx) = self.transcript_rx {
             let senders = ws_response_senders.clone();
+            let transcript_state = state.clone();
             tokio::spawn(async move {
                 while let Some(output) = transcript_rx.recv().await {
                     let resp = GatewayResponse::TranscriptUpdate {
                         session_id: output.session_id.clone(),
-                        text: output.text,
+                        text: output.text.clone(),
                         is_final: output.is_final,
                     };
                     let senders_guard = senders.read().await;
@@ -338,6 +360,8 @@ impl Gateway {
                             );
                         }
                     }
+
+                    queue_channel_outbound_transcript(&transcript_state, &output).await;
                 }
                 info!("Transcript output channel closed");
             });
@@ -364,6 +388,10 @@ fn build_router(state: AppState) -> Router {
         .route(
             "/channels/telegram/update",
             post(channel_telegram_update_handler),
+        )
+        .route(
+            "/channels/outbound/poll",
+            post(channel_outbound_poll_handler),
         )
         .with_state(state)
 }
@@ -558,6 +586,27 @@ async fn channel_telegram_update_handler(
     http_response_from_gateway(resp)
 }
 
+async fn channel_outbound_poll_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(query): Query<ChannelIngressQuery>,
+    JsonExtract(payload): JsonExtract<ChannelOutboundPollPayload>,
+) -> impl IntoResponse {
+    let token = extract_channel_token(&headers, &query);
+    let resp = handle_channel_http_outbound_poll(
+        ChannelOutboundPollRequest {
+            channel: &payload.channel,
+            account_id: &payload.account_id,
+            external_user_id: &payload.external_user_id,
+            max_items: payload.max_items,
+        },
+        token.as_deref(),
+        &state,
+    )
+    .await;
+    http_response_from_gateway(resp)
+}
+
 fn extract_channel_token(headers: &HeaderMap, query: &ChannelIngressQuery) -> Option<String> {
     let from_header = headers
         .get(header::AUTHORIZATION)
@@ -619,6 +668,38 @@ fn authenticate_http_principal(
     Ok(principal_from_token(token))
 }
 
+async fn handle_channel_http_outbound_poll(
+    request: ChannelOutboundPollRequest<'_>,
+    token: Option<&str>,
+    state: &AppState,
+) -> GatewayResponse {
+    let principal_id = match authenticate_http_principal(token, state) {
+        Ok(id) => id,
+        Err(resp) => return *resp,
+    };
+
+    match drain_channel_outbox(
+        state,
+        &principal_id,
+        request.channel,
+        request.account_id,
+        request.external_user_id,
+        request.max_items,
+    )
+    .await
+    {
+        Ok((channel, account_id, external_user_id, items)) => {
+            GatewayResponse::ChannelOutboundBatch {
+                channel,
+                account_id,
+                external_user_id,
+                items,
+            }
+        }
+        Err(resp) => resp,
+    }
+}
+
 fn http_response_from_gateway(resp: GatewayResponse) -> (StatusCode, Json<serde_json::Value>) {
     match resp {
         GatewayResponse::Error { code, message } => {
@@ -644,6 +725,21 @@ fn http_response_from_gateway(resp: GatewayResponse) -> (StatusCode, Json<serde_
                 "account_id": account_id,
                 "external_user_id": external_user_id,
                 "session_id": session_id
+            })),
+        ),
+        GatewayResponse::ChannelOutboundBatch {
+            channel,
+            account_id,
+            external_user_id,
+            items,
+        } => (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "type": "ChannelOutboundBatch",
+                "channel": channel,
+                "account_id": account_id,
+                "external_user_id": external_user_id,
+                "items": items,
             })),
         ),
         other => (
@@ -908,6 +1004,26 @@ async fn handle_message(
             .await
         }
 
+        GatewayMessage::GetChannelOutbound {
+            channel,
+            account_id,
+            external_user_id,
+            max_items,
+        } => {
+            if !conn.authenticated {
+                return auth_required_error();
+            }
+            handle_get_channel_outbound(
+                &channel,
+                &account_id,
+                &external_user_id,
+                max_items,
+                state,
+                conn,
+            )
+            .await
+        }
+
         GatewayMessage::SessionToolCall {
             session_id,
             tool_name,
@@ -1076,11 +1192,30 @@ async fn handle_terminate_session(
     // Remove stable session owner
     state.session_owners.write().await.remove(session_id);
     // Remove channel route bindings that reference this session.
+    let removed_route_keys = {
+        let mut routes = state.channel_routes.write().await;
+        let mut removed = Vec::new();
+        routes.retain(|route_key, mapped_session_id| {
+            if mapped_session_id == session_id {
+                removed.push(route_key.clone());
+                false
+            } else {
+                true
+            }
+        });
+        removed
+    };
     state
-        .channel_routes
+        .session_channel_routes
         .write()
         .await
-        .retain(|_, mapped_session_id| mapped_session_id != session_id);
+        .remove(session_id);
+    if !removed_route_keys.is_empty() {
+        let mut outbox = state.channel_outbox.write().await;
+        for route_key in removed_route_keys {
+            outbox.remove(&route_key);
+        }
+    }
     // Remove from owned sessions
     conn.owned_sessions.retain(|s| s != session_id);
 
@@ -1309,6 +1444,132 @@ fn normalize_channel_component(value: &str) -> Option<String> {
     }
 }
 
+fn bounded_max_items(value: Option<usize>) -> usize {
+    value.unwrap_or(50).clamp(1, 500)
+}
+
+fn now_unix_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .ok()
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+async fn drain_channel_outbox(
+    state: &AppState,
+    principal_id: &str,
+    channel: &str,
+    account_id: &str,
+    external_user_id: &str,
+    max_items: Option<usize>,
+) -> Result<(String, String, String, Vec<ChannelOutboundItem>), GatewayResponse> {
+    let Some(channel) = normalize_channel(channel) else {
+        return Err(GatewayResponse::Error {
+            code: "invalid_channel".to_string(),
+            message: "Supported channels are telegram, slack, and webhook".to_string(),
+        });
+    };
+    let Some(account_id) = normalize_channel_component(account_id) else {
+        return Err(GatewayResponse::Error {
+            code: "invalid_channel_route".to_string(),
+            message: "account_id is required".to_string(),
+        });
+    };
+    let Some(external_user_id) = normalize_channel_component(external_user_id) else {
+        return Err(GatewayResponse::Error {
+            code: "invalid_channel_route".to_string(),
+            message: "external_user_id is required".to_string(),
+        });
+    };
+    let route_key = ChannelRouteKey {
+        principal_id: principal_id.to_string(),
+        channel: channel.clone(),
+        account_id: account_id.clone(),
+        external_user_id: external_user_id.clone(),
+    };
+    let take_n = bounded_max_items(max_items);
+    let items = {
+        let mut outbox = state.channel_outbox.write().await;
+        if let Some(queue) = outbox.get_mut(&route_key) {
+            let split = take_n.min(queue.len());
+            let drained: Vec<ChannelOutboundItem> = queue.drain(0..split).collect();
+            if queue.is_empty() {
+                outbox.remove(&route_key);
+            }
+            drained
+        } else {
+            Vec::new()
+        }
+    };
+    Ok((channel, account_id, external_user_id, items))
+}
+
+async fn handle_get_channel_outbound(
+    channel: &str,
+    account_id: &str,
+    external_user_id: &str,
+    max_items: Option<usize>,
+    state: &AppState,
+    conn: &ConnectionState,
+) -> GatewayResponse {
+    let Some(principal_id) = conn.principal_id.as_deref() else {
+        return auth_required_error();
+    };
+    match drain_channel_outbox(
+        state,
+        principal_id,
+        channel,
+        account_id,
+        external_user_id,
+        max_items,
+    )
+    .await
+    {
+        Ok((channel, account_id, external_user_id, items)) => {
+            GatewayResponse::ChannelOutboundBatch {
+                channel,
+                account_id,
+                external_user_id,
+                items,
+            }
+        }
+        Err(resp) => resp,
+    }
+}
+
+async fn queue_channel_outbound_transcript(state: &AppState, output: &SessionTranscriptOutput) {
+    if !output.is_final {
+        return;
+    }
+    let text = output.text.trim();
+    if text.is_empty() {
+        return;
+    }
+
+    let route_key = {
+        let routes = state.session_channel_routes.read().await;
+        routes.get(&output.session_id).cloned()
+    };
+    let Some(route_key) = route_key else {
+        return;
+    };
+
+    let item = ChannelOutboundItem {
+        id: uuid::Uuid::new_v4().to_string(),
+        session_id: output.session_id.clone(),
+        text: text.to_string(),
+        created_at_unix_ms: now_unix_ms(),
+    };
+    state
+        .channel_outbox
+        .write()
+        .await
+        .entry(route_key)
+        .or_default()
+        .push(item);
+}
+
 /// Handle SessionPrompt — forward a text prompt to the active provider-side
 /// conversation, optionally triggering response generation.
 async fn handle_session_prompt(
@@ -1479,6 +1740,11 @@ async fn handle_channel_inbound(
             existing_session_id
         } else {
             state.channel_routes.write().await.remove(&route_key);
+            state
+                .session_channel_routes
+                .write()
+                .await
+                .remove(&existing_session_id);
             let created =
                 match handle_create_session(None, state, conn, ws_tx, ws_priority_tx).await {
                     GatewayResponse::SessionCreated { session_id } => session_id,
@@ -1503,6 +1769,12 @@ async fn handle_channel_inbound(
             .insert(route_key.clone(), created.clone());
         created
     };
+
+    state
+        .session_channel_routes
+        .write()
+        .await
+        .insert(session_id.clone(), route_key);
 
     if let Err(resp) =
         authorize_session_access(&session_id, state, conn, Some(ws_tx), Some(ws_priority_tx)).await
@@ -2065,6 +2337,8 @@ mod tests {
             ws_response_senders: Arc::new(RwLock::new(HashMap::new())),
             ws_priority_senders: Arc::new(RwLock::new(HashMap::new())),
             channel_routes: Arc::new(RwLock::new(HashMap::new())),
+            session_channel_routes: Arc::new(RwLock::new(HashMap::new())),
+            channel_outbox: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -2469,6 +2743,30 @@ mod tests {
                 external_user_id: "user-1".into(),
                 text: "hello".into(),
                 create_response: Some(true),
+            },
+            &state,
+            &mut conn,
+            &ws_tx,
+            &ws_priority_tx,
+        )
+        .await;
+        match resp {
+            GatewayResponse::Error { code, .. } => assert_eq!(code, "auth_required"),
+            other => panic!("Expected auth_required error, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_get_channel_outbound_requires_auth() {
+        let state = make_state(MockRunner::ok(), true);
+        let mut conn = unauthed_conn();
+        let (ws_tx, ws_priority_tx) = dummy_ws_txs();
+        let resp = handle_message(
+            GatewayMessage::GetChannelOutbound {
+                channel: "webhook".into(),
+                account_id: "acct-1".into(),
+                external_user_id: "user-1".into(),
+                max_items: Some(10),
             },
             &state,
             &mut conn,
@@ -3309,6 +3607,93 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_get_channel_outbound_returns_queued_final_transcript_items() {
+        let state = make_state(MockRunner::ok(), false);
+        let mut conn = authed_conn();
+        let (ws_tx, ws_priority_tx) = dummy_ws_txs();
+
+        let session_id = match handle_message(
+            GatewayMessage::ChannelInbound {
+                channel: "webhook".into(),
+                account_id: "acct-1".into(),
+                external_user_id: "user-1".into(),
+                text: "hello inbound".into(),
+                create_response: Some(false),
+            },
+            &state,
+            &mut conn,
+            &ws_tx,
+            &ws_priority_tx,
+        )
+        .await
+        {
+            GatewayResponse::ChannelRouted { session_id, .. } => session_id,
+            other => panic!("Expected ChannelRouted, got {:?}", other),
+        };
+
+        queue_channel_outbound_transcript(
+            &state,
+            &SessionTranscriptOutput {
+                session_id: session_id.clone(),
+                text: "draft".to_string(),
+                is_final: false,
+            },
+        )
+        .await;
+        queue_channel_outbound_transcript(
+            &state,
+            &SessionTranscriptOutput {
+                session_id: session_id.clone(),
+                text: "final answer".to_string(),
+                is_final: true,
+            },
+        )
+        .await;
+
+        let first_poll = handle_message(
+            GatewayMessage::GetChannelOutbound {
+                channel: "webhook".into(),
+                account_id: "acct-1".into(),
+                external_user_id: "user-1".into(),
+                max_items: Some(10),
+            },
+            &state,
+            &mut conn,
+            &ws_tx,
+            &ws_priority_tx,
+        )
+        .await;
+        match first_poll {
+            GatewayResponse::ChannelOutboundBatch { items, .. } => {
+                assert_eq!(items.len(), 1);
+                assert_eq!(items[0].session_id, session_id);
+                assert_eq!(items[0].text, "final answer");
+            }
+            other => panic!("Expected ChannelOutboundBatch, got {:?}", other),
+        }
+
+        let second_poll = handle_message(
+            GatewayMessage::GetChannelOutbound {
+                channel: "webhook".into(),
+                account_id: "acct-1".into(),
+                external_user_id: "user-1".into(),
+                max_items: Some(10),
+            },
+            &state,
+            &mut conn,
+            &ws_tx,
+            &ws_priority_tx,
+        )
+        .await;
+        match second_poll {
+            GatewayResponse::ChannelOutboundBatch { items, .. } => {
+                assert!(items.is_empty());
+            }
+            other => panic!("Expected ChannelOutboundBatch, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
     async fn test_terminate_session_cleans_channel_routes() {
         let state = make_state(MockRunner::ok(), false);
         let mut conn = authed_conn();
@@ -3456,6 +3841,76 @@ mod tests {
         assert_eq!(body["channel"], serde_json::json!("telegram"));
         assert_eq!(body["account_id"], serde_json::json!("4455"));
         assert_eq!(body["external_user_id"], serde_json::json!("7788"));
+    }
+
+    #[tokio::test]
+    async fn test_channel_outbound_poll_http_requires_auth_token() {
+        let state = make_state(MockRunner::ok(), true);
+        let app = build_router(state);
+
+        let request = Request::builder()
+            .method("POST")
+            .uri("/channels/outbound/poll")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(
+                r#"{"channel":"webhook","account_id":"acct-1","external_user_id":"user-1","max_items":10}"#,
+            ))
+            .expect("request");
+
+        let (status, body) = request_json(app, request).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(body["code"], serde_json::json!("auth_required"));
+    }
+
+    #[tokio::test]
+    async fn test_channel_outbound_poll_http_returns_and_drains_items() {
+        let state = make_state(MockRunner::ok(), true);
+        let token = paired_token(&state);
+        let route_key = ChannelRouteKey {
+            principal_id: principal_from_token(&token),
+            channel: "webhook".to_string(),
+            account_id: "acct-1".to_string(),
+            external_user_id: "user-1".to_string(),
+        };
+        state.channel_outbox.write().await.insert(
+            route_key,
+            vec![ChannelOutboundItem {
+                id: "evt-1".to_string(),
+                session_id: "sess-1".to_string(),
+                text: "outbound text".to_string(),
+                created_at_unix_ms: 1,
+            }],
+        );
+        let app = build_router(state);
+
+        let request = Request::builder()
+            .method("POST")
+            .uri("/channels/outbound/poll")
+            .header(header::CONTENT_TYPE, "application/json")
+            .header(header::AUTHORIZATION, format!("Bearer {}", token))
+            .body(Body::from(
+                r#"{"channel":"webhook","account_id":"acct-1","external_user_id":"user-1","max_items":10}"#,
+            ))
+            .expect("request");
+
+        let (status, body) = request_json(app.clone(), request).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["type"], serde_json::json!("ChannelOutboundBatch"));
+        assert_eq!(body["items"].as_array().map(|v| v.len()), Some(1));
+        assert_eq!(body["items"][0]["text"], serde_json::json!("outbound text"));
+
+        let second_request = Request::builder()
+            .method("POST")
+            .uri("/channels/outbound/poll")
+            .header(header::CONTENT_TYPE, "application/json")
+            .header(header::AUTHORIZATION, format!("Bearer {}", token))
+            .body(Body::from(
+                r#"{"channel":"webhook","account_id":"acct-1","external_user_id":"user-1","max_items":10}"#,
+            ))
+            .expect("request");
+        let (second_status, second_body) = request_json(app, second_request).await;
+        assert_eq!(second_status, StatusCode::OK);
+        assert_eq!(second_body["items"].as_array().map(|v| v.len()), Some(0));
     }
 
     // --- Base64 helpers ---

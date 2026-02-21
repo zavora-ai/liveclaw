@@ -29,7 +29,6 @@ Close the remaining parity and release-candidate scope so the project can be dec
 ## Remaining Blockers
 
 1. OpenClaw-track scope not yet implemented end-to-end:
-   - Outbound channel delivery contract for Telegram/Slack/Webhook adapters.
    - Browser/HTTP/Cron baseline tool surfaces with policy controls.
    - Background scheduling and webhook-triggered supervised actions.
 2. Release candidate artifacts:
@@ -94,3 +93,4 @@ Close the remaining parity and release-candidate scope so the project can be dec
 4. 2026-02-21: completed docker runtime closeout (`ADK-GAP-005`) by adding containerized realtime worker mode (`--runtime-worker`) and docker command/event bridge runtime (`DockerRuntimeBridgeRuntime`) in active session creation flow.
 5. 2026-02-21: started channel parity closeout slice by adding authenticated `ChannelInbound` routing with principal/channel/account/user isolation, browser WS client controls, and M6 demo/test coverage.
 6. 2026-02-21: completed HTTP ingress adapter slice for Webhook/Slack/Telegram in gateway with token-authenticated routing into `ChannelInbound` and route-level smoke tests.
+7. 2026-02-21: completed outbound delivery contract slice by adding channel-scoped outbound queueing for final transcripts and retrieval via WS (`GetChannelOutbound`) and HTTP (`/channels/outbound/poll`).

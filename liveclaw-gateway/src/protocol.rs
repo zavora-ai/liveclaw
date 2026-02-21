@@ -45,6 +45,12 @@ pub enum GatewayMessage {
         text: String,
         create_response: Option<bool>,
     },
+    GetChannelOutbound {
+        channel: String,
+        account_id: String,
+        external_user_id: String,
+        max_items: Option<usize>,
+    },
     SessionToolCall {
         session_id: SessionId,
         tool_name: String,
@@ -96,6 +102,12 @@ pub enum GatewayResponse {
         external_user_id: String,
         session_id: SessionId,
     },
+    ChannelOutboundBatch {
+        channel: String,
+        account_id: String,
+        external_user_id: String,
+        items: Vec<ChannelOutboundItem>,
+    },
     SessionToolResult {
         session_id: SessionId,
         tool_name: String,
@@ -141,6 +153,15 @@ pub struct SessionConfig {
     pub role: Option<String>,
     /// Whether to wrap the RealtimeAgent in a GraphAgent
     pub enable_graph: Option<bool>,
+}
+
+/// Outbound text item queued for channel adapter delivery.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ChannelOutboundItem {
+    pub id: String,
+    pub session_id: SessionId,
+    pub text: String,
+    pub created_at_unix_ms: u64,
 }
 
 /// Graph execution trace event for SessionToolCall runs.
@@ -222,6 +243,7 @@ pub fn supported_client_message_types() -> Vec<String> {
         "SessionResponseInterrupt".to_string(),
         "SessionPrompt".to_string(),
         "ChannelInbound".to_string(),
+        "GetChannelOutbound".to_string(),
         "SessionToolCall".to_string(),
         "PriorityProbe".to_string(),
         "GetGatewayHealth".to_string(),
@@ -244,6 +266,7 @@ pub fn supported_server_response_types() -> Vec<String> {
         "ResponseInterruptAccepted".to_string(),
         "PromptAccepted".to_string(),
         "ChannelRouted".to_string(),
+        "ChannelOutboundBatch".to_string(),
         "SessionToolResult".to_string(),
         "AudioOutput".to_string(),
         "TranscriptUpdate".to_string(),
@@ -378,6 +401,19 @@ mod tests {
             external_user_id: "user-1".into(),
             text: "Hello from telegram".into(),
             create_response: Some(true),
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        let parsed: GatewayMessage = serde_json::from_str(&json).unwrap();
+        assert_eq!(msg, parsed);
+    }
+
+    #[test]
+    fn test_gateway_message_get_channel_outbound() {
+        let msg = GatewayMessage::GetChannelOutbound {
+            channel: "slack".into(),
+            account_id: "T123".into(),
+            external_user_id: "U77".into(),
+            max_items: Some(10),
         };
         let json = serde_json::to_string(&msg).unwrap();
         let parsed: GatewayMessage = serde_json::from_str(&json).unwrap();
@@ -548,6 +584,24 @@ mod tests {
     }
 
     #[test]
+    fn test_gateway_response_channel_outbound_batch() {
+        let resp = GatewayResponse::ChannelOutboundBatch {
+            channel: "telegram".into(),
+            account_id: "4455".into(),
+            external_user_id: "7788".into(),
+            items: vec![ChannelOutboundItem {
+                id: "evt-1".into(),
+                session_id: "sess-002".into(),
+                text: "hello outbound".into(),
+                created_at_unix_ms: 1_739_973_600_000,
+            }],
+        };
+        let json = serde_json::to_string(&resp).unwrap();
+        let parsed: GatewayResponse = serde_json::from_str(&json).unwrap();
+        assert_eq!(resp, parsed);
+    }
+
+    #[test]
     fn test_gateway_response_session_tool_result() {
         let resp = GatewayResponse::SessionToolResult {
             session_id: "sess-002".into(),
@@ -695,6 +749,7 @@ mod tests {
         assert!(client_types.contains(&"SessionResponseInterrupt".to_string()));
         assert!(client_types.contains(&"SessionPrompt".to_string()));
         assert!(client_types.contains(&"ChannelInbound".to_string()));
+        assert!(client_types.contains(&"GetChannelOutbound".to_string()));
         assert!(client_types.contains(&"SessionToolCall".to_string()));
         assert!(server_types.contains(&"Diagnostics".to_string()));
         assert!(server_types.contains(&"GatewayHealth".to_string()));
@@ -705,6 +760,7 @@ mod tests {
         assert!(server_types.contains(&"ResponseInterruptAccepted".to_string()));
         assert!(server_types.contains(&"PromptAccepted".to_string()));
         assert!(server_types.contains(&"ChannelRouted".to_string()));
+        assert!(server_types.contains(&"ChannelOutboundBatch".to_string()));
         assert!(server_types.contains(&"SessionToolResult".to_string()));
     }
 

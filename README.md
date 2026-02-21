@@ -127,6 +127,7 @@ The client now supports:
 - Dedicated M4 evidence panel for memory/artifact/resilience snapshots
 - One-click memory/artifact `read_workspace_file` probes plus live diagnostics counters in the UI
 - Channel bridge panel for `ChannelInbound` routing tests (telegram/slack/webhook keys)
+- Channel outbound poll controls for `GetChannelOutbound` validation
 
 ```bash
 cd /Users/jameskaranja/Developer/projects/liveclaw
@@ -214,6 +215,7 @@ Clients connect via WebSocket and exchange JSON messages:
 { "type": "SessionResponseInterrupt", "session_id": "..." }
 { "type": "SessionPrompt", "session_id": "...", "prompt": "Use add_numbers with a=12 and b=30", "create_response": true }
 { "type": "ChannelInbound", "channel": "slack", "account_id": "T123", "external_user_id": "U77", "text": "hello", "create_response": true }
+{ "type": "GetChannelOutbound", "channel": "slack", "account_id": "T123", "external_user_id": "U77", "max_items": 20 }
 { "type": "SessionToolCall", "session_id": "...", "tool_name": "echo_text", "arguments": {"text":"hello"} }
 { "type": "TerminateSession", "session_id": "..." }
 { "type": "GetGatewayHealth" }
@@ -230,6 +232,7 @@ Clients connect via WebSocket and exchange JSON messages:
 { "type": "ResponseInterruptAccepted", "session_id": "..." }
 { "type": "PromptAccepted", "session_id": "..." }
 { "type": "ChannelRouted", "channel": "slack", "account_id": "T123", "external_user_id": "U77", "session_id": "..." }
+{ "type": "ChannelOutboundBatch", "channel": "slack", "account_id": "T123", "external_user_id": "U77", "items": [ {"id":"...","session_id":"...","text":"...","created_at_unix_ms":0} ] }
 { "type": "SessionToolResult", "session_id": "...", "tool_name": "echo_text", "result": {"status":"ok","result":{"text":"hello","length":5}}, "graph": {"thread_id":"...","completed":true,"interrupted":false,"events":[...],"final_state":{...}} }
 { "type": "AudioOutput", "session_id": "...", "audio": "<base64>" }
 { "type": "TranscriptUpdate", "session_id": "...", "text": "...", "is_final": true }
@@ -290,6 +293,20 @@ curl -sS -X POST http://127.0.0.1:8420/channels/telegram/update \
       "chat": { "id": 4455 },
       "from": { "id": 7788 }
     }
+  }'
+```
+
+Example outbound poll (adapter delivery pull):
+
+```bash
+curl -sS -X POST http://127.0.0.1:8420/channels/outbound/poll \
+  -H "Authorization: Bearer ${LIVECLAW_TOKEN}" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "channel":"webhook",
+    "account_id":"acct-1",
+    "external_user_id":"user-1",
+    "max_items": 20
   }'
 ```
 

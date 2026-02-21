@@ -41,6 +41,7 @@ Track ADK-Rust crate/API usage for each roadmap milestone and explicitly documen
 4. No open ADK gap blockers remain for closeout phases.
 5. Channel ingress (`ChannelInbound`) now routes through authenticated gateway sessions and continues on the existing `adk-runner` + `adk-realtime` session path (no parallel runtime pipeline added).
 6. HTTP adapter endpoints (`/channels/webhook`, `/channels/slack/events`, `/channels/telegram/update`) now translate external payloads into the same authenticated `ChannelInbound` session path.
+7. Outbound channel delivery uses session-scoped final transcript events from the same gateway/runtime path and exposes retrieval through protocol-consistent adapters (`GetChannelOutbound` and `/channels/outbound/poll`).
 
 ## Open ADK Gap Log
 
