@@ -46,12 +46,49 @@ cd liveclaw
 chmod +x dev/setup.sh
 ./dev/setup.sh
 
-# Edit the config with your API key
-vim liveclaw.toml
+# Guided onboarding (interactive)
+cargo run -p liveclaw-app -- onboard
 
-# Run
-cargo run -- liveclaw.toml
+# Or non-interactive onboarding
+LIVECLAW_API_KEY=sk-... cargo run -p liveclaw-app -- onboard liveclaw.toml \
+  --non-interactive \
+  --provider-profile openai \
+  --model gpt-4o-realtime-preview-2024-12-17 \
+  --gateway-host 127.0.0.1 \
+  --gateway-port 8420 \
+  --require-pairing true
+
+# Run gateway from config
+cargo run -p liveclaw-app -- liveclaw.toml
 ```
+
+## Onboarding and Service Commands
+
+The `liveclaw-app` binary now exposes first-class onboarding and service lifecycle commands.
+
+```bash
+# Help
+cargo run -p liveclaw-app -- help
+
+# Validate config without starting the gateway
+cargo run -p liveclaw-app -- doctor liveclaw.toml
+
+# Install service from existing config
+cargo run -p liveclaw-app -- service install --config liveclaw.toml
+
+# Start/stop/restart/status
+cargo run -p liveclaw-app -- service start
+cargo run -p liveclaw-app -- service status
+cargo run -p liveclaw-app -- service restart
+cargo run -p liveclaw-app -- service stop
+
+# Uninstall service
+cargo run -p liveclaw-app -- service uninstall
+```
+
+Platform notes:
+- macOS uses user `launchd` (`~/Library/LaunchAgents/ai.liveclaw.gateway.plist`).
+- Linux uses user `systemd` (`~/.config/systemd/user/liveclaw.service`).
 
 ## Configuration
 

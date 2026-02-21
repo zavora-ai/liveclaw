@@ -192,6 +192,16 @@ Status scale: `NOT_STARTED`, `IN_PROGRESS`, `AT_RISK`, `BLOCKED`, `DONE`
 | Publish ADK delta report and closeout snapshot | DONE | `docs/adk-delta-report.md` + `docs/adk-utilization-matrix.md` |
 | Tag release-candidate milestone and archive closeout evidence | DONE | `milestone/M6` |
 
+## Sprint 17 Checklist (DONE)
+
+| Item | Status | Evidence |
+|---|---|---|
+| Add first-class onboarding command with interactive/non-interactive flows | DONE | `liveclaw-app/src/main.rs` (`onboard` parsing + `run_onboarding()` + config generation/validation) |
+| Add first-class service lifecycle command group | DONE | `liveclaw-app/src/main.rs` (`service install/start/stop/restart/status/uninstall`) |
+| Add macOS/Linux service backends without runtime assumptions | DONE | `liveclaw-app/src/main.rs` launchd plist path + systemd user unit path implementations |
+| Add parser/onboarding/service tests for new CLI surface | DONE | `tests::test_parse_onboard_args_supports_force_and_service_flags`, `tests::test_parse_service_install_args_supports_config_and_force`, `tests::test_build_onboard_config_non_interactive_openai_compatible`, `tests::test_write_onboard_config_refuses_overwrite_without_force` |
+| Update user documentation and parity comparison evidence | DONE | `README.md` onboarding/service command docs and `docs/openclaw-zeroclaw-parity-comparison.md` gap-status update |
+
 ## Closeout Phase 1 Kickoff (2026-02-21)
 
 | Item | Status | Evidence |

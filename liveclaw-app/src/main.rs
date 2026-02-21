@@ -1,7 +1,10 @@
 //! LiveClaw entry point — wires ADK-Rust realtime sessions to the gateway.
 
 use std::collections::HashMap;
-use std::process::Stdio;
+use std::fs;
+use std::io::{self, Write};
+use std::path::{Path, PathBuf};
+use std::process::{Command as StdCommand, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -2459,10 +2462,61 @@ fn effective_api_key(configured: &str) -> String {
         .unwrap_or_default()
 }
 
+const DEFAULT_CONFIG_PATH: &str = "liveclaw.toml";
+
+#[derive(Debug, Clone, PartialEq)]
+enum ServiceCommand {
+    Install { config_path: String, force: bool },
+    Start,
+    Stop,
+    Restart,
+    Status,
+    Uninstall,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct OnboardOptions {
+    config_path: String,
+    force: bool,
+    non_interactive: bool,
+    install_service: bool,
+    start_service: bool,
+    api_key: Option<String>,
+    model: Option<String>,
+    provider_profile: Option<String>,
+    base_url: Option<String>,
+    gateway_host: Option<String>,
+    gateway_port: Option<u16>,
+    require_pairing: Option<bool>,
+}
+
+impl Default for OnboardOptions {
+    fn default() -> Self {
+        Self {
+            config_path: DEFAULT_CONFIG_PATH.to_string(),
+            force: false,
+            non_interactive: false,
+            install_service: false,
+            start_service: false,
+            api_key: None,
+            model: None,
+            provider_profile: None,
+            base_url: None,
+            gateway_host: None,
+            gateway_port: None,
+            require_pairing: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
 enum AppCommand {
     Run { config_path: String },
     Doctor { config_path: String },
     RuntimeWorker,
+    Onboard(OnboardOptions),
+    Service(ServiceCommand),
+    Help,
 }
 
 #[derive(Debug, Default)]
@@ -2471,17 +2525,218 @@ struct DoctorReport {
     warnings: Vec<String>,
 }
 
-fn parse_command() -> AppCommand {
-    let mut args = std::env::args().skip(1);
-    match args.next() {
-        Some(flag) if flag == "--runtime-worker" => AppCommand::RuntimeWorker,
-        Some(flag) if flag == "--doctor" => AppCommand::Doctor {
-            config_path: args.next().unwrap_or_else(|| "liveclaw.toml".to_string()),
-        },
-        Some(config_path) => AppCommand::Run { config_path },
-        None => AppCommand::Run {
-            config_path: "liveclaw.toml".to_string(),
-        },
+fn cli_usage() -> &'static str {
+    "Usage:
+  liveclaw-app [CONFIG_PATH]
+  liveclaw-app --doctor [CONFIG_PATH]
+  liveclaw-app doctor [CONFIG_PATH]
+  liveclaw-app onboard [CONFIG_PATH] [--force] [--non-interactive]
+      [--api-key KEY] [--model MODEL]
+      [--provider-profile legacy|openai|openai_compatible]
+      [--base-url WS_URL]
+      [--gateway-host HOST] [--gateway-port PORT]
+      [--require-pairing true|false | --no-pairing]
+      [--install-service] [--start-service]
+  liveclaw-app service install [--config CONFIG_PATH] [--force]
+  liveclaw-app service start|stop|restart|status|uninstall
+  liveclaw-app --runtime-worker
+"
+}
+
+fn parse_bool_flag(raw: &str, flag_name: &str) -> Result<bool> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "true" | "1" | "yes" | "y" | "on" => Ok(true),
+        "false" | "0" | "no" | "n" | "off" => Ok(false),
+        _ => bail!(
+            "Invalid value '{}' for {} (expected true/false)",
+            raw,
+            flag_name
+        ),
+    }
+}
+
+fn parse_onboard_args(args: &[String]) -> Result<AppCommand> {
+    let mut opts = OnboardOptions::default();
+    let mut idx = 0;
+    let mut config_set = false;
+
+    while idx < args.len() {
+        let arg = &args[idx];
+        match arg.as_str() {
+            "--force" => {
+                opts.force = true;
+                idx += 1;
+            }
+            "--non-interactive" => {
+                opts.non_interactive = true;
+                idx += 1;
+            }
+            "--install-service" => {
+                opts.install_service = true;
+                idx += 1;
+            }
+            "--start-service" => {
+                opts.start_service = true;
+                opts.install_service = true;
+                idx += 1;
+            }
+            "--no-pairing" => {
+                opts.require_pairing = Some(false);
+                idx += 1;
+            }
+            "--config" => {
+                let value = args
+                    .get(idx + 1)
+                    .ok_or_else(|| anyhow::anyhow!("--config requires a path"))?;
+                opts.config_path = value.clone();
+                config_set = true;
+                idx += 2;
+            }
+            "--api-key" => {
+                let value = args
+                    .get(idx + 1)
+                    .ok_or_else(|| anyhow::anyhow!("--api-key requires a value"))?;
+                opts.api_key = Some(value.clone());
+                idx += 2;
+            }
+            "--model" => {
+                let value = args
+                    .get(idx + 1)
+                    .ok_or_else(|| anyhow::anyhow!("--model requires a value"))?;
+                opts.model = Some(value.clone());
+                idx += 2;
+            }
+            "--provider-profile" => {
+                let value = args
+                    .get(idx + 1)
+                    .ok_or_else(|| anyhow::anyhow!("--provider-profile requires a value"))?;
+                opts.provider_profile = Some(value.clone());
+                idx += 2;
+            }
+            "--base-url" => {
+                let value = args
+                    .get(idx + 1)
+                    .ok_or_else(|| anyhow::anyhow!("--base-url requires a value"))?;
+                opts.base_url = Some(value.clone());
+                idx += 2;
+            }
+            "--gateway-host" => {
+                let value = args
+                    .get(idx + 1)
+                    .ok_or_else(|| anyhow::anyhow!("--gateway-host requires a value"))?;
+                opts.gateway_host = Some(value.clone());
+                idx += 2;
+            }
+            "--gateway-port" => {
+                let value = args
+                    .get(idx + 1)
+                    .ok_or_else(|| anyhow::anyhow!("--gateway-port requires a value"))?;
+                let port = value
+                    .parse::<u16>()
+                    .map_err(|e| anyhow::anyhow!("Invalid --gateway-port '{}': {}", value, e))?;
+                opts.gateway_port = Some(port);
+                idx += 2;
+            }
+            "--require-pairing" => {
+                let value = args
+                    .get(idx + 1)
+                    .ok_or_else(|| anyhow::anyhow!("--require-pairing requires true/false"))?;
+                opts.require_pairing = Some(parse_bool_flag(value, "--require-pairing")?);
+                idx += 2;
+            }
+            _ if arg.starts_with('-') => {
+                bail!("Unknown onboard option '{}'\n{}", arg, cli_usage());
+            }
+            _ => {
+                if config_set {
+                    bail!(
+                        "Unexpected positional argument '{}' for onboard\n{}",
+                        arg,
+                        cli_usage()
+                    );
+                }
+                opts.config_path = arg.clone();
+                config_set = true;
+                idx += 1;
+            }
+        }
+    }
+
+    Ok(AppCommand::Onboard(opts))
+}
+
+fn parse_service_args(args: &[String]) -> Result<AppCommand> {
+    let action = args
+        .first()
+        .ok_or_else(|| anyhow::anyhow!("service requires a subcommand\n{}", cli_usage()))?;
+
+    match action.as_str() {
+        "install" => {
+            let mut config_path = DEFAULT_CONFIG_PATH.to_string();
+            let mut force = false;
+            let mut idx = 1;
+            while idx < args.len() {
+                match args[idx].as_str() {
+                    "--config" => {
+                        let value = args.get(idx + 1).ok_or_else(|| {
+                            anyhow::anyhow!("service install --config requires a path")
+                        })?;
+                        config_path = value.clone();
+                        idx += 2;
+                    }
+                    "--force" => {
+                        force = true;
+                        idx += 1;
+                    }
+                    other => {
+                        bail!(
+                            "Unknown service install option '{}'\n{}",
+                            other,
+                            cli_usage()
+                        );
+                    }
+                }
+            }
+            Ok(AppCommand::Service(ServiceCommand::Install {
+                config_path,
+                force,
+            }))
+        }
+        "start" => Ok(AppCommand::Service(ServiceCommand::Start)),
+        "stop" => Ok(AppCommand::Service(ServiceCommand::Stop)),
+        "restart" => Ok(AppCommand::Service(ServiceCommand::Restart)),
+        "status" => Ok(AppCommand::Service(ServiceCommand::Status)),
+        "uninstall" => Ok(AppCommand::Service(ServiceCommand::Uninstall)),
+        other => bail!("Unknown service subcommand '{}'\n{}", other, cli_usage()),
+    }
+}
+
+fn parse_command() -> Result<AppCommand> {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.is_empty() {
+        return Ok(AppCommand::Run {
+            config_path: DEFAULT_CONFIG_PATH.to_string(),
+        });
+    }
+
+    let first = &args[0];
+    match first.as_str() {
+        "--runtime-worker" => Ok(AppCommand::RuntimeWorker),
+        "--doctor" | "doctor" => Ok(AppCommand::Doctor {
+            config_path: args
+                .get(1)
+                .cloned()
+                .unwrap_or_else(|| DEFAULT_CONFIG_PATH.to_string()),
+        }),
+        "onboard" | "--onboard" => parse_onboard_args(&args[1..]),
+        "service" => parse_service_args(&args[1..]),
+        "--help" | "-h" | "help" => Ok(AppCommand::Help),
+        _ if first.starts_with('-') => {
+            bail!("Unknown option '{}'\n{}", first, cli_usage())
+        }
+        _ => Ok(AppCommand::Run {
+            config_path: first.clone(),
+        }),
     }
 }
 
@@ -2704,6 +2959,622 @@ fn print_doctor_report(config_path: &str, provider: &ProviderSelection, report: 
     }
 }
 
+fn home_dir() -> Result<PathBuf> {
+    if let Ok(home) = std::env::var("HOME") {
+        let trimmed = home.trim();
+        if !trimmed.is_empty() {
+            return Ok(PathBuf::from(trimmed));
+        }
+    }
+    if let Ok(home) = std::env::var("USERPROFILE") {
+        let trimmed = home.trim();
+        if !trimmed.is_empty() {
+            return Ok(PathBuf::from(trimmed));
+        }
+    }
+    bail!("Unable to resolve home directory from HOME/USERPROFILE")
+}
+
+fn normalize_provider_profile(raw: &str) -> Result<String> {
+    let normalized = raw.trim().to_ascii_lowercase().replace('-', "_");
+    match normalized.as_str() {
+        "legacy" | "openai" | "openai_compatible" => Ok(normalized),
+        _ => bail!(
+            "Unsupported provider profile '{}'. Use legacy, openai, or openai_compatible.",
+            raw
+        ),
+    }
+}
+
+fn prompt_text(prompt: &str, default: Option<&str>, required: bool) -> Result<String> {
+    loop {
+        match default {
+            Some(value) => print!("{} [{}]: ", prompt, value),
+            None => print!("{}: ", prompt),
+        }
+        io::stdout()
+            .flush()
+            .context("Failed to flush prompt to stdout")?;
+
+        let mut line = String::new();
+        io::stdin()
+            .read_line(&mut line)
+            .context("Failed to read onboarding input")?;
+        let trimmed = line.trim();
+
+        if trimmed.is_empty() {
+            if let Some(value) = default {
+                return Ok(value.to_string());
+            }
+            if required {
+                println!("Value is required.");
+                continue;
+            }
+            return Ok(String::new());
+        }
+
+        return Ok(trimmed.to_string());
+    }
+}
+
+fn prompt_bool(prompt: &str, default: bool) -> Result<bool> {
+    let default_text = if default { "yes" } else { "no" };
+    loop {
+        let value = prompt_text(prompt, Some(default_text), false)?;
+        match value.trim().to_ascii_lowercase().as_str() {
+            "yes" | "y" | "true" | "1" | "on" => return Ok(true),
+            "no" | "n" | "false" | "0" | "off" => return Ok(false),
+            _ => println!("Please enter yes or no."),
+        }
+    }
+}
+
+fn prompt_u16(prompt: &str, default: u16) -> Result<u16> {
+    loop {
+        let value = prompt_text(prompt, Some(&default.to_string()), true)?;
+        match value.parse::<u16>() {
+            Ok(port) => return Ok(port),
+            Err(_) => println!("Please enter a valid port number (0-65535)."),
+        }
+    }
+}
+
+fn build_onboard_config(opts: &OnboardOptions) -> Result<LiveClawConfig> {
+    let mut config = LiveClawConfig::default();
+
+    let provider_profile = if let Some(profile) = &opts.provider_profile {
+        normalize_provider_profile(profile)?
+    } else if opts.non_interactive {
+        "legacy".to_string()
+    } else {
+        normalize_provider_profile(&prompt_text(
+            "Provider profile (legacy/openai/openai_compatible)",
+            Some("legacy"),
+            true,
+        )?)?
+    };
+
+    let api_key = if let Some(key) = &opts.api_key {
+        let trimmed = key.trim();
+        if trimmed.is_empty() {
+            bail!("--api-key cannot be empty");
+        }
+        trimmed.to_string()
+    } else {
+        let env_key = effective_api_key("");
+        if !env_key.trim().is_empty() {
+            env_key
+        } else if opts.non_interactive {
+            bail!(
+                "Missing API key for non-interactive onboarding. Provide --api-key or set LIVECLAW_API_KEY/OPENAI_API_KEY."
+            );
+        } else {
+            let entered = prompt_text(
+                "Realtime API key (input is echoed; prefer env vars in shared terminals)",
+                None,
+                true,
+            )?;
+            if entered.trim().is_empty() {
+                bail!("API key is required");
+            }
+            entered
+        }
+    };
+
+    let default_model = "gpt-4o-realtime-preview-2024-12-17";
+    let model = if let Some(model) = &opts.model {
+        let trimmed = model.trim();
+        if trimmed.is_empty() {
+            bail!("--model cannot be empty");
+        }
+        trimmed.to_string()
+    } else if opts.non_interactive {
+        default_model.to_string()
+    } else {
+        prompt_text("Realtime model", Some(default_model), true)?
+    };
+
+    let gateway_host = if let Some(host) = &opts.gateway_host {
+        let trimmed = host.trim();
+        if trimmed.is_empty() {
+            bail!("--gateway-host cannot be empty");
+        }
+        trimmed.to_string()
+    } else if opts.non_interactive {
+        config.gateway.host.clone()
+    } else {
+        prompt_text("Gateway host", Some(&config.gateway.host), true)?
+    };
+
+    let gateway_port = if let Some(port) = opts.gateway_port {
+        port
+    } else if opts.non_interactive {
+        config.gateway.port
+    } else {
+        prompt_u16("Gateway port", config.gateway.port)?
+    };
+
+    let require_pairing = if let Some(require_pairing) = opts.require_pairing {
+        require_pairing
+    } else if opts.non_interactive {
+        config.gateway.require_pairing
+    } else {
+        prompt_bool(
+            "Require pairing for gateway connections",
+            config.gateway.require_pairing,
+        )?
+    };
+
+    let profile_base_url = if provider_profile == "openai_compatible" {
+        if let Some(base_url) = &opts.base_url {
+            let trimmed = base_url.trim();
+            if trimmed.is_empty() {
+                bail!("--base-url cannot be empty for openai_compatible profile");
+            }
+            validate_ws_base_url(trimmed, "openai_compatible")?;
+            Some(trimmed.to_string())
+        } else if opts.non_interactive {
+            bail!("openai_compatible profile requires --base-url in non-interactive onboarding");
+        } else {
+            let entered = prompt_text(
+                "OpenAI-compatible realtime WebSocket base URL (ws:// or wss://)",
+                None,
+                true,
+            )?;
+            validate_ws_base_url(&entered, "openai_compatible")?;
+            Some(entered)
+        }
+    } else {
+        opts.base_url
+            .as_ref()
+            .and_then(|v| non_empty(Some(v.clone())))
+    };
+
+    config.gateway.host = gateway_host;
+    config.gateway.port = gateway_port;
+    config.gateway.require_pairing = require_pairing;
+    config.voice.model = model.clone();
+    config.voice.api_key = api_key.clone();
+    config.providers.active_profile = provider_profile.clone();
+
+    match provider_profile.as_str() {
+        "legacy" => {
+            config.voice.provider = if profile_base_url.is_some() {
+                "openai_compatible".to_string()
+            } else {
+                "openai".to_string()
+            };
+            config.voice.base_url = profile_base_url.clone();
+        }
+        "openai" => {
+            config.voice.provider = "openai".to_string();
+            config.providers.openai.enabled = true;
+            config.providers.openai.api_key = api_key;
+            config.providers.openai.model = model;
+            config.providers.openai.base_url = profile_base_url.clone();
+        }
+        "openai_compatible" => {
+            config.voice.provider = "openai_compatible".to_string();
+            config.providers.openai_compatible.enabled = true;
+            config.providers.openai_compatible.api_key = api_key;
+            config.providers.openai_compatible.model = model;
+            config.providers.openai_compatible.base_url = profile_base_url;
+        }
+        _ => unreachable!("profile normalized"),
+    }
+
+    Ok(config)
+}
+
+fn write_onboard_config(path: &str, config: &LiveClawConfig, force: bool) -> Result<()> {
+    let target = PathBuf::from(path);
+    if target.exists() && !force {
+        bail!(
+            "Refusing to overwrite existing config '{}'. Re-run with --force to overwrite.",
+            path
+        );
+    }
+    if let Some(parent) = target.parent() {
+        if !parent.as_os_str().is_empty() {
+            fs::create_dir_all(parent).with_context(|| {
+                format!(
+                    "Failed to create parent directory '{}'",
+                    parent.to_string_lossy()
+                )
+            })?;
+        }
+    }
+    let serialized =
+        toml::to_string_pretty(config).context("Failed to serialize onboarding configuration")?;
+    fs::write(&target, serialized).with_context(|| {
+        format!(
+            "Failed to write onboarding configuration to '{}'",
+            target.to_string_lossy()
+        )
+    })?;
+    Ok(())
+}
+
+fn run_onboarding(opts: OnboardOptions) -> Result<()> {
+    println!("LiveClaw onboarding");
+    let config = build_onboard_config(&opts)?;
+    write_onboard_config(&opts.config_path, &config, opts.force)?;
+
+    let loaded = LiveClawConfig::load(&opts.config_path)?;
+    let (provider, report) = validate_runtime_and_provider(&loaded, true)?;
+
+    println!("Wrote config: {}", opts.config_path);
+    print_doctor_report(&opts.config_path, &provider, &report);
+
+    if opts.install_service {
+        run_service_command(ServiceCommand::Install {
+            config_path: opts.config_path.clone(),
+            force: opts.force,
+        })?;
+        if opts.start_service {
+            run_service_command(ServiceCommand::Start)?;
+        }
+    }
+
+    println!(
+        "Next step: cargo run -p liveclaw-app -- {}",
+        opts.config_path
+    );
+    Ok(())
+}
+
+fn run_command_capture(mut cmd: StdCommand, context: &str) -> Result<String> {
+    let output = cmd
+        .output()
+        .with_context(|| format!("Failed to execute {}", context))?;
+    if !output.status.success() {
+        bail!(
+            "{} failed (exit={}): {}{}",
+            context,
+            output.status.code().unwrap_or(-1),
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+#[cfg(target_os = "macos")]
+fn service_manifest_path() -> Result<PathBuf> {
+    let home = home_dir()?;
+    Ok(home
+        .join("Library")
+        .join("LaunchAgents")
+        .join("ai.liveclaw.gateway.plist"))
+}
+
+#[cfg(target_os = "linux")]
+fn service_manifest_path() -> Result<PathBuf> {
+    let home = home_dir()?;
+    Ok(home
+        .join(".config")
+        .join("systemd")
+        .join("user")
+        .join("liveclaw.service"))
+}
+
+fn service_manifest_missing(path: &Path) -> Result<()> {
+    if !path.exists() {
+        bail!(
+            "LiveClaw service is not installed (missing '{}')",
+            path.to_string_lossy()
+        );
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn run_service_command(command: ServiceCommand) -> Result<()> {
+    let manifest = service_manifest_path()?;
+    let label = "ai.liveclaw.gateway";
+
+    match command {
+        ServiceCommand::Install { config_path, force } => {
+            let config = PathBuf::from(&config_path);
+            if !config.exists() {
+                bail!(
+                    "Config '{}' does not exist. Run onboarding first.",
+                    config_path
+                );
+            }
+            if manifest.exists() && !force {
+                bail!(
+                    "Service manifest '{}' already exists. Use --force to overwrite.",
+                    manifest.to_string_lossy()
+                );
+            }
+
+            let exe = std::env::current_exe().context("Failed to resolve current executable")?;
+            let parent = manifest.parent().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Invalid service manifest path '{}'",
+                    manifest.to_string_lossy()
+                )
+            })?;
+            fs::create_dir_all(parent)?;
+
+            let logs_dir = home_dir()?.join(".liveclaw").join("logs");
+            fs::create_dir_all(&logs_dir)?;
+            let stdout_path = logs_dir.join("service.out.log");
+            let stderr_path = logs_dir.join("service.err.log");
+
+            let plist = format!(
+                r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>{label}</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>{exe}</string>
+    <string>{cfg}</string>
+  </array>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>StandardOutPath</key>
+  <string>{stdout}</string>
+  <key>StandardErrorPath</key>
+  <string>{stderr}</string>
+</dict>
+</plist>
+"#,
+                label = label,
+                exe = exe.to_string_lossy(),
+                cfg = config.to_string_lossy(),
+                stdout = stdout_path.to_string_lossy(),
+                stderr = stderr_path.to_string_lossy()
+            );
+
+            fs::write(&manifest, plist).with_context(|| {
+                format!(
+                    "Failed writing launchd plist '{}'",
+                    manifest.to_string_lossy()
+                )
+            })?;
+            println!("Installed launchd manifest: {}", manifest.to_string_lossy());
+        }
+        ServiceCommand::Start => {
+            service_manifest_missing(&manifest)?;
+            run_command_capture(
+                {
+                    let mut cmd = StdCommand::new("launchctl");
+                    cmd.arg("load").arg("-w").arg(&manifest);
+                    cmd
+                },
+                "launchctl load",
+            )?;
+            println!("LiveClaw service started.");
+        }
+        ServiceCommand::Stop => {
+            service_manifest_missing(&manifest)?;
+            run_command_capture(
+                {
+                    let mut cmd = StdCommand::new("launchctl");
+                    cmd.arg("unload").arg("-w").arg(&manifest);
+                    cmd
+                },
+                "launchctl unload",
+            )?;
+            println!("LiveClaw service stopped.");
+        }
+        ServiceCommand::Restart => {
+            run_service_command(ServiceCommand::Stop)?;
+            run_service_command(ServiceCommand::Start)?;
+        }
+        ServiceCommand::Status => {
+            if !manifest.exists() {
+                println!("LiveClaw service status: not installed");
+                return Ok(());
+            }
+            let list = run_command_capture(
+                {
+                    let mut cmd = StdCommand::new("launchctl");
+                    cmd.arg("list");
+                    cmd
+                },
+                "launchctl list",
+            )?;
+            let active = list.lines().any(|line| line.contains(label));
+            println!(
+                "LiveClaw service status: {}",
+                if active { "active" } else { "inactive" }
+            );
+        }
+        ServiceCommand::Uninstall => {
+            if manifest.exists() {
+                let _ = run_service_command(ServiceCommand::Stop);
+                fs::remove_file(&manifest).with_context(|| {
+                    format!(
+                        "Failed to remove launchd plist '{}'",
+                        manifest.to_string_lossy()
+                    )
+                })?;
+                println!("Removed launchd manifest: {}", manifest.to_string_lossy());
+            } else {
+                println!("LiveClaw service not installed.");
+            }
+        }
+    }
+
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn systemd_quote(input: &str) -> String {
+    let escaped = input.replace('\\', "\\\\").replace('"', "\\\"");
+    format!("\"{}\"", escaped)
+}
+
+#[cfg(target_os = "linux")]
+fn run_service_command(command: ServiceCommand) -> Result<()> {
+    let manifest = service_manifest_path()?;
+    let unit_name = "liveclaw.service";
+
+    match command {
+        ServiceCommand::Install { config_path, force } => {
+            let config = PathBuf::from(&config_path);
+            if !config.exists() {
+                bail!(
+                    "Config '{}' does not exist. Run onboarding first.",
+                    config_path
+                );
+            }
+            if manifest.exists() && !force {
+                bail!(
+                    "Service manifest '{}' already exists. Use --force to overwrite.",
+                    manifest.to_string_lossy()
+                );
+            }
+            let exe = std::env::current_exe().context("Failed to resolve current executable")?;
+            let parent = manifest.parent().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Invalid service manifest path '{}'",
+                    manifest.to_string_lossy()
+                )
+            })?;
+            fs::create_dir_all(parent)?;
+
+            let unit = format!(
+                "[Unit]\nDescription=LiveClaw gateway runtime\nAfter=network-online.target\n\n[Service]\nType=simple\nExecStart={} {}\nRestart=always\nRestartSec=2\nEnvironment=RUST_LOG=info\n\n[Install]\nWantedBy=default.target\n",
+                systemd_quote(&exe.to_string_lossy()),
+                systemd_quote(&config.to_string_lossy())
+            );
+            fs::write(&manifest, unit).with_context(|| {
+                format!(
+                    "Failed writing systemd unit '{}'",
+                    manifest.to_string_lossy()
+                )
+            })?;
+
+            run_command_capture(
+                {
+                    let mut cmd = StdCommand::new("systemctl");
+                    cmd.arg("--user").arg("daemon-reload");
+                    cmd
+                },
+                "systemctl --user daemon-reload",
+            )?;
+
+            println!(
+                "Installed systemd user unit: {}",
+                manifest.to_string_lossy()
+            );
+        }
+        ServiceCommand::Start => {
+            service_manifest_missing(&manifest)?;
+            run_command_capture(
+                {
+                    let mut cmd = StdCommand::new("systemctl");
+                    cmd.arg("--user").arg("start").arg(unit_name);
+                    cmd
+                },
+                "systemctl --user start",
+            )?;
+            println!("LiveClaw service started.");
+        }
+        ServiceCommand::Stop => {
+            service_manifest_missing(&manifest)?;
+            run_command_capture(
+                {
+                    let mut cmd = StdCommand::new("systemctl");
+                    cmd.arg("--user").arg("stop").arg(unit_name);
+                    cmd
+                },
+                "systemctl --user stop",
+            )?;
+            println!("LiveClaw service stopped.");
+        }
+        ServiceCommand::Restart => {
+            service_manifest_missing(&manifest)?;
+            run_command_capture(
+                {
+                    let mut cmd = StdCommand::new("systemctl");
+                    cmd.arg("--user").arg("restart").arg(unit_name);
+                    cmd
+                },
+                "systemctl --user restart",
+            )?;
+            println!("LiveClaw service restarted.");
+        }
+        ServiceCommand::Status => {
+            if !manifest.exists() {
+                println!("LiveClaw service status: not installed");
+                return Ok(());
+            }
+
+            let status = StdCommand::new("systemctl")
+                .arg("--user")
+                .arg("is-active")
+                .arg(unit_name)
+                .output()
+                .context("Failed to execute systemctl --user is-active")?;
+            let active = status.status.success()
+                && String::from_utf8_lossy(&status.stdout).trim().eq("active");
+            println!(
+                "LiveClaw service status: {}",
+                if active { "active" } else { "inactive" }
+            );
+        }
+        ServiceCommand::Uninstall => {
+            if manifest.exists() {
+                let _ = run_service_command(ServiceCommand::Stop);
+                fs::remove_file(&manifest).with_context(|| {
+                    format!(
+                        "Failed to remove systemd unit '{}'",
+                        manifest.to_string_lossy()
+                    )
+                })?;
+                let _ = run_command_capture(
+                    {
+                        let mut cmd = StdCommand::new("systemctl");
+                        cmd.arg("--user").arg("daemon-reload");
+                        cmd
+                    },
+                    "systemctl --user daemon-reload",
+                );
+                println!("Removed systemd user unit: {}", manifest.to_string_lossy());
+            } else {
+                println!("LiveClaw service not installed.");
+            }
+        }
+    }
+
+    Ok(())
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn run_service_command(_command: ServiceCommand) -> Result<()> {
+    bail!("Service management is currently supported on macOS and Linux only")
+}
+
 fn required_env(name: &str) -> Result<String> {
     std::env::var(name).with_context(|| format!("Missing required environment variable {}", name))
 }
@@ -2879,13 +3750,22 @@ fn base64_encode(input: &[u8]) -> String {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let command = parse_command();
-    if matches!(command, AppCommand::RuntimeWorker) {
-        return run_docker_runtime_worker().await;
+    let command = parse_command()?;
+    match &command {
+        AppCommand::RuntimeWorker => return run_docker_runtime_worker().await,
+        AppCommand::Help => {
+            print!("{}", cli_usage());
+            return Ok(());
+        }
+        AppCommand::Onboard(opts) => return run_onboarding(opts.clone()),
+        AppCommand::Service(service_command) => {
+            return run_service_command(service_command.clone())
+        }
+        AppCommand::Run { .. } | AppCommand::Doctor { .. } => {}
     }
     let config_path = match &command {
         AppCommand::Run { config_path } | AppCommand::Doctor { config_path } => config_path,
-        AppCommand::RuntimeWorker => unreachable!("runtime worker handled above"),
+        _ => unreachable!("command dispatch handled above"),
     };
 
     let config = LiveClawConfig::load(config_path)?;
@@ -3951,5 +4831,120 @@ mod tests {
             "expected base URL env argument in docker run args: {:?}",
             args
         );
+    }
+
+    #[test]
+    fn test_parse_onboard_args_supports_force_and_service_flags() {
+        let args = vec![
+            "config/liveclaw.toml".to_string(),
+            "--force".to_string(),
+            "--install-service".to_string(),
+            "--start-service".to_string(),
+            "--gateway-port".to_string(),
+            "9001".to_string(),
+            "--no-pairing".to_string(),
+        ];
+
+        let command = parse_onboard_args(&args).unwrap();
+        let AppCommand::Onboard(opts) = command else {
+            panic!("expected onboard command");
+        };
+        assert_eq!(opts.config_path, "config/liveclaw.toml");
+        assert!(opts.force);
+        assert!(opts.install_service);
+        assert!(opts.start_service);
+        assert_eq!(opts.gateway_port, Some(9001));
+        assert_eq!(opts.require_pairing, Some(false));
+    }
+
+    #[test]
+    fn test_parse_service_install_args_supports_config_and_force() {
+        let args = vec![
+            "install".to_string(),
+            "--config".to_string(),
+            "liveclaw.toml".to_string(),
+            "--force".to_string(),
+        ];
+
+        let command = parse_service_args(&args).unwrap();
+        assert_eq!(
+            command,
+            AppCommand::Service(ServiceCommand::Install {
+                config_path: "liveclaw.toml".to_string(),
+                force: true
+            })
+        );
+    }
+
+    #[test]
+    fn test_build_onboard_config_non_interactive_requires_api_key() {
+        let opts = OnboardOptions {
+            non_interactive: true,
+            ..OnboardOptions::default()
+        };
+        let previous_liveclaw_key = std::env::var("LIVECLAW_API_KEY").ok();
+        let previous_openai_key = std::env::var("OPENAI_API_KEY").ok();
+        std::env::remove_var("LIVECLAW_API_KEY");
+        std::env::remove_var("OPENAI_API_KEY");
+
+        let result = build_onboard_config(&opts);
+
+        match previous_liveclaw_key {
+            Some(value) => std::env::set_var("LIVECLAW_API_KEY", value),
+            None => std::env::remove_var("LIVECLAW_API_KEY"),
+        }
+        match previous_openai_key {
+            Some(value) => std::env::set_var("OPENAI_API_KEY", value),
+            None => std::env::remove_var("OPENAI_API_KEY"),
+        }
+
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Missing API key"));
+    }
+
+    #[test]
+    fn test_build_onboard_config_non_interactive_openai_compatible() {
+        let opts = OnboardOptions {
+            non_interactive: true,
+            api_key: Some("compat-key".to_string()),
+            model: Some("gpt-4o-realtime-preview-2024-12-17".to_string()),
+            provider_profile: Some("openai_compatible".to_string()),
+            base_url: Some("wss://compat.example/v1/realtime".to_string()),
+            gateway_host: Some("127.0.0.1".to_string()),
+            gateway_port: Some(8420),
+            require_pairing: Some(true),
+            ..OnboardOptions::default()
+        };
+
+        let config = build_onboard_config(&opts).unwrap();
+        assert_eq!(config.providers.active_profile, "openai_compatible");
+        assert!(config.providers.openai_compatible.enabled);
+        assert_eq!(
+            config.providers.openai_compatible.base_url.as_deref(),
+            Some("wss://compat.example/v1/realtime")
+        );
+        assert_eq!(config.voice.provider, "openai_compatible");
+    }
+
+    #[test]
+    fn test_write_onboard_config_refuses_overwrite_without_force() {
+        let path = std::env::temp_dir().join(format!(
+            "liveclaw-onboard-write-{}-{}.toml",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+
+        let config = LiveClawConfig::default();
+        write_onboard_config(path.to_str().unwrap(), &config, true).unwrap();
+        let result = write_onboard_config(path.to_str().unwrap(), &config, false);
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Refusing to overwrite"));
+        let _ = std::fs::remove_file(path);
     }
 }

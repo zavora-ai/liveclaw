@@ -36,10 +36,10 @@ Status legend:
 | Dimension | LiveClaw | OpenClaw | ZeroClaw |
 |---|---|---|---|
 | Primary install path | `cargo` workspace setup with ADK-Rust sibling + `dev/setup.sh` | install script or npm/pnpm global install (`openclaw`) | Homebrew/bootstrap/cargo install paths |
-| First-time onboarding UX | Manual config (`liveclaw.toml`) + WS pairing flow | Strong guided onboarding (`openclaw onboard`, macOS app onboarding) | Guided onboarding (`zeroclaw onboard --interactive` and quick onboarding flags) |
+| First-time onboarding UX | Guided onboarding via `liveclaw-app onboard` (interactive/non-interactive) with config validation + optional service install/start | Strong guided onboarding (`openclaw onboard`, macOS app onboarding) | Guided onboarding (`zeroclaw onboard --interactive` and quick onboarding flags) |
 | First run command | `cargo run -p liveclaw-app -- liveclaw.toml` | `openclaw onboard --install-daemon`, then `openclaw dashboard`/`openclaw gateway` | `zeroclaw onboard ...`, then `zeroclaw daemon` or `zeroclaw gateway` |
 | Foreground runtime mode | Full | Full | Full |
-| Background service mode | Partial (not a first-class `service` CLI path) | Full (`--install-daemon`) | Full (`zeroclaw service ...`) |
+| Background service mode | Full (`service install/start/stop/restart/status/uninstall` with macOS launchd and Linux systemd user units) | Full (`--install-daemon`) | Full (`zeroclaw service ...`) |
 | Health and diagnostics | Full (`GetGatewayHealth`, `GetDiagnostics`, `--doctor`) | Full (`openclaw health`, doctor docs) | Full (`zeroclaw status`, `doctor`, `channel doctor`) |
 | Client/operator UI | Browser WS client (`scripts/ws_client.sh`) focused on gateway protocol operations | Full dashboard/control UI + app surfaces | Primarily CLI/operator docs; UI not primary |
 | Auth bootstrapping | Pairing code -> token -> `Authenticate` | Wizard/app onboarding + pairing/allowlists | Pairing and bearer token model documented |
@@ -51,8 +51,8 @@ Status legend:
 | # | Common User Use Case | LiveClaw | OpenClaw | ZeroClaw | Evidence Notes |
 |---|---|---|---|---|---|
 | 1 | Install from scratch on macOS/Linux | Partial | Full | Full | LiveClaw currently assumes Rust + ADK sibling workflow; OpenClaw and ZeroClaw provide clearer turnkey install paths |
-| 2 | Guided onboarding wizard | Gap | Full | Full | LiveClaw is config + client guided; OpenClaw/ZeroClaw expose explicit onboarding commands |
-| 3 | Start long-running background service | Partial | Full | Full | OpenClaw daemon install and ZeroClaw service lifecycle are explicit |
+| 2 | Guided onboarding wizard | Full | Full | Full | LiveClaw now provides `onboard` with interactive/non-interactive flows, config generation, validation, and optional service wiring |
+| 3 | Start long-running background service | Full | Full | Full | LiveClaw now provides first-class `service` command group for lifecycle operations |
 | 4 | Check health/status quickly | Full | Full | Full | All three have operator-visible health/diagnostic flow |
 | 5 | Pair and authenticate a client securely | Full | Full | Full | LiveClaw: `Pair` + token + `Authenticate`; OpenClaw/ZeroClaw have pairing + allowlist/token models |
 | 6 | Create and manage isolated sessions | Full | Full | Partial | LiveClaw and OpenClaw have explicit session-oriented control planes; ZeroClaw is strong but session API details are less explicit in pulled docs |
@@ -82,18 +82,15 @@ Status legend:
 
 ### Main parity gaps versus OpenClaw + ZeroClaw
 
-1. Onboarding UX gap: no single guided onboarding wizard for first-time users.
-2. Packaging/operations gap: no first-class service-management CLI equivalent to `openclaw --install-daemon` or `zeroclaw service ...`.
-3. User-facing product surfaces gap: OpenClaw has richer end-user app/dashboard experience out of the box.
-4. Channel breadth gap: LiveClaw currently focuses on priority channels and protocol surfaces rather than broad channel ecosystem breadth.
+1. User-facing product surfaces gap: OpenClaw has richer end-user app/dashboard experience out of the box.
+2. Channel breadth gap: LiveClaw currently focuses on priority channels and protocol surfaces rather than broad channel ecosystem breadth.
 
 ## 4) Recommended Closure Order (Pragmatic)
 
-1. `P0` Onboarding wizard for LiveClaw (`liveclaw onboard`) with config generation + pairing bootstrap + health verification.
-2. `P0` Service lifecycle commands (`liveclaw service install/start/stop/status`) for predictable operator flow.
-3. `P1` UX unification: promote WS client as first-class control UI with guided tasks and saved environment profiles.
-4. `P1` Channel breadth expansion based on actual user demand sequence (after onboarding/service foundations are done).
+1. `P0` UX unification: promote WS client as first-class control UI with guided tasks and saved environment profiles.
+2. `P1` Channel breadth expansion based on actual user demand sequence.
+3. `P1` Operator ergonomics follow-up: add service log-tail and diagnostics shortcuts under `service` command group.
 
 ## 5) Bottom Line
 
-LiveClaw is strong on core runtime correctness (voice, tools, memory, resilience, security) and is close to deep technical parity for prioritized scenarios. The largest remaining parity deltas are productized onboarding/service UX and ecosystem breadth rather than core runtime capability.
+LiveClaw is strong on core runtime correctness (voice, tools, memory, resilience, security) and now closes the onboarding + service-management CLI gaps. The largest remaining parity deltas are richer end-user UX surfaces and broader channel ecosystem breadth.
