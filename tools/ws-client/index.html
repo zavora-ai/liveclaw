@@ -767,6 +767,7 @@
           paired: false,
           authenticated: false,
           sessionReady: false,
+          readySessionId: "",
         };
 
         const micState = {
@@ -829,6 +830,7 @@
           flowState.paired = false;
           flowState.authenticated = false;
           flowState.sessionReady = false;
+          flowState.readySessionId = "";
         }
 
         function refreshFlowControls() {
@@ -906,7 +908,9 @@
           const tok = els.tokenInput.value.trim();
           els.sessionBadge.textContent = sid ? `session: ${sid}` : "session: none";
           els.tokenBadge.textContent = tok ? `token: ${tok.slice(0, 12)}...` : "token: none";
-          flowState.sessionReady = Boolean(sid);
+          if (!sid || sid !== flowState.readySessionId) {
+            flowState.sessionReady = false;
+          }
           refreshMicControls();
           refreshFlowControls();
         }
@@ -1581,7 +1585,8 @@
             setStatus("connected");
             flowState.paired = false;
             flowState.authenticated = false;
-            flowState.sessionReady = Boolean(activeSessionId());
+            flowState.sessionReady = false;
+            flowState.readySessionId = "";
             log("system", `Connected to ${url}`);
             savePrefs();
             refreshMicControls();
@@ -1639,6 +1644,7 @@
             if (parsed.type === "SessionCreated" && parsed.session_id) {
               els.sessionId.value = parsed.session_id;
               flowState.sessionReady = true;
+              flowState.readySessionId = parsed.session_id;
               savePrefs();
               updateBadges();
               resetSessionOutputState();
@@ -1646,9 +1652,10 @@
             }
 
             if (parsed.type === "SessionTerminated" && parsed.session_id) {
-              if (parsed.session_id === activeSessionId()) {
+              if (parsed.session_id === activeSessionId() || parsed.session_id === flowState.readySessionId) {
                 els.sessionId.value = "";
                 flowState.sessionReady = false;
+                flowState.readySessionId = "";
                 savePrefs();
                 updateBadges();
               }
@@ -1845,6 +1852,7 @@
 
         els.createSessionBtn.addEventListener("click", () => {
           flowState.sessionReady = false;
+          flowState.readySessionId = "";
           refreshFlowControls();
           sendObject(buildCreateSessionMessage());
         });
