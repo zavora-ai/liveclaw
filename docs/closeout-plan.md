@@ -92,3 +92,4 @@ Close the remaining parity and release-candidate scope so the project can be dec
 2. 2026-02-21: began Phase 1 by reconciling parity, defect, and ADK tracking docs with current verification evidence.
 3. 2026-02-21: completed ADK lifecycle closeout (`ADK-GAP-004`) by wiring transcript lifecycle and compaction snapshots through `adk-runner::Runner` in the active gateway path.
 4. 2026-02-21: completed docker runtime closeout (`ADK-GAP-005`) by adding containerized realtime worker mode (`--runtime-worker`) and docker command/event bridge runtime (`DockerRuntimeBridgeRuntime`) in active session creation flow.
+5. 2026-02-21: started channel parity closeout slice by adding authenticated `ChannelInbound` routing with principal/channel/account/user isolation, browser WS client controls, and M6 demo/test coverage.

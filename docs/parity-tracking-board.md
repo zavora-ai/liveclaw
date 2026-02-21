@@ -150,6 +150,16 @@ Status scale: `NOT_STARTED`, `IN_PROGRESS`, `AT_RISK`, `BLOCKED`, `DONE`
 | Remove compatibility-mode warning and surface real docker diagnostics | DONE | `validate_runtime_and_provider()` now reports `runtime.docker_image` note without compatibility fallback warning |
 | Add docker bridge tests and demo coverage | DONE | `test_build_docker_runtime_command_includes_worker_mode_and_env`, `test_validate_runtime_and_provider_docker_reports_runtime_image_note`, and `scripts/demo/m5_runtime_security.sh` |
 
+## Sprint 13 Checklist (IN_PROGRESS)
+
+| Item | Status | Evidence |
+|---|---|---|
+| Add gateway protocol surfaces for channel ingress routing | DONE | `liveclaw-gateway/src/protocol.rs` adds `ChannelInbound` and `ChannelRouted` plus supported-type coverage tests |
+| Add principal-scoped route isolation by channel/account/external user | DONE | `liveclaw-gateway/src/server.rs` `channel_routes` map with `ChannelRouteKey` and routing tests |
+| Keep browser WS client aligned for channel bridge verification | DONE | `tools/ws-client/index.html` adds Channel Bridge panel and `ChannelInbound` raw template |
+| Extend M6 demo checks for channel-routing behavior | DONE | `scripts/demo/m6_release_flow.sh` adds protocol + server channel-routing tests |
+| Implement external Telegram/Slack/Webhook adapter services | IN_PROGRESS | Pending next slice: adapter workers + outbound delivery contracts |
+
 ## Closeout Phase 1 Kickoff (2026-02-21)
 
 | Item | Status | Evidence |

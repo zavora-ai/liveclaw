@@ -611,6 +611,53 @@
           </div>
         </article>
 
+        <article class="card panel span-6">
+          <h2>Channel Bridge</h2>
+          <div class="field-grid">
+            <div class="field-row triple">
+              <div class="field-stack">
+                <label for="channelType">Channel</label>
+                <select id="channelType">
+                  <option value="telegram">telegram</option>
+                  <option value="slack">slack</option>
+                  <option value="webhook">webhook</option>
+                </select>
+              </div>
+              <div class="field-stack">
+                <label for="channelAccountId">Account ID</label>
+                <input id="channelAccountId" value="acct-1" placeholder="workspace/account id" />
+              </div>
+              <div class="field-stack">
+                <label for="channelExternalUserId">External User ID</label>
+                <input id="channelExternalUserId" value="user-1" placeholder="channel user id" />
+              </div>
+            </div>
+            <div class="field-stack">
+              <label for="channelText">Inbound Text</label>
+              <textarea id="channelText" placeholder="Message from channel user">Hello from channel bridge.</textarea>
+            </div>
+            <label class="inline-check">
+              <input id="channelCreateResponse" type="checkbox" checked />
+              Create model response after route
+            </label>
+            <div class="field-row">
+              <button id="routeChannelBtn" class="primary">Route Channel Inbound</button>
+            </div>
+            <div class="field-stack">
+              <label for="channelRouteView">Channel Route Activity</label>
+              <textarea
+                id="channelRouteView"
+                class="output-pane"
+                readonly
+                placeholder="ChannelRouted events will appear here."
+              ></textarea>
+            </div>
+            <p class="hint">
+              Routes are isolated by principal + channel + account_id + external_user_id. Reusing the same key should return the same session.
+            </p>
+          </div>
+        </article>
+
         <article class="card panel span-12">
           <h2>Raw JSON Message</h2>
           <div class="field-grid">
@@ -629,6 +676,7 @@
                   <option value="SessionResponseCreate">SessionResponseCreate</option>
                   <option value="SessionResponseInterrupt">SessionResponseInterrupt</option>
                   <option value="SessionPrompt">SessionPrompt</option>
+                  <option value="ChannelInbound">ChannelInbound</option>
                   <option value="SessionToolCall">SessionToolCall</option>
                 </select>
               </div>
@@ -720,6 +768,13 @@
           probeMemoryBtn: $("probeMemoryBtn"),
           probeArtifactBtn: $("probeArtifactBtn"),
           m4EvidenceView: $("m4EvidenceView"),
+          channelType: $("channelType"),
+          channelAccountId: $("channelAccountId"),
+          channelExternalUserId: $("channelExternalUserId"),
+          channelText: $("channelText"),
+          channelCreateResponse: $("channelCreateResponse"),
+          routeChannelBtn: $("routeChannelBtn"),
+          channelRouteView: $("channelRouteView"),
           sendPromptBtn: $("sendPromptBtn"),
           rawJson: $("rawJson"),
           sendRawBtn: $("sendRawBtn"),
@@ -736,6 +791,9 @@
           summaryBullets: "liveclaw.ws.summary_bullets",
           memoryProbePath: "liveclaw.ws.memory_probe_path",
           artifactProbePath: "liveclaw.ws.artifact_probe_path",
+          channelType: "liveclaw.ws.channel_type",
+          channelAccountId: "liveclaw.ws.channel_account_id",
+          channelExternalUserId: "liveclaw.ws.channel_external_user_id",
         };
 
         const DEFAULT_SAMPLE_RATE = 24000;
@@ -929,6 +987,7 @@
           els.toolResultView.value = "";
           els.graphTraceView.value = "";
           els.promptToolActivityView.value = "";
+          els.channelRouteView.value = "";
           els.m4EvidenceView.value = "";
           els.audioProgress.textContent = "idle";
           setPlaybackStatus("idle");
@@ -943,6 +1002,9 @@
           localStorage.setItem(keys.summaryBullets, els.summaryBullets.value.trim());
           localStorage.setItem(keys.memoryProbePath, els.memoryProbePath.value.trim());
           localStorage.setItem(keys.artifactProbePath, els.artifactProbePath.value.trim());
+          localStorage.setItem(keys.channelType, els.channelType.value.trim());
+          localStorage.setItem(keys.channelAccountId, els.channelAccountId.value.trim());
+          localStorage.setItem(keys.channelExternalUserId, els.channelExternalUserId.value.trim());
         }
 
         function loadPrefs() {
@@ -953,6 +1015,9 @@
           const summaryBullets = localStorage.getItem(keys.summaryBullets);
           const memoryProbePath = localStorage.getItem(keys.memoryProbePath);
           const artifactProbePath = localStorage.getItem(keys.artifactProbePath);
+          const channelType = localStorage.getItem(keys.channelType);
+          const channelAccountId = localStorage.getItem(keys.channelAccountId);
+          const channelExternalUserId = localStorage.getItem(keys.channelExternalUserId);
           if (url) els.wsUrl.value = url;
           if (token) els.tokenInput.value = token;
           if (sid) els.sessionId.value = sid;
@@ -963,6 +1028,12 @@
           }
           if (memoryProbePath) els.memoryProbePath.value = memoryProbePath;
           if (artifactProbePath) els.artifactProbePath.value = artifactProbePath;
+          if (channelType) {
+            const matches = [...els.channelType.options].some((opt) => opt.value === channelType);
+            if (matches) els.channelType.value = channelType;
+          }
+          if (channelAccountId) els.channelAccountId.value = channelAccountId;
+          if (channelExternalUserId) els.channelExternalUserId.value = channelExternalUserId;
           updateBadges();
           updateM4EvidenceView();
         }
@@ -1067,6 +1138,15 @@
                 prompt: els.promptInput.value.trim() || "Use utc_time and report UTC timestamp.",
                 create_response: true,
               };
+            case "ChannelInbound":
+              return {
+                type: "ChannelInbound",
+                channel: els.channelType.value || "telegram",
+                account_id: els.channelAccountId.value.trim() || "acct-1",
+                external_user_id: els.channelExternalUserId.value.trim() || "user-1",
+                text: els.channelText.value.trim() || "Hello from channel bridge.",
+                create_response: Boolean(els.channelCreateResponse.checked),
+              };
             case "SessionToolCall": {
               const toolName = els.toolName.value.trim() || "echo_text";
               const parsedArgs = parseJson(els.toolArgs.value) || { text: "hello from graph" };
@@ -1135,6 +1215,13 @@
           const existing = els.promptToolActivityView.value;
           els.promptToolActivityView.value = existing ? `${existing}\n${text}` : text;
           els.promptToolActivityView.scrollTop = els.promptToolActivityView.scrollHeight;
+        }
+
+        function appendChannelRouteActivity(text) {
+          if (!text) return;
+          const existing = els.channelRouteView.value;
+          els.channelRouteView.value = existing ? `${existing}\n${text}` : text;
+          els.channelRouteView.scrollTop = els.channelRouteView.scrollHeight;
         }
 
         function describeToolResultForActivity(parsed) {
@@ -1651,6 +1738,17 @@
               recordM4Snapshot(`session created ${parsed.session_id}`);
             }
 
+            if (parsed.type === "ChannelRouted" && parsed.session_id) {
+              const routeMsg = `[${now()}] channel=${parsed.channel || "n/a"} account=${parsed.account_id || "n/a"} user=${parsed.external_user_id || "n/a"} -> session=${parsed.session_id}`;
+              appendChannelRouteActivity(routeMsg);
+              els.sessionId.value = parsed.session_id;
+              flowState.sessionReady = true;
+              flowState.readySessionId = parsed.session_id;
+              savePrefs();
+              updateBadges();
+              recordM4Snapshot(`channel routed ${parsed.channel || "unknown"} -> ${parsed.session_id}`);
+            }
+
             if (parsed.type === "SessionTerminated" && parsed.session_id) {
               if (parsed.session_id === activeSessionId() || parsed.session_id === flowState.readySessionId) {
                 els.sessionId.value = "";
@@ -2031,6 +2129,16 @@
           runReadWorkspaceProbe(els.artifactProbePath.value, "artifact");
         });
 
+        els.routeChannelBtn.addEventListener("click", () => {
+          const message = templateForType("ChannelInbound");
+          if (!message.account_id || !message.external_user_id || !message.text) {
+            log("error", "ChannelInbound requires account_id, external_user_id, and text.");
+            return;
+          }
+          sendObject(message);
+          savePrefs();
+        });
+
         els.sendPromptBtn.addEventListener("click", () => {
           const sid = activeSessionId();
           if (!sid) {
@@ -2111,6 +2219,9 @@
           els.summaryBullets,
           els.memoryProbePath,
           els.artifactProbePath,
+          els.channelType,
+          els.channelAccountId,
+          els.channelExternalUserId,
         ].forEach((el) => {
           el.addEventListener("input", () => {
             savePrefs();
@@ -2120,6 +2231,10 @@
             savePrefs();
             updateBadges();
           });
+        });
+        [els.channelText, els.channelCreateResponse].forEach((el) => {
+          el.addEventListener("input", savePrefs);
+          el.addEventListener("change", savePrefs);
         });
 
         window.addEventListener("beforeunload", () => {

@@ -129,6 +129,24 @@ struct AppState {
     /// Per-session senders for forwarding priority control-plane responses
     /// (PriorityNotice) with precedence over standard channel traffic.
     ws_priority_senders: Arc<RwLock<HashMap<String, mpsc::Sender<GatewayResponse>>>>,
+    /// Channel/account/user routing table scoped by authenticated principal.
+    channel_routes: Arc<RwLock<HashMap<ChannelRouteKey, String>>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct ChannelRouteKey {
+    principal_id: String,
+    channel: String,
+    account_id: String,
+    external_user_id: String,
+}
+
+struct ChannelInboundRequest<'a> {
+    channel: &'a str,
+    account_id: &'a str,
+    external_user_id: &'a str,
+    text: &'a str,
+    create_response: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -220,6 +238,7 @@ impl Gateway {
             session_owners: Arc::new(RwLock::new(HashMap::new())),
             ws_response_senders: ws_response_senders.clone(),
             ws_priority_senders,
+            channel_routes: Arc::new(RwLock::new(HashMap::new())),
         };
 
         // Spawn background task to consume audio output and route to WebSocket clients
@@ -513,6 +532,32 @@ async fn handle_message(
             .await
         }
 
+        GatewayMessage::ChannelInbound {
+            channel,
+            account_id,
+            external_user_id,
+            text,
+            create_response,
+        } => {
+            if !conn.authenticated {
+                return auth_required_error();
+            }
+            handle_channel_inbound(
+                ChannelInboundRequest {
+                    channel: &channel,
+                    account_id: &account_id,
+                    external_user_id: &external_user_id,
+                    text: &text,
+                    create_response: create_response.unwrap_or(true),
+                },
+                state,
+                conn,
+                ws_tx,
+                ws_priority_tx,
+            )
+            .await
+        }
+
         GatewayMessage::SessionToolCall {
             session_id,
             tool_name,
@@ -680,6 +725,12 @@ async fn handle_terminate_session(
     state.ws_priority_senders.write().await.remove(session_id);
     // Remove stable session owner
     state.session_owners.write().await.remove(session_id);
+    // Remove channel route bindings that reference this session.
+    state
+        .channel_routes
+        .write()
+        .await
+        .retain(|_, mapped_session_id| mapped_session_id != session_id);
     // Remove from owned sessions
     conn.owned_sessions.retain(|s| s != session_id);
 
@@ -890,6 +941,24 @@ fn build_workspace_summary_prompt(
     )
 }
 
+fn normalize_channel(channel: &str) -> Option<String> {
+    match channel.trim().to_ascii_lowercase().as_str() {
+        "telegram" => Some("telegram".to_string()),
+        "slack" => Some("slack".to_string()),
+        "webhook" => Some("webhook".to_string()),
+        _ => None,
+    }
+}
+
+fn normalize_channel_component(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
 /// Handle SessionPrompt — forward a text prompt to the active provider-side
 /// conversation, optionally triggering response generation.
 async fn handle_session_prompt(
@@ -997,6 +1066,132 @@ async fn handle_session_prompt(
 
     GatewayResponse::PromptAccepted {
         session_id: session_id.to_string(),
+    }
+}
+
+/// Handle ChannelInbound — map external channel/account/user identity to an
+/// isolated session scoped to authenticated principal and forward text input.
+async fn handle_channel_inbound(
+    request: ChannelInboundRequest<'_>,
+    state: &AppState,
+    conn: &mut ConnectionState,
+    ws_tx: &mpsc::Sender<GatewayResponse>,
+    ws_priority_tx: &mpsc::Sender<GatewayResponse>,
+) -> GatewayResponse {
+    let Some(principal_id) = conn.principal_id.clone() else {
+        return auth_required_error();
+    };
+
+    let Some(channel) = normalize_channel(request.channel) else {
+        return GatewayResponse::Error {
+            code: "invalid_channel".to_string(),
+            message: "Supported channels are telegram, slack, and webhook".to_string(),
+        };
+    };
+    let Some(account_id) = normalize_channel_component(request.account_id) else {
+        return GatewayResponse::Error {
+            code: "invalid_channel_route".to_string(),
+            message: "account_id is required".to_string(),
+        };
+    };
+    let Some(external_user_id) = normalize_channel_component(request.external_user_id) else {
+        return GatewayResponse::Error {
+            code: "invalid_channel_route".to_string(),
+            message: "external_user_id is required".to_string(),
+        };
+    };
+    let Some(text) = normalize_channel_component(request.text) else {
+        return GatewayResponse::Error {
+            code: "invalid_channel_message".to_string(),
+            message: "text is empty".to_string(),
+        };
+    };
+
+    let route_key = ChannelRouteKey {
+        principal_id,
+        channel: channel.clone(),
+        account_id: account_id.clone(),
+        external_user_id: external_user_id.clone(),
+    };
+
+    let mapped_session = {
+        let routes = state.channel_routes.read().await;
+        routes.get(&route_key).cloned()
+    };
+
+    let session_id = if let Some(existing_session_id) = mapped_session {
+        let exists = state
+            .session_owners
+            .read()
+            .await
+            .contains_key(&existing_session_id);
+        if exists {
+            existing_session_id
+        } else {
+            state.channel_routes.write().await.remove(&route_key);
+            let created =
+                match handle_create_session(None, state, conn, ws_tx, ws_priority_tx).await {
+                    GatewayResponse::SessionCreated { session_id } => session_id,
+                    other => return other,
+                };
+            state
+                .channel_routes
+                .write()
+                .await
+                .insert(route_key.clone(), created.clone());
+            created
+        }
+    } else {
+        let created = match handle_create_session(None, state, conn, ws_tx, ws_priority_tx).await {
+            GatewayResponse::SessionCreated { session_id } => session_id,
+            other => return other,
+        };
+        state
+            .channel_routes
+            .write()
+            .await
+            .insert(route_key.clone(), created.clone());
+        created
+    };
+
+    if let Err(resp) =
+        authorize_session_access(&session_id, state, conn, Some(ws_tx), Some(ws_priority_tx)).await
+    {
+        return resp;
+    }
+
+    if let Err(e) = state.runner.send_text(&session_id, &text).await {
+        warn!(
+            "Failed to forward channel '{}' message for session {}: {}",
+            channel, session_id, e
+        );
+        return GatewayResponse::Error {
+            code: "channel_inbound_failed".to_string(),
+            message: format!("Failed to forward channel message: {}", e),
+        };
+    }
+
+    if request.create_response {
+        if let Err(e) = state.runner.create_response(&session_id).await {
+            warn!(
+                "Channel message forwarded but create_response failed for session {}: {}",
+                session_id, e
+            );
+            return GatewayResponse::Error {
+                code: "channel_response_failed".to_string(),
+                message: format!(
+                    "Channel message routed, but response creation failed: {}",
+                    e
+                ),
+            };
+        }
+    }
+
+    GatewayResponse::ChannelRouted {
+        channel,
+        account_id,
+        external_user_id,
+        session_id,
     }
 }
 
@@ -1516,6 +1711,7 @@ mod tests {
             session_owners: Arc::new(RwLock::new(HashMap::new())),
             ws_response_senders: Arc::new(RwLock::new(HashMap::new())),
             ws_priority_senders: Arc::new(RwLock::new(HashMap::new())),
+            channel_routes: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -1876,6 +2072,31 @@ mod tests {
                 session_id: "s1".into(),
                 tool_name: "echo_text".into(),
                 arguments: serde_json::json!({ "text": "hello" }),
+            },
+            &state,
+            &mut conn,
+            &ws_tx,
+            &ws_priority_tx,
+        )
+        .await;
+        match resp {
+            GatewayResponse::Error { code, .. } => assert_eq!(code, "auth_required"),
+            other => panic!("Expected auth_required error, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_channel_inbound_requires_auth() {
+        let state = make_state(MockRunner::ok(), true);
+        let mut conn = unauthed_conn();
+        let (ws_tx, ws_priority_tx) = dummy_ws_txs();
+        let resp = handle_message(
+            GatewayMessage::ChannelInbound {
+                channel: "telegram".into(),
+                account_id: "acct-1".into(),
+                external_user_id: "user-1".into(),
+                text: "hello".into(),
+                create_response: Some(true),
             },
             &state,
             &mut conn,
@@ -2593,6 +2814,167 @@ mod tests {
             terminate_resp,
             GatewayResponse::SessionTerminated { .. }
         ));
+    }
+
+    #[tokio::test]
+    async fn test_channel_inbound_reuses_session_for_same_route_key() {
+        let state = make_state(MockRunner::ok(), false);
+        let mut conn = authed_conn();
+        let (ws_tx, ws_priority_tx) = dummy_ws_txs();
+
+        let first = handle_message(
+            GatewayMessage::ChannelInbound {
+                channel: "telegram".into(),
+                account_id: "acct-1".into(),
+                external_user_id: "user-77".into(),
+                text: "first".into(),
+                create_response: Some(false),
+            },
+            &state,
+            &mut conn,
+            &ws_tx,
+            &ws_priority_tx,
+        )
+        .await;
+        let first_session_id = match first {
+            GatewayResponse::ChannelRouted { session_id, .. } => session_id,
+            other => panic!("Expected ChannelRouted, got {:?}", other),
+        };
+
+        let second = handle_message(
+            GatewayMessage::ChannelInbound {
+                channel: "TeLeGrAm".into(),
+                account_id: "acct-1".into(),
+                external_user_id: "user-77".into(),
+                text: "second".into(),
+                create_response: Some(false),
+            },
+            &state,
+            &mut conn,
+            &ws_tx,
+            &ws_priority_tx,
+        )
+        .await;
+        let second_session_id = match second {
+            GatewayResponse::ChannelRouted { session_id, .. } => session_id,
+            other => panic!("Expected ChannelRouted, got {:?}", other),
+        };
+
+        assert_eq!(first_session_id, second_session_id);
+        assert_eq!(state.channel_routes.read().await.len(), 1);
+        assert!(conn.owned_sessions.contains(&first_session_id));
+    }
+
+    #[tokio::test]
+    async fn test_channel_inbound_isolates_channel_and_account_routes() {
+        let state = make_state(MockRunner::ok(), false);
+        let mut conn = authed_conn();
+        let (ws_tx, ws_priority_tx) = dummy_ws_txs();
+
+        let route = |channel: &str, account_id: &str, external_user_id: &str, text: &str| {
+            GatewayMessage::ChannelInbound {
+                channel: channel.to_string(),
+                account_id: account_id.to_string(),
+                external_user_id: external_user_id.to_string(),
+                text: text.to_string(),
+                create_response: Some(false),
+            }
+        };
+
+        let sid_telegram_a = match handle_message(
+            route("telegram", "acct-a", "user-1", "hello a1"),
+            &state,
+            &mut conn,
+            &ws_tx,
+            &ws_priority_tx,
+        )
+        .await
+        {
+            GatewayResponse::ChannelRouted { session_id, .. } => session_id,
+            other => panic!("Expected ChannelRouted, got {:?}", other),
+        };
+        let sid_slack_a = match handle_message(
+            route("slack", "acct-a", "user-1", "hello a1 slack"),
+            &state,
+            &mut conn,
+            &ws_tx,
+            &ws_priority_tx,
+        )
+        .await
+        {
+            GatewayResponse::ChannelRouted { session_id, .. } => session_id,
+            other => panic!("Expected ChannelRouted, got {:?}", other),
+        };
+        let sid_telegram_b = match handle_message(
+            route("telegram", "acct-b", "user-1", "hello b1"),
+            &state,
+            &mut conn,
+            &ws_tx,
+            &ws_priority_tx,
+        )
+        .await
+        {
+            GatewayResponse::ChannelRouted { session_id, .. } => session_id,
+            other => panic!("Expected ChannelRouted, got {:?}", other),
+        };
+        let sid_telegram_a_user2 = match handle_message(
+            route("telegram", "acct-a", "user-2", "hello a2"),
+            &state,
+            &mut conn,
+            &ws_tx,
+            &ws_priority_tx,
+        )
+        .await
+        {
+            GatewayResponse::ChannelRouted { session_id, .. } => session_id,
+            other => panic!("Expected ChannelRouted, got {:?}", other),
+        };
+
+        assert_ne!(sid_telegram_a, sid_slack_a);
+        assert_ne!(sid_telegram_a, sid_telegram_b);
+        assert_ne!(sid_telegram_a, sid_telegram_a_user2);
+        assert_eq!(state.channel_routes.read().await.len(), 4);
+    }
+
+    #[tokio::test]
+    async fn test_terminate_session_cleans_channel_routes() {
+        let state = make_state(MockRunner::ok(), false);
+        let mut conn = authed_conn();
+        let (ws_tx, ws_priority_tx) = dummy_ws_txs();
+
+        let session_id = match handle_message(
+            GatewayMessage::ChannelInbound {
+                channel: "webhook".into(),
+                account_id: "integration-1".into(),
+                external_user_id: "origin-1".into(),
+                text: "incoming webhook".into(),
+                create_response: Some(false),
+            },
+            &state,
+            &mut conn,
+            &ws_tx,
+            &ws_priority_tx,
+        )
+        .await
+        {
+            GatewayResponse::ChannelRouted { session_id, .. } => session_id,
+            other => panic!("Expected ChannelRouted, got {:?}", other),
+        };
+        assert_eq!(state.channel_routes.read().await.len(), 1);
+
+        let terminate_resp = handle_message(
+            GatewayMessage::TerminateSession { session_id },
+            &state,
+            &mut conn,
+            &ws_tx,
+            &ws_priority_tx,
+        )
+        .await;
+        assert!(matches!(
+            terminate_resp,
+            GatewayResponse::SessionTerminated { .. }
+        ));
+        assert!(state.channel_routes.read().await.is_empty());
     }
 
     // --- Base64 helpers ---

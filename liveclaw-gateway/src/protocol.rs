@@ -38,6 +38,13 @@ pub enum GatewayMessage {
         prompt: String,
         create_response: Option<bool>,
     },
+    ChannelInbound {
+        channel: String,
+        account_id: String,
+        external_user_id: String,
+        text: String,
+        create_response: Option<bool>,
+    },
     SessionToolCall {
         session_id: SessionId,
         tool_name: String,
@@ -81,6 +88,12 @@ pub enum GatewayResponse {
         session_id: SessionId,
     },
     PromptAccepted {
+        session_id: SessionId,
+    },
+    ChannelRouted {
+        channel: String,
+        account_id: String,
+        external_user_id: String,
         session_id: SessionId,
     },
     SessionToolResult {
@@ -208,6 +221,7 @@ pub fn supported_client_message_types() -> Vec<String> {
         "SessionResponseCreate".to_string(),
         "SessionResponseInterrupt".to_string(),
         "SessionPrompt".to_string(),
+        "ChannelInbound".to_string(),
         "SessionToolCall".to_string(),
         "PriorityProbe".to_string(),
         "GetGatewayHealth".to_string(),
@@ -229,6 +243,7 @@ pub fn supported_server_response_types() -> Vec<String> {
         "ResponseCreateAccepted".to_string(),
         "ResponseInterruptAccepted".to_string(),
         "PromptAccepted".to_string(),
+        "ChannelRouted".to_string(),
         "SessionToolResult".to_string(),
         "AudioOutput".to_string(),
         "TranscriptUpdate".to_string(),
@@ -348,6 +363,20 @@ mod tests {
         let msg = GatewayMessage::SessionPrompt {
             session_id: "sess-001".into(),
             prompt: "Use add_numbers for 2 and 3".into(),
+            create_response: Some(true),
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        let parsed: GatewayMessage = serde_json::from_str(&json).unwrap();
+        assert_eq!(msg, parsed);
+    }
+
+    #[test]
+    fn test_gateway_message_channel_inbound() {
+        let msg = GatewayMessage::ChannelInbound {
+            channel: "telegram".into(),
+            account_id: "acct-1".into(),
+            external_user_id: "user-1".into(),
+            text: "Hello from telegram".into(),
             create_response: Some(true),
         };
         let json = serde_json::to_string(&msg).unwrap();
@@ -506,6 +535,19 @@ mod tests {
     }
 
     #[test]
+    fn test_gateway_response_channel_routed() {
+        let resp = GatewayResponse::ChannelRouted {
+            channel: "slack".into(),
+            account_id: "workspace-a".into(),
+            external_user_id: "u-123".into(),
+            session_id: "sess-002".into(),
+        };
+        let json = serde_json::to_string(&resp).unwrap();
+        let parsed: GatewayResponse = serde_json::from_str(&json).unwrap();
+        assert_eq!(resp, parsed);
+    }
+
+    #[test]
     fn test_gateway_response_session_tool_result() {
         let resp = GatewayResponse::SessionToolResult {
             session_id: "sess-002".into(),
@@ -652,6 +694,7 @@ mod tests {
         assert!(client_types.contains(&"SessionResponseCreate".to_string()));
         assert!(client_types.contains(&"SessionResponseInterrupt".to_string()));
         assert!(client_types.contains(&"SessionPrompt".to_string()));
+        assert!(client_types.contains(&"ChannelInbound".to_string()));
         assert!(client_types.contains(&"SessionToolCall".to_string()));
         assert!(server_types.contains(&"Diagnostics".to_string()));
         assert!(server_types.contains(&"GatewayHealth".to_string()));
@@ -661,6 +704,7 @@ mod tests {
         assert!(server_types.contains(&"ResponseCreateAccepted".to_string()));
         assert!(server_types.contains(&"ResponseInterruptAccepted".to_string()));
         assert!(server_types.contains(&"PromptAccepted".to_string()));
+        assert!(server_types.contains(&"ChannelRouted".to_string()));
         assert!(server_types.contains(&"SessionToolResult".to_string()));
     }
 

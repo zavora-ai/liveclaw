@@ -39,6 +39,7 @@ Track ADK-Rust crate/API usage for each roadmap milestone and explicitly documen
 2. `scripts/demo/run_all.sh` passed.
 3. `scripts/demo/m1_voice_e2e_live.sh` passed in isolated mode with provider-backed audio/transcript roundtrip.
 4. No open ADK gap blockers remain for closeout phases.
+5. Channel ingress (`ChannelInbound`) now routes through authenticated gateway sessions and continues on the existing `adk-runner` + `adk-realtime` session path (no parallel runtime pipeline added).
 
 ## Open ADK Gap Log
 
