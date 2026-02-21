@@ -122,6 +122,8 @@ The client now supports:
 - Per-session transcript view for `TranscriptUpdate`
 - Direct `SessionToolCall` invocation with tool arguments JSON
 - Graph execution trace inspection from `SessionToolResult.graph`
+- One-click `Run Read + Summarize` flow that builds a `SessionPrompt` for workspace files
+- Prompt tool activity panel that confirms prompt-driven `read_workspace_file` execution details
 
 ```bash
 cd /Users/jameskaranja/Developer/projects/liveclaw

@@ -508,11 +508,38 @@
                 spellcheck="false"
               >Use add_numbers with a=12 and b=30, then answer with the computed sum.</textarea>
             </div>
+            <div class="field-row compact">
+              <div class="field-stack">
+                <label for="summaryFilePath">Workspace File Path</label>
+                <input id="summaryFilePath" value="README.md" placeholder="e.g. docs/design.md" />
+              </div>
+              <div class="field-stack">
+                <label for="summaryBullets">Summary Bullets</label>
+                <select id="summaryBullets">
+                  <option value="3">3</option>
+                  <option value="5" selected>5</option>
+                  <option value="8">8</option>
+                </select>
+              </div>
+            </div>
+            <div class="field-row compact">
+              <button id="runReadSummaryBtn" class="primary">Run Read + Summarize</button>
+              <button id="applyReadSummaryPromptBtn" class="muted">Apply Prompt Only</button>
+            </div>
             <div class="field-row">
               <button id="sendPromptBtn" class="soft">Send Prompt</button>
             </div>
+            <div class="field-stack">
+              <label for="promptToolActivityView">Prompt Tool Activity</label>
+              <textarea
+                id="promptToolActivityView"
+                class="output-pane"
+                readonly
+                placeholder="Prompt-driven SessionToolResult events are summarized here."
+              ></textarea>
+            </div>
             <p class="hint">
-              For graph execution, create session with role `full` and `Enable Graph = true`.
+              Prompt file-read summaries trigger `read_workspace_file` automatically. SessionToolCall runs with graph if enabled, and direct mode otherwise.
             </p>
           </div>
         </article>
@@ -614,6 +641,11 @@
           toolResultView: $("toolResultView"),
           graphTraceView: $("graphTraceView"),
           promptInput: $("promptInput"),
+          summaryFilePath: $("summaryFilePath"),
+          summaryBullets: $("summaryBullets"),
+          runReadSummaryBtn: $("runReadSummaryBtn"),
+          applyReadSummaryPromptBtn: $("applyReadSummaryPromptBtn"),
+          promptToolActivityView: $("promptToolActivityView"),
           sendPromptBtn: $("sendPromptBtn"),
           rawJson: $("rawJson"),
           sendRawBtn: $("sendRawBtn"),
@@ -626,6 +658,8 @@
           wsUrl: "liveclaw.ws.url",
           token: "liveclaw.ws.token",
           sessionId: "liveclaw.ws.session_id",
+          summaryFilePath: "liveclaw.ws.summary_file_path",
+          summaryBullets: "liveclaw.ws.summary_bullets",
         };
 
         const DEFAULT_SAMPLE_RATE = 24000;
@@ -712,6 +746,7 @@
           els.transcriptView.value = "";
           els.toolResultView.value = "";
           els.graphTraceView.value = "";
+          els.promptToolActivityView.value = "";
           els.audioProgress.textContent = "idle";
           setPlaybackStatus("idle");
         }
@@ -720,15 +755,24 @@
           localStorage.setItem(keys.wsUrl, els.wsUrl.value.trim());
           localStorage.setItem(keys.token, els.tokenInput.value.trim());
           localStorage.setItem(keys.sessionId, activeSessionId());
+          localStorage.setItem(keys.summaryFilePath, els.summaryFilePath.value.trim());
+          localStorage.setItem(keys.summaryBullets, els.summaryBullets.value.trim());
         }
 
         function loadPrefs() {
           const url = localStorage.getItem(keys.wsUrl);
           const token = localStorage.getItem(keys.token);
           const sid = localStorage.getItem(keys.sessionId);
+          const summaryFilePath = localStorage.getItem(keys.summaryFilePath);
+          const summaryBullets = localStorage.getItem(keys.summaryBullets);
           if (url) els.wsUrl.value = url;
           if (token) els.tokenInput.value = token;
           if (sid) els.sessionId.value = sid;
+          if (summaryFilePath) els.summaryFilePath.value = summaryFilePath;
+          if (summaryBullets) {
+            const matches = [...els.summaryBullets.options].some((opt) => opt.value === summaryBullets);
+            if (matches) els.summaryBullets.value = summaryBullets;
+          }
           updateBadges();
         }
 
@@ -852,6 +896,70 @@
             default:
               return { type: "Ping" };
           }
+        }
+
+        function quietParseJson(text) {
+          try {
+            return JSON.parse(text);
+          } catch {
+            return null;
+          }
+        }
+
+        function defaultToolArgsFor(toolName) {
+          if (toolName === "read_workspace_file") {
+            return {
+              path: els.summaryFilePath.value.trim() || "README.md",
+              max_bytes: 16384,
+            };
+          }
+          if (toolName === "add_numbers") {
+            return { a: 12, b: 30 };
+          }
+          if (toolName === "utc_time") {
+            return {};
+          }
+          return { text: "hello from graph" };
+        }
+
+        function maybeApplyToolArgsPreset() {
+          const toolName = els.toolName.value.trim();
+          const parsed = quietParseJson(els.toolArgs.value);
+          const shouldApply =
+            !parsed ||
+            (toolName === "read_workspace_file" && parsed.path === undefined) ||
+            (toolName !== "read_workspace_file" && parsed.path !== undefined && parsed.text === undefined);
+          if (!shouldApply) return;
+          els.toolArgs.value = JSON.stringify(defaultToolArgsFor(toolName), null, 2);
+        }
+
+        function buildReadSummaryPrompt(filePath, bulletCount) {
+          const safePath = (filePath || "README.md").trim() || "README.md";
+          const bullets = Number(bulletCount) > 0 ? Number(bulletCount) : 5;
+          return `Use read_workspace_file to read ${safePath}, then return a concise ${bullets}-bullet summary of the file.`;
+        }
+
+        function appendPromptToolActivity(text) {
+          if (!text) return;
+          const existing = els.promptToolActivityView.value;
+          els.promptToolActivityView.value = existing ? `${existing}\n${text}` : text;
+          els.promptToolActivityView.scrollTop = els.promptToolActivityView.scrollHeight;
+        }
+
+        function describeToolResultForActivity(parsed) {
+          const toolName = parsed.tool_name || "unknown";
+          const result = parsed.result || {};
+          const status = result.status || "unknown";
+          const report = parsed.graph || {};
+          const executionMode = report.final_state?.execution_mode || (report.events?.length ? "graph" : "n/a");
+          if (toolName === "read_workspace_file" && result.result) {
+            const r = result.result;
+            const path = r.path || "n/a";
+            const bytes = Number(r.bytes_read || 0);
+            const truncated = Boolean(r.truncated);
+            return `[${now()}] ${toolName} ${status} path=${path} bytes=${bytes} truncated=${truncated} mode=${executionMode}`;
+          }
+          return `[${now()}] ${toolName} ${status} mode=${executionMode}`;
         }
 
         function bytesToBase64(bytes) {
@@ -1317,6 +1425,7 @@
 
             if (parsed.type === "PromptAccepted" && parsed.session_id && parsed.session_id === activeSessionId()) {
               els.audioProgress.textContent = "prompt accepted";
+              appendPromptToolActivity(`[${now()}] prompt accepted for session ${parsed.session_id}`);
             }
 
             if (parsed.type === "SessionToolResult" && parsed.session_id && parsed.session_id === activeSessionId()) {
@@ -1324,11 +1433,16 @@
               els.graphTraceView.value = formatGraphReport(parsed.graph);
               els.toolResultView.scrollTop = 0;
               els.graphTraceView.scrollTop = 0;
+              appendPromptToolActivity(describeToolResultForActivity(parsed));
             }
 
             if (parsed.type === "TranscriptUpdate" && parsed.session_id && parsed.session_id === activeSessionId()) {
               voiceCounters.transcript += 1;
               appendTranscript(parsed.text || "", Boolean(parsed.is_final));
+            }
+
+            if (parsed.type === "Error") {
+              appendPromptToolActivity(`[${now()}] error ${parsed.code || "unknown"}: ${parsed.message || "unknown"}`);
             }
 
             if (parsed.type === "AudioOutput" && parsed.session_id && parsed.session_id === activeSessionId()) {
@@ -1498,6 +1612,38 @@
           sendObject({ type: "SessionResponseInterrupt", session_id: sid });
         });
 
+        function applyReadSummaryPrompt() {
+          const prompt = buildReadSummaryPrompt(els.summaryFilePath.value, els.summaryBullets.value);
+          els.promptInput.value = prompt;
+          savePrefs();
+          maybeApplyToolArgsPreset();
+          return prompt;
+        }
+
+        els.applyReadSummaryPromptBtn.addEventListener("click", () => {
+          const prompt = applyReadSummaryPrompt();
+          appendPromptToolActivity(`[${now()}] prompt prepared: ${prompt}`);
+        });
+
+        els.runReadSummaryBtn.addEventListener("click", () => {
+          const sid = activeSessionId();
+          if (!sid) {
+            log("error", "Session ID is empty.");
+            return;
+          }
+          const prompt = applyReadSummaryPrompt();
+          els.transcriptView.value = "";
+          els.toolResultView.value = "";
+          els.graphTraceView.value = "";
+          els.promptToolActivityView.value = "";
+          sendObject({
+            type: "SessionPrompt",
+            session_id: sid,
+            prompt,
+            create_response: true,
+          });
+        });
+
         els.sendPromptBtn.addEventListener("click", () => {
           const sid = activeSessionId();
           if (!sid) {
@@ -1541,6 +1687,13 @@
           });
         });
 
+        els.toolName.addEventListener("change", () => {
+          maybeApplyToolArgsPreset();
+        });
+        els.summaryFilePath.addEventListener("change", () => {
+          maybeApplyToolArgsPreset();
+        });
+
         els.sendRawBtn.addEventListener("click", () => {
           const obj = parseJson(els.rawJson.value);
           if (obj) sendObject(obj);
@@ -1563,8 +1716,12 @@
           els.log.innerHTML = "";
         });
 
-        [els.wsUrl, els.tokenInput, els.sessionId].forEach((el) => {
+        [els.wsUrl, els.tokenInput, els.sessionId, els.summaryFilePath, els.summaryBullets].forEach((el) => {
           el.addEventListener("input", () => {
+            savePrefs();
+            updateBadges();
+          });
+          el.addEventListener("change", () => {
             savePrefs();
             updateBadges();
           });
@@ -1579,6 +1736,7 @@
         setMicStatus("idle");
         setPlaybackStatus("idle");
         refreshMicControls();
+        maybeApplyToolArgsPreset();
         if (!window.isSecureContext) {
           log(
             "error",
