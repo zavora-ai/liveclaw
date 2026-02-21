@@ -169,6 +169,11 @@ LiveClaw includes a reusable browser WebSocket client for pairing, auth,
 session control, and full voice-path validation.
 It syncs message templates from `GetDiagnostics` and shows runtime + security + gateway-health + priority badges so protocol changes stay visible in the client per sprint.
 The client now supports:
+- Saved connection profiles (load/save/delete) for repeatable environments
+- Guided one-click workflows:
+  - Bootstrap Flow (`Connect -> Pair -> Authenticate -> CreateSession`)
+  - Ops Check (`Ping + GetGatewayHealth + GetDiagnostics`)
+  - README Summary flow (bootstrap + prompt submission)
 - Uploading common audio formats and converting them to PCM16 mono for `SessionAudio`
 - Live microphone streaming to `SessionAudio`
 - Decoding and playback of `AudioOutput`

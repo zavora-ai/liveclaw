@@ -79,6 +79,7 @@ Status legend:
 2. Tool and graph execution with explicit traceability and RBAC guardrails.
 3. Memory, artifacts, and resilience are demonstrated with milestone evidence and runnable scripts.
 4. Runtime/provider security hardening is explicit (`native`/`docker`, allowlist enforcement, public bind safety checks).
+5. Browser client now includes guided bootstrap/ops workflows plus reusable saved connection profiles.
 
 ### Main parity gaps versus OpenClaw + ZeroClaw
 

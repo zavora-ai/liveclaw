@@ -107,3 +107,4 @@ Close the remaining parity and release-candidate scope so the project can be dec
 16. 2026-02-21: published Phase 5 closure artifacts (`docs/final-parity-closeout-summary.md`, `docs/adk-delta-report.md`) and promoted milestone board to M0-M6 `DONE`.
 17. 2026-02-21: published release-candidate milestone tag `milestone/M6` and completed Phase 5 closure.
 18. 2026-02-21: closed onboarding/service parity deltas by adding `onboard` and `service` CLI command groups in `liveclaw-app`, plus README + parity-board evidence updates.
+19. 2026-02-21: closed operator UX parity slice by adding saved connection profiles and guided bootstrap/ops/README-summary workflows to the reusable browser WS client, with README + parity-board evidence updates.

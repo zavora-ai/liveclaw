@@ -202,6 +202,15 @@ Status scale: `NOT_STARTED`, `IN_PROGRESS`, `AT_RISK`, `BLOCKED`, `DONE`
 | Add parser/onboarding/service tests for new CLI surface | DONE | `tests::test_parse_onboard_args_supports_force_and_service_flags`, `tests::test_parse_service_install_args_supports_config_and_force`, `tests::test_build_onboard_config_non_interactive_openai_compatible`, `tests::test_write_onboard_config_refuses_overwrite_without_force` |
 | Update user documentation and parity comparison evidence | DONE | `README.md` onboarding/service command docs and `docs/openclaw-zeroclaw-parity-comparison.md` gap-status update |
 
+## Sprint 18 Checklist (DONE)
+
+| Item | Status | Evidence |
+|---|---|---|
+| Add reusable saved connection profiles to browser WS client | DONE | `tools/ws-client/index.html` profile load/save/delete controls with localStorage-backed profile catalog |
+| Add guided bootstrap + ops workflows for repeatable operator validation | DONE | `tools/ws-client/index.html` `Run Bootstrap Flow` and `Run Ops Check` workflow runners with event waiters/timeouts |
+| Add guided README summary workflow for tool-path verification | DONE | `tools/ws-client/index.html` `Run README Summary Flow` chaining bootstrap + `SessionPrompt` submission |
+| Keep docs aligned with client workflow UX | DONE | `README.md` browser client capabilities and `docs/openclaw-zeroclaw-parity-comparison.md` parity note |
+
 ## Closeout Phase 1 Kickoff (2026-02-21)
 
 | Item | Status | Evidence |

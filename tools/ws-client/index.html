@@ -145,6 +145,15 @@
         grid-template-columns: repeat(3, 1fr);
       }
 
+      .field-row.profile {
+        grid-template-columns: 2fr auto auto;
+        align-items: end;
+      }
+
+      .field-row.workflow {
+        grid-template-columns: repeat(3, 1fr);
+      }
+
       .field-stack {
         display: grid;
         gap: 6px;
@@ -327,10 +336,12 @@
         }
 
         .field-row,
-        .field-row.compact,
-        .field-row.triple {
-          grid-template-columns: 1fr;
-        }
+      .field-row.compact,
+      .field-row.triple,
+      .field-row.profile,
+      .field-row.workflow {
+        grid-template-columns: 1fr;
+      }
       }
     </style>
   </head>
@@ -365,6 +376,32 @@
               </div>
               <button id="connectBtn" class="primary">Connect</button>
             </div>
+            <div class="field-row profile">
+              <div class="field-stack">
+                <label for="profileSelect">Saved Connection Profile</label>
+                <select id="profileSelect">
+                  <option value="">(none)</option>
+                </select>
+              </div>
+              <button id="loadProfileBtn" class="soft">Load Profile</button>
+              <button id="deleteProfileBtn" class="warn">Delete Profile</button>
+            </div>
+            <div class="field-row profile">
+              <div class="field-stack">
+                <label for="profileName">Profile Name</label>
+                <input id="profileName" placeholder="e.g. local-dev" />
+              </div>
+              <button id="saveProfileBtn" class="soft">Save Profile</button>
+              <button id="workflowBootstrapBtn" class="primary">Run Bootstrap Flow</button>
+            </div>
+            <div class="field-row workflow">
+              <button id="workflowOpsBtn" class="muted">Run Ops Check</button>
+              <button id="workflowReadmeBtn" class="muted">Run README Summary Flow</button>
+              <button id="workflowAbortBtn" class="warn">Abort Workflow</button>
+            </div>
+            <p class="hint">
+              Bootstrap Flow performs Connect -> Pair -> Authenticate -> CreateSession using current inputs.
+            </p>
             <div class="field-row">
               <div class="field-stack">
                 <label for="pairCode">Pairing Code</label>
@@ -764,6 +801,15 @@
           prioBadge: $("prioBadge"),
           wsUrl: $("wsUrl"),
           connectBtn: $("connectBtn"),
+          profileSelect: $("profileSelect"),
+          profileName: $("profileName"),
+          saveProfileBtn: $("saveProfileBtn"),
+          loadProfileBtn: $("loadProfileBtn"),
+          deleteProfileBtn: $("deleteProfileBtn"),
+          workflowBootstrapBtn: $("workflowBootstrapBtn"),
+          workflowOpsBtn: $("workflowOpsBtn"),
+          workflowReadmeBtn: $("workflowReadmeBtn"),
+          workflowAbortBtn: $("workflowAbortBtn"),
           disconnectBtn: $("disconnectBtn"),
           clearLog: $("clearLog"),
           pairCode: $("pairCode"),
@@ -844,8 +890,10 @@
 
         const keys = {
           wsUrl: "liveclaw.ws.url",
+          pairCode: "liveclaw.ws.pair_code",
           token: "liveclaw.ws.token",
           sessionId: "liveclaw.ws.session_id",
+          profileSelected: "liveclaw.ws.profile_selected",
           summaryFilePath: "liveclaw.ws.summary_file_path",
           summaryBullets: "liveclaw.ws.summary_bullets",
           memoryProbePath: "liveclaw.ws.memory_probe_path",
@@ -859,6 +907,7 @@
           channelText: "liveclaw.ws.channel_text",
           channelCreateResponse: "liveclaw.ws.channel_create_response",
         };
+        const profileStoreKey = "liveclaw.ws.connection_profiles";
 
         const DEFAULT_SAMPLE_RATE = 24000;
         const MIC_BUFFER_SIZE = 4096;
@@ -891,6 +940,11 @@
           sessionReady: false,
           readySessionId: "",
         };
+        const workflowState = {
+          running: false,
+          controller: null,
+        };
+        const eventWaiters = [];
 
         const micState = {
           stream: null,
@@ -1023,6 +1077,14 @@
           els.createSessionBtn.disabled = !canCreateSession;
         }
 
+        function setWorkflowButtonsEnabled(enabled) {
+          const disabled = !enabled;
+          els.workflowBootstrapBtn.disabled = disabled;
+          els.workflowOpsBtn.disabled = disabled;
+          els.workflowReadmeBtn.disabled = disabled;
+          els.workflowAbortBtn.disabled = !workflowState.running;
+        }
+
         function refreshMicControls() {
           const hasSession = Boolean(activeSessionId());
           els.micStartBtn.disabled = micState.active || !hasSession || !hasOpenSocket();
@@ -1066,8 +1128,10 @@
 
         function savePrefs() {
           localStorage.setItem(keys.wsUrl, els.wsUrl.value.trim());
+          localStorage.setItem(keys.pairCode, els.pairCode.value.trim());
           localStorage.setItem(keys.token, els.tokenInput.value.trim());
           localStorage.setItem(keys.sessionId, activeSessionId());
+          localStorage.setItem(keys.profileSelected, els.profileSelect.value.trim());
           localStorage.setItem(keys.summaryFilePath, els.summaryFilePath.value.trim());
           localStorage.setItem(keys.summaryBullets, els.summaryBullets.value.trim());
           localStorage.setItem(keys.memoryProbePath, els.memoryProbePath.value.trim());
@@ -1082,8 +1146,146 @@
           localStorage.setItem(keys.channelCreateResponse, String(Boolean(els.channelCreateResponse.checked)));
         }
 
+        function readProfiles() {
+          const raw = localStorage.getItem(profileStoreKey);
+          if (!raw) return {};
+          try {
+            const parsed = JSON.parse(raw);
+            if (parsed && typeof parsed === "object") return parsed;
+          } catch (_) {}
+          return {};
+        }
+
+        function writeProfiles(profiles) {
+          localStorage.setItem(profileStoreKey, JSON.stringify(profiles));
+        }
+
+        function captureCurrentProfilePayload() {
+          return {
+            wsUrl: els.wsUrl.value.trim(),
+            pairCode: els.pairCode.value.trim(),
+            token: els.tokenInput.value.trim(),
+            role: els.roleSelect.value,
+            enableGraph: els.graphToggle.value,
+            model: els.modelInput.value.trim(),
+            voice: els.voiceInput.value.trim(),
+            summaryFilePath: els.summaryFilePath.value.trim(),
+            summaryBullets: els.summaryBullets.value.trim(),
+            channelType: els.channelType.value.trim(),
+            channelAccountId: els.channelAccountId.value.trim(),
+            channelExternalUserId: els.channelExternalUserId.value.trim(),
+          };
+        }
+
+        function applyProfilePayload(payload) {
+          if (!payload || typeof payload !== "object") return;
+          if (payload.wsUrl) els.wsUrl.value = payload.wsUrl;
+          if (payload.pairCode !== undefined) els.pairCode.value = payload.pairCode;
+          if (payload.token !== undefined) els.tokenInput.value = payload.token;
+          if (payload.role !== undefined) els.roleSelect.value = payload.role;
+          if (payload.enableGraph !== undefined) els.graphToggle.value = payload.enableGraph;
+          if (payload.model !== undefined) els.modelInput.value = payload.model;
+          if (payload.voice !== undefined) els.voiceInput.value = payload.voice;
+          if (payload.summaryFilePath !== undefined) els.summaryFilePath.value = payload.summaryFilePath;
+          if (payload.summaryBullets !== undefined) {
+            const matches = [...els.summaryBullets.options].some((opt) => opt.value === payload.summaryBullets);
+            if (matches) {
+              els.summaryBullets.value = payload.summaryBullets;
+            }
+          }
+          if (payload.channelType !== undefined) {
+            const matches = [...els.channelType.options].some((opt) => opt.value === payload.channelType);
+            if (matches) {
+              els.channelType.value = payload.channelType;
+            }
+          }
+          if (payload.channelAccountId !== undefined) els.channelAccountId.value = payload.channelAccountId;
+          if (payload.channelExternalUserId !== undefined) {
+            els.channelExternalUserId.value = payload.channelExternalUserId;
+          }
+          savePrefs();
+          updateBadges();
+          maybeApplyToolArgsPreset();
+        }
+
+        function refreshProfileOptions(preferredName = "") {
+          const profiles = readProfiles();
+          const names = Object.keys(profiles).sort((a, b) => a.localeCompare(b));
+          const current = preferredName || localStorage.getItem(keys.profileSelected) || "";
+          els.profileSelect.innerHTML = '<option value="">(none)</option>';
+          for (const name of names) {
+            const option = document.createElement("option");
+            option.value = name;
+            option.textContent = name;
+            if (name === current) option.selected = true;
+            els.profileSelect.appendChild(option);
+          }
+          if (current && names.includes(current)) {
+            els.profileSelect.value = current;
+            els.profileName.value = current;
+          } else if (!current && names.length > 0) {
+            els.profileSelect.value = names[0];
+          }
+        }
+
+        function saveCurrentProfile() {
+          const name = els.profileName.value.trim() || els.profileSelect.value.trim();
+          if (!name) {
+            log("error", "Profile name is empty.");
+            return;
+          }
+          const profiles = readProfiles();
+          profiles[name] = captureCurrentProfilePayload();
+          writeProfiles(profiles);
+          localStorage.setItem(keys.profileSelected, name);
+          refreshProfileOptions(name);
+          log("system", `Saved profile '${name}'.`);
+        }
+
+        function loadSelectedProfile() {
+          const name = els.profileSelect.value.trim();
+          if (!name) {
+            log("error", "Select a profile first.");
+            return;
+          }
+          const profiles = readProfiles();
+          const payload = profiles[name];
+          if (!payload) {
+            log("error", `Profile '${name}' was not found.`);
+            refreshProfileOptions("");
+            return;
+          }
+          applyProfilePayload(payload);
+          localStorage.setItem(keys.profileSelected, name);
+          els.profileName.value = name;
+          log("system", `Loaded profile '${name}'.`);
+        }
+
+        function deleteSelectedProfile() {
+          const name = els.profileSelect.value.trim();
+          if (!name) {
+            log("error", "Select a profile first.");
+            return;
+          }
+          const profiles = readProfiles();
+          if (!(name in profiles)) {
+            log("error", `Profile '${name}' was not found.`);
+            refreshProfileOptions("");
+            return;
+          }
+          delete profiles[name];
+          writeProfiles(profiles);
+          if (localStorage.getItem(keys.profileSelected) === name) {
+            localStorage.removeItem(keys.profileSelected);
+          }
+          refreshProfileOptions("");
+          els.profileName.value = "";
+          log("system", `Deleted profile '${name}'.`);
+        }
+
         function loadPrefs() {
           const url = localStorage.getItem(keys.wsUrl);
+          const pairCode = localStorage.getItem(keys.pairCode);
           const token = localStorage.getItem(keys.token);
           const sid = localStorage.getItem(keys.sessionId);
           const summaryFilePath = localStorage.getItem(keys.summaryFilePath);
@@ -1099,6 +1301,7 @@
           const channelText = localStorage.getItem(keys.channelText);
           const channelCreateResponse = localStorage.getItem(keys.channelCreateResponse);
           if (url) els.wsUrl.value = url;
+          if (pairCode) els.pairCode.value = pairCode;
           if (token) els.tokenInput.value = token;
           if (sid) els.sessionId.value = sid;
           if (summaryFilePath) els.summaryFilePath.value = summaryFilePath;
@@ -1121,6 +1324,7 @@
           if (channelCreateResponse !== null) {
             els.channelCreateResponse.checked = channelCreateResponse === "true";
           }
+          refreshProfileOptions();
           updateBadges();
           updateM4EvidenceView();
         }
@@ -1149,6 +1353,250 @@
           } catch (err) {
             log("error", `Invalid JSON: ${err.message}`);
             return null;
+          }
+        }
+
+        function notifyEventWaiters(message) {
+          for (let i = eventWaiters.length - 1; i >= 0; i -= 1) {
+            const waiter = eventWaiters[i];
+            let matched = false;
+            try {
+              matched = Boolean(waiter.predicate(message));
+            } catch (err) {
+              clearTimeout(waiter.timer);
+              eventWaiters.splice(i, 1);
+              waiter.reject(err);
+              continue;
+            }
+            if (matched) {
+              clearTimeout(waiter.timer);
+              eventWaiters.splice(i, 1);
+              waiter.resolve(message);
+            }
+          }
+        }
+
+        function waitForEvent(predicate, timeoutMs, label = "event") {
+          return new Promise((resolve, reject) => {
+            const timer = setTimeout(() => {
+              const idx = eventWaiters.indexOf(waiter);
+              if (idx >= 0) eventWaiters.splice(idx, 1);
+              reject(new Error(`Timed out waiting for ${label}`));
+            }, timeoutMs);
+
+            const waiter = {
+              predicate,
+              resolve,
+              reject,
+              timer,
+            };
+            eventWaiters.push(waiter);
+          });
+        }
+
+        async function waitForSocketOpen(timeoutMs = 6000) {
+          if (hasOpenSocket()) return;
+          const startedAt = Date.now();
+          while (Date.now() - startedAt < timeoutMs) {
+            if (hasOpenSocket()) return;
+            await sleep(50);
+          }
+          throw new Error("Timed out waiting for websocket open");
+        }
+
+        async function refreshGatewayHealthSnapshot() {
+          if (!hasOpenSocket()) return;
+          try {
+            const pending = waitForEvent((msg) => msg.type === "GatewayHealth", 5000, "GatewayHealth");
+            sendObject({ type: "GetGatewayHealth" }, { silent: true });
+            await pending;
+          } catch (_) {
+            // Keep workflow running even if gateway health snapshot is unavailable.
+          }
+        }
+
+        function cancelWorkflowWaiters(reason = "Workflow canceled") {
+          const pending = eventWaiters.splice(0, eventWaiters.length);
+          for (const waiter of pending) {
+            clearTimeout(waiter.timer);
+            waiter.reject(new Error(reason));
+          }
+        }
+
+        function setWorkflowRunning(running) {
+          workflowState.running = running;
+          if (!running) {
+            workflowState.controller = null;
+          }
+          setWorkflowButtonsEnabled(!running);
+        }
+
+        function startWorkflow(kindLabel) {
+          if (workflowState.running) {
+            throw new Error("A workflow is already running.");
+          }
+          workflowState.controller = new AbortController();
+          setWorkflowRunning(true);
+          log("system", `${kindLabel} workflow started.`);
+          return workflowState.controller.signal;
+        }
+
+        function assertNotAborted(signal) {
+          if (signal?.aborted) {
+            throw new Error("Workflow aborted.");
+          }
+        }
+
+        function finishWorkflow(kindLabel) {
+          setWorkflowRunning(false);
+          log("system", `${kindLabel} workflow finished.`);
+        }
+
+        async function runBootstrapWorkflow() {
+          let signal;
+          const label = "Bootstrap";
+          try {
+            signal = startWorkflow(label);
+            if (!hasOpenSocket()) {
+              connect();
+            }
+            await waitForSocketOpen();
+            assertNotAborted(signal);
+
+            await refreshGatewayHealthSnapshot();
+            assertNotAborted(signal);
+
+            if (flowState.requirePairing && !flowState.paired) {
+              const code = els.pairCode.value.trim();
+              if (!code) {
+                throw new Error("Pairing code is empty.");
+              }
+              const pending = waitForEvent(
+                (msg) => msg.type === "PairSuccess" || msg.type === "PairFailure",
+                8000,
+                "PairSuccess/PairFailure"
+              );
+              sendObject({ type: "Pair", code });
+              const response = await pending;
+              if (response.type !== "PairSuccess") {
+                throw new Error(response.reason || "Pairing failed.");
+              }
+            }
+            assertNotAborted(signal);
+
+            if (flowState.requirePairing && !flowState.authenticated) {
+              const token = els.tokenInput.value.trim();
+              if (!token) {
+                throw new Error("Token is empty.");
+              }
+              const pending = waitForEvent(
+                (msg) =>
+                  msg.type === "Authenticated" ||
+                  (msg.type === "Error" &&
+                    typeof msg.code === "string" &&
+                    msg.code.toLowerCase().includes("auth")),
+                8000,
+                "Authenticated"
+              );
+              sendObject({ type: "Authenticate", token });
+              const response = await pending;
+              if (response.type !== "Authenticated") {
+                throw new Error(response.message || "Authentication failed.");
+              }
+            }
+            assertNotAborted(signal);
+
+            if (!flowState.sessionReady) {
+              const pending = waitForEvent(
+                (msg) =>
+                  msg.type === "SessionCreated" ||
+                  (msg.type === "Error" &&
+                    typeof msg.code === "string" &&
+                    (msg.code.toLowerCase().includes("session") ||
+                      msg.code.toLowerCase().includes("create"))),
+                10000,
+                "SessionCreated"
+              );
+              sendObject(buildCreateSessionMessage());
+              const response = await pending;
+              if (response.type !== "SessionCreated") {
+                throw new Error(response.message || "CreateSession failed.");
+              }
+            }
+
+            log("system", "Bootstrap workflow complete.");
+          } catch (err) {
+            log("error", `${label} workflow failed: ${err.message}`);
+          } finally {
+            finishWorkflow(label);
+          }
+        }
+
+        async function runOpsWorkflow() {
+          const label = "Ops";
+          try {
+            const signal = startWorkflow(label);
+            if (!hasOpenSocket()) {
+              connect();
+            }
+            await waitForSocketOpen();
+            assertNotAborted(signal);
+
+            const pendingPong = waitForEvent((msg) => msg.type === "Pong", 5000, "Pong");
+            const pendingHealth = waitForEvent((msg) => msg.type === "GatewayHealth", 5000, "GatewayHealth");
+            const pendingDiag = waitForEvent((msg) => msg.type === "Diagnostics", 5000, "Diagnostics");
+            sendObject({ type: "Ping" });
+            sendObject({ type: "GetGatewayHealth" });
+            sendObject({ type: "GetDiagnostics" });
+
+            await Promise.all([pendingPong, pendingHealth, pendingDiag]);
+            assertNotAborted(signal);
+            log("system", "Ops workflow complete.");
+          } catch (err) {
+            log("error", `${label} workflow failed: ${err.message}`);
+          } finally {
+            finishWorkflow(label);
+          }
+        }
+
+        async function runReadmeSummaryWorkflow() {
+          const label = "README Summary";
+          try {
+            await runBootstrapWorkflow();
+            if (!hasOpenSocket()) {
+              throw new Error("Socket not open after bootstrap.");
+            }
+            if (!activeSessionId()) {
+              throw new Error("Session is not ready.");
+            }
+
+            const signal = startWorkflow(label);
+            assertNotAborted(signal);
+
+            const prompt = applyReadSummaryPrompt();
+            const sid = activeSessionId();
+            const pending = waitForEvent(
+              (msg) =>
+                (msg.type === "PromptAccepted" && msg.session_id === sid) ||
+                (msg.type === "Error" && msg.session_id === sid),
+              8000,
+              "PromptAccepted"
+            );
+            sendObject({
+              type: "SessionPrompt",
+              session_id: sid,
+              prompt,
+              create_response: true,
+            });
+            const response = await pending;
+            if (response.type !== "PromptAccepted") {
+              throw new Error(response.message || "Prompt submission failed.");
+            }
+            log("system", "README summary workflow submitted prompt successfully.");
+          } catch (err) {
+            log("error", `${label} workflow failed: ${err.message}`);
+          } finally {
+            finishWorkflow(label);
           }
         }
 
@@ -1811,6 +2259,8 @@
             const reason = event.reason || "no reason";
             setStatus("closed", `${event.code}`);
             resetFlowState();
+            cancelWorkflowWaiters(`Socket closed (${event.code})`);
+            setWorkflowRunning(false);
             log("system", `Socket closed (${event.code}) - ${reason}`);
             await stopMicStream();
             refreshMicControls();
@@ -1828,6 +2278,7 @@
 
             const parsed = parseJson(text);
             if (!parsed || typeof parsed !== "object") return;
+            notifyEventWaiters(parsed);
 
             if (parsed.type === "PairSuccess" && parsed.token) {
               els.tokenInput.value = parsed.token;
@@ -2104,6 +2555,40 @@
           }
         });
         els.disconnectBtn.addEventListener("click", disconnect);
+        els.saveProfileBtn.addEventListener("click", saveCurrentProfile);
+        els.loadProfileBtn.addEventListener("click", loadSelectedProfile);
+        els.deleteProfileBtn.addEventListener("click", deleteSelectedProfile);
+        els.profileSelect.addEventListener("change", () => {
+          const selected = els.profileSelect.value.trim();
+          localStorage.setItem(keys.profileSelected, selected);
+          els.profileName.value = selected;
+          savePrefs();
+        });
+        els.workflowBootstrapBtn.addEventListener("click", () => {
+          runBootstrapWorkflow().catch((err) => {
+            log("error", `Bootstrap workflow failed: ${err.message}`);
+          });
+        });
+        els.workflowOpsBtn.addEventListener("click", () => {
+          runOpsWorkflow().catch((err) => {
+            log("error", `Ops workflow failed: ${err.message}`);
+          });
+        });
+        els.workflowReadmeBtn.addEventListener("click", () => {
+          runReadmeSummaryWorkflow().catch((err) => {
+            log("error", `README summary workflow failed: ${err.message}`);
+          });
+        });
+        els.workflowAbortBtn.addEventListener("click", () => {
+          if (!workflowState.running || !workflowState.controller) {
+            log("system", "No workflow is running.");
+            return;
+          }
+          workflowState.controller.abort();
+          cancelWorkflowWaiters("Workflow aborted by user");
+          setWorkflowRunning(false);
+          log("system", "Workflow aborted.");
+        });
 
         els.pairBtn.addEventListener("click", () => {
           const code = els.pairCode.value.trim();
@@ -2434,8 +2919,11 @@
 
         [
           els.wsUrl,
+          els.pairCode,
           els.tokenInput,
           els.sessionId,
+          els.profileName,
+          els.profileSelect,
           els.summaryFilePath,
           els.summaryBullets,
           els.memoryProbePath,
@@ -2472,6 +2960,7 @@
         setPlaybackStatus("idle");
         refreshMicControls();
         refreshFlowControls();
+        setWorkflowButtonsEnabled(true);
         maybeApplyToolArgsPreset();
         if (!window.isSecureContext) {
           log(
