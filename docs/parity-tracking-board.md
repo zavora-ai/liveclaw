@@ -163,7 +163,7 @@ Status scale: `NOT_STARTED`, `IN_PROGRESS`, `AT_RISK`, `BLOCKED`, `DONE`
 | Implement outbound channel delivery contract | DONE | `liveclaw-gateway/src/protocol.rs` adds `GetChannelOutbound`/`ChannelOutboundBatch`; `liveclaw-gateway/src/server.rs` queues final transcripts per channel route and exposes WS + HTTP outbound poll (`/channels/outbound/poll`) |
 | Keep browser WS client aligned for outbound contract validation | DONE | `tools/ws-client/index.html` adds outbound poll controls and `ChannelOutboundBatch` activity view |
 
-## Sprint 14 Checklist (IN_PROGRESS)
+## Sprint 14 Checklist (DONE)
 
 | Item | Status | Evidence |
 |---|---|---|
@@ -172,8 +172,9 @@ Status scale: `NOT_STARTED`, `IN_PROGRESS`, `AT_RISK`, `BLOCKED`, `DONE`
 | Add scheduler lifecycle tests (auth, validation, owner isolation) | DONE | `liveclaw-gateway/src/server.rs` tests `test_create_channel_job_requires_auth`, `test_channel_job_lifecycle_create_list_cancel`, `test_cancel_channel_job_rejects_non_owner`, plus interval validation checks |
 | Keep browser WS client aligned for channel job operations | DONE | `tools/ws-client/index.html` adds Channel Job controls, activity pane, response rendering, and raw templates for create/list/cancel |
 | Add HTTP scheduler surface for channel jobs with token-auth policy | DONE | `liveclaw-gateway/src/server.rs` adds `/channels/jobs/create`, `/channels/jobs/list`, `/channels/jobs/cancel` with auth + ownership enforcement and HTTP tests |
+| Add webhook-triggered supervised action entrypoint | DONE | `liveclaw-gateway/src/server.rs` adds `/channels/webhook/supervised-action` with enforced `SessionConfig.role=supervised` + graph-enabled tool-call path and HTTP tests |
 | Extend M6 release-flow checks for scheduler surfaces | DONE | `scripts/demo/m6_release_flow.sh` includes protocol + server tests for channel job messages/responses and lifecycle |
-| Deliver remaining tooling/automation closeout surfaces (policy-controlled browser/http/cron) | IN_PROGRESS | Tracked in `docs/closeout-plan.md` Phase 3 |
+| Deliver remaining tooling/automation closeout surfaces (policy-controlled browser/http/cron) | DONE | `liveclaw-gateway/src/server.rs` adds cron tick execution coverage (`test_channel_job_tick_routes_text_for_owner_principal`, `test_channel_job_tick_honors_create_response_flag`) and `scripts/demo/m6_release_flow.sh` validates the checks end-to-end |
 
 ## Closeout Phase 1 Kickoff (2026-02-21)
 

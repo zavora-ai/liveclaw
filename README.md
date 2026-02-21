@@ -262,6 +262,7 @@ Webhook/Slack/Telegram payloads into the same `ChannelInbound` route used by WS 
 - `POST /channels/jobs/create`
 - `GET /channels/jobs/list`
 - `POST /channels/jobs/cancel`
+- `POST /channels/webhook/supervised-action`
 
 When pairing is enabled, send the paired token as `Authorization: Bearer <token>`.
 
@@ -352,6 +353,21 @@ curl -sS -X POST http://127.0.0.1:8420/channels/jobs/cancel \
   -H "Content-Type: application/json" \
   -d '{
     "job_id":"<JOB_ID>"
+  }'
+```
+
+Example webhook-triggered supervised action:
+
+```bash
+curl -sS -X POST http://127.0.0.1:8420/channels/webhook/supervised-action \
+  -H "Authorization: Bearer ${LIVECLAW_TOKEN}" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "account_id":"acct-1",
+    "external_user_id":"user-1",
+    "tool_name":"echo_text",
+    "arguments":{"text":"hello from webhook"},
+    "text":"supervised action trigger"
   }'
 ```
 

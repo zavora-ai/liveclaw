@@ -155,6 +155,8 @@ struct ChannelInboundRequest<'a> {
     external_user_id: &'a str,
     text: &'a str,
     create_response: bool,
+    session_config_on_create: Option<SessionConfig>,
+    force_session_recreate: bool,
 }
 
 struct ChannelOutboundPollRequest<'a> {
@@ -215,6 +217,18 @@ struct ChannelJobCreatePayload {
 #[derive(Debug, Clone, Deserialize)]
 struct ChannelJobCancelPayload {
     job_id: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct WebhookSupervisedActionPayload {
+    channel: Option<String>,
+    account_id: String,
+    external_user_id: String,
+    text: Option<String>,
+    tool_name: String,
+    arguments: serde_json::Value,
+    create_response: Option<bool>,
+    force_session_recreate: Option<bool>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -430,6 +444,10 @@ fn build_router(state: AppState) -> Router {
         .route("/channels/jobs/create", post(channel_job_create_handler))
         .route("/channels/jobs/cancel", post(channel_job_cancel_handler))
         .route("/channels/jobs/list", get(channel_job_list_handler))
+        .route(
+            "/channels/webhook/supervised-action",
+            post(channel_webhook_supervised_action_handler),
+        )
         .with_state(state)
 }
 
@@ -474,6 +492,8 @@ async fn channel_webhook_handler(
             external_user_id: &payload.external_user_id,
             text: &payload.text,
             create_response,
+            session_config_on_create: None,
+            force_session_recreate: false,
         },
         token,
         &state,
@@ -553,6 +573,8 @@ async fn channel_slack_events_handler(
             external_user_id,
             text,
             create_response: query.create_response.unwrap_or(true),
+            session_config_on_create: None,
+            force_session_recreate: false,
         },
         token,
         &state,
@@ -615,6 +637,8 @@ async fn channel_telegram_update_handler(
             external_user_id: &external_user_id,
             text,
             create_response: query.create_response.unwrap_or(true),
+            session_config_on_create: None,
+            force_session_recreate: false,
         },
         token,
         &state,
@@ -686,6 +710,104 @@ async fn channel_job_list_handler(
     let token = extract_channel_token(&headers, &query);
     let resp = handle_channel_http_list_jobs(token, &state).await;
     http_response_from_gateway(resp)
+}
+
+async fn channel_webhook_supervised_action_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(query): Query<ChannelIngressQuery>,
+    JsonExtract(payload): JsonExtract<WebhookSupervisedActionPayload>,
+) -> impl IntoResponse {
+    let token = extract_channel_token(&headers, &query);
+    let channel = payload.channel.as_deref().unwrap_or("webhook");
+    let text = payload
+        .text
+        .as_deref()
+        .unwrap_or("Webhook supervised action trigger");
+    let create_response = payload
+        .create_response
+        .or(query.create_response)
+        .unwrap_or(false);
+    let force_session_recreate = payload.force_session_recreate.unwrap_or(true);
+
+    let principal_id = match authenticate_http_principal(token.as_deref(), &state) {
+        Ok(id) => id,
+        Err(resp) => return http_response_from_gateway(*resp),
+    };
+    let mut conn = ConnectionState {
+        authenticated: true,
+        token,
+        principal_id: Some(principal_id),
+        owned_sessions: Vec::new(),
+    };
+
+    let route_resp = handle_channel_inbound(
+        ChannelInboundRequest {
+            channel,
+            account_id: &payload.account_id,
+            external_user_id: &payload.external_user_id,
+            text,
+            create_response,
+            session_config_on_create: Some(SessionConfig {
+                model: None,
+                voice: None,
+                instructions: None,
+                role: Some("supervised".to_string()),
+                enable_graph: Some(true),
+            }),
+            force_session_recreate,
+        },
+        &state,
+        &mut conn,
+        None,
+        None,
+    )
+    .await;
+
+    let (channel, account_id, external_user_id, session_id) = match route_resp {
+        GatewayResponse::ChannelRouted {
+            channel,
+            account_id,
+            external_user_id,
+            session_id,
+        } => (channel, account_id, external_user_id, session_id),
+        other => return http_response_from_gateway(other),
+    };
+
+    let (ws_tx, _ws_rx) = mpsc::channel(4);
+    let (ws_priority_tx, _ws_priority_rx) = mpsc::channel(4);
+    let tool_resp = handle_session_tool_call(
+        &session_id,
+        &payload.tool_name,
+        payload.arguments,
+        &state,
+        &mut conn,
+        &ws_tx,
+        &ws_priority_tx,
+    )
+    .await;
+
+    match tool_resp {
+        GatewayResponse::SessionToolResult {
+            tool_name,
+            result,
+            graph,
+            ..
+        } => (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "type": "WebhookSupervisedActionResult",
+                "channel": channel,
+                "account_id": account_id,
+                "external_user_id": external_user_id,
+                "session_id": session_id,
+                "tool_name": tool_name,
+                "result": result,
+                "graph": graph,
+            })),
+        ),
+        other => http_response_from_gateway(other),
+    }
 }
 
 fn extract_channel_token(headers: &HeaderMap, query: &ChannelIngressQuery) -> Option<String> {
@@ -1148,6 +1270,8 @@ async fn handle_message(
                     external_user_id: &external_user_id,
                     text: &text,
                     create_response: create_response.unwrap_or(true),
+                    session_config_on_create: None,
+                    force_session_recreate: false,
                 },
                 state,
                 conn,
@@ -1861,6 +1985,8 @@ async fn run_channel_job_tick(state: &AppState, job: &ChannelJob, owner_principa
             external_user_id: &job.external_user_id,
             text: &job.text,
             create_response: job.create_response,
+            session_config_on_create: None,
+            force_session_recreate: false,
         },
         state,
         &mut conn,
@@ -2129,6 +2255,50 @@ async fn handle_channel_inbound(
         let routes = state.channel_routes.read().await;
         routes.get(&route_key).cloned()
     };
+    let create_session_config = request.session_config_on_create.clone();
+
+    if request.force_session_recreate {
+        if let Some(existing_session_id) = mapped_session.as_ref() {
+            state.channel_routes.write().await.remove(&route_key);
+            state
+                .session_channel_routes
+                .write()
+                .await
+                .remove(existing_session_id);
+            state.channel_outbox.write().await.remove(&route_key);
+            state
+                .ws_response_senders
+                .write()
+                .await
+                .remove(existing_session_id);
+            state
+                .ws_priority_senders
+                .write()
+                .await
+                .remove(existing_session_id);
+            state
+                .audio_senders
+                .write()
+                .await
+                .remove(existing_session_id);
+            state
+                .session_owners
+                .write()
+                .await
+                .remove(existing_session_id);
+            if let Err(e) = state.runner.terminate_session(existing_session_id).await {
+                warn!(
+                    "Failed to terminate replaced channel session {}: {}",
+                    existing_session_id, e
+                );
+            }
+        }
+    }
+    let mapped_session = if request.force_session_recreate {
+        None
+    } else {
+        mapped_session
+    };
 
     let session_id = if let Some(existing_session_id) = mapped_session {
         let exists = state
@@ -2146,7 +2316,7 @@ async fn handle_channel_inbound(
                 .await
                 .remove(&existing_session_id);
             let created = match handle_create_session_internal(
-                None,
+                create_session_config.clone(),
                 state,
                 conn,
                 ws_tx,
@@ -2165,11 +2335,18 @@ async fn handle_channel_inbound(
             created
         }
     } else {
-        let created =
-            match handle_create_session_internal(None, state, conn, ws_tx, ws_priority_tx).await {
-                GatewayResponse::SessionCreated { session_id } => session_id,
-                other => return other,
-            };
+        let created = match handle_create_session_internal(
+            create_session_config,
+            state,
+            conn,
+            ws_tx,
+            ws_priority_tx,
+        )
+        .await
+        {
+            GatewayResponse::SessionCreated { session_id } => session_id,
+            other => return other,
+        };
         state
             .channel_routes
             .write()
@@ -2557,6 +2734,8 @@ mod tests {
         audio_commit_err: Option<String>,
         /// If set, create_response returns this error.
         response_create_err: Option<String>,
+        /// Count of create_response calls.
+        response_create_calls: Arc<std::sync::Mutex<usize>>,
         /// If set, interrupt_response returns this error.
         response_interrupt_err: Option<String>,
         /// If set, send_text returns this error.
@@ -2569,6 +2748,8 @@ mod tests {
         last_prompt: Arc<std::sync::Mutex<Option<String>>>,
         /// Recorded tool calls: (tool_name, arguments).
         tool_calls: Arc<std::sync::Mutex<Vec<(String, serde_json::Value)>>>,
+        /// Recorded configs passed into create_session.
+        created_session_configs: Arc<std::sync::Mutex<Vec<Option<SessionConfig>>>>,
     }
 
     impl MockRunner {
@@ -2579,12 +2760,14 @@ mod tests {
                 audio_err: None,
                 audio_commit_err: None,
                 response_create_err: None,
+                response_create_calls: Arc::new(std::sync::Mutex::new(0)),
                 response_interrupt_err: None,
                 send_text_err: None,
                 tool_call_err: None,
                 diagnostics_err: None,
                 last_prompt: Arc::new(std::sync::Mutex::new(None)),
                 tool_calls: Arc::new(std::sync::Mutex::new(Vec::new())),
+                created_session_configs: Arc::new(std::sync::Mutex::new(Vec::new())),
             }
         }
 
@@ -2595,12 +2778,14 @@ mod tests {
                 audio_err: None,
                 audio_commit_err: None,
                 response_create_err: None,
+                response_create_calls: Arc::new(std::sync::Mutex::new(0)),
                 response_interrupt_err: None,
                 send_text_err: None,
                 tool_call_err: None,
                 diagnostics_err: None,
                 last_prompt: Arc::new(std::sync::Mutex::new(None)),
                 tool_calls: Arc::new(std::sync::Mutex::new(Vec::new())),
+                created_session_configs: Arc::new(std::sync::Mutex::new(Vec::new())),
             }
         }
     }
@@ -2611,8 +2796,12 @@ mod tests {
             &self,
             _user_id: &str,
             session_id: &str,
-            _config: Option<SessionConfig>,
+            config: Option<SessionConfig>,
         ) -> anyhow::Result<String> {
+            self.created_session_configs
+                .lock()
+                .expect("created_session_configs mutex poisoned")
+                .push(config);
             match &self.create_err {
                 Some(e) => Err(anyhow::anyhow!("{}", e)),
                 None => Ok(session_id.to_string()),
@@ -2641,6 +2830,11 @@ mod tests {
         }
 
         async fn create_response(&self, _session_id: &str) -> anyhow::Result<()> {
+            let mut calls = self
+                .response_create_calls
+                .lock()
+                .expect("response_create_calls mutex poisoned");
+            *calls += 1;
             match &self.response_create_err {
                 Some(e) => Err(anyhow::anyhow!("{}", e)),
                 None => Ok(()),
@@ -4304,6 +4498,97 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_channel_job_tick_routes_text_for_owner_principal() {
+        let runner = MockRunner::ok();
+        let last_prompt = runner.last_prompt.clone();
+        let state = make_state(runner, false);
+        let job = ChannelJob {
+            job_id: "job-cron-1".to_string(),
+            channel: "webhook".to_string(),
+            account_id: "acct-cron".to_string(),
+            external_user_id: "user-cron".to_string(),
+            text: "scheduled ping".to_string(),
+            interval_seconds: 60,
+            create_response: false,
+            created_at_unix_ms: now_unix_ms(),
+        };
+
+        run_channel_job_tick(&state, &job, "principal-cron").await;
+
+        let prompt = last_prompt
+            .lock()
+            .expect("last_prompt mutex poisoned")
+            .clone();
+        assert_eq!(prompt.as_deref(), Some("scheduled ping"));
+
+        let route_key = ChannelRouteKey {
+            principal_id: "principal-cron".to_string(),
+            channel: "webhook".to_string(),
+            account_id: "acct-cron".to_string(),
+            external_user_id: "user-cron".to_string(),
+        };
+        let session_id = state
+            .channel_routes
+            .read()
+            .await
+            .get(&route_key)
+            .cloned()
+            .expect("channel route should be created by tick");
+        assert_eq!(
+            state
+                .session_owners
+                .read()
+                .await
+                .get(&session_id)
+                .map(String::as_str),
+            Some("principal-cron")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_channel_job_tick_honors_create_response_flag() {
+        let runner = MockRunner::ok();
+        let response_create_calls = runner.response_create_calls.clone();
+        let state = make_state(runner, false);
+        let no_response_job = ChannelJob {
+            job_id: "job-cron-noresp".to_string(),
+            channel: "webhook".to_string(),
+            account_id: "acct-cron".to_string(),
+            external_user_id: "user-cron".to_string(),
+            text: "scheduled ping".to_string(),
+            interval_seconds: 60,
+            create_response: false,
+            created_at_unix_ms: now_unix_ms(),
+        };
+        let with_response_job = ChannelJob {
+            job_id: "job-cron-resp".to_string(),
+            channel: "webhook".to_string(),
+            account_id: "acct-cron".to_string(),
+            external_user_id: "user-cron".to_string(),
+            text: "scheduled ping".to_string(),
+            interval_seconds: 60,
+            create_response: true,
+            created_at_unix_ms: now_unix_ms(),
+        };
+
+        run_channel_job_tick(&state, &no_response_job, "principal-cron").await;
+        assert_eq!(
+            *response_create_calls
+                .lock()
+                .expect("response_create_calls mutex poisoned"),
+            0
+        );
+
+        run_channel_job_tick(&state, &with_response_job, "principal-cron").await;
+        assert_eq!(
+            *response_create_calls
+                .lock()
+                .expect("response_create_calls mutex poisoned"),
+            1
+        );
+    }
+
+    #[tokio::test]
     async fn test_create_channel_job_rejects_zero_interval() {
         let state = make_state(MockRunner::ok(), false);
         let mut conn = authed_conn();
@@ -4666,6 +4951,72 @@ mod tests {
         let (status, body) = request_json(app, request).await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
         assert_eq!(body["code"], serde_json::json!("invalid_channel_job"));
+    }
+
+    #[tokio::test]
+    async fn test_channel_webhook_supervised_action_http_requires_auth_token() {
+        let state = make_state(MockRunner::ok(), true);
+        let app = build_router(state);
+
+        let request = Request::builder()
+            .method("POST")
+            .uri("/channels/webhook/supervised-action")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(
+                r#"{"account_id":"acct-1","external_user_id":"user-1","tool_name":"echo_text","arguments":{"text":"hello"}}"#,
+            ))
+            .expect("request");
+
+        let (status, body) = request_json(app, request).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(body["code"], serde_json::json!("auth_required"));
+    }
+
+    #[tokio::test]
+    async fn test_channel_webhook_supervised_action_http_returns_tool_result_and_uses_supervised_role(
+    ) {
+        let runner = MockRunner::ok();
+        let create_configs = runner.created_session_configs.clone();
+        let state = make_state(runner, true);
+        let token = paired_token(&state);
+        let app = build_router(state);
+
+        let request = Request::builder()
+            .method("POST")
+            .uri("/channels/webhook/supervised-action")
+            .header(header::CONTENT_TYPE, "application/json")
+            .header(header::AUTHORIZATION, format!("Bearer {}", token))
+            .body(Body::from(
+                r#"{
+                  "account_id":"acct-1",
+                  "external_user_id":"user-1",
+                  "text":"trigger supervised action",
+                  "tool_name":"echo_text",
+                  "arguments":{"text":"hello from webhook action"}
+                }"#,
+            ))
+            .expect("request");
+
+        let (status, body) = request_json(app, request).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            body["type"],
+            serde_json::json!("WebhookSupervisedActionResult")
+        );
+        assert_eq!(body["channel"], serde_json::json!("webhook"));
+        assert_eq!(body["account_id"], serde_json::json!("acct-1"));
+        assert_eq!(body["external_user_id"], serde_json::json!("user-1"));
+        assert_eq!(body["tool_name"], serde_json::json!("echo_text"));
+        assert_eq!(body["result"]["status"], serde_json::json!("ok"));
+        assert!(body["session_id"].as_str().is_some());
+
+        let configs = create_configs
+            .lock()
+            .expect("created_session_configs mutex poisoned");
+        assert_eq!(configs.len(), 1);
+        let cfg = configs[0].as_ref().expect("session config");
+        assert_eq!(cfg.role.as_deref(), Some("supervised"));
+        assert_eq!(cfg.enable_graph, Some(true));
     }
 
     // --- Base64 helpers ---

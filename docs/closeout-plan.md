@@ -1,7 +1,7 @@
 # LiveClaw Project Closeout Plan
 
 Date: 2026-02-21
-Status: Phase 1 started
+Status: Phase 3 complete; Phase 4 in progress
 Owner: Core Team
 
 ## Objective
@@ -28,10 +28,7 @@ Close the remaining parity and release-candidate scope so the project can be dec
 
 ## Remaining Blockers
 
-1. OpenClaw-track scope not yet implemented end-to-end:
-   - Browser/Cron baseline tool surfaces with policy controls.
-   - Webhook-triggered supervised actions and cron/operator policy evidence (HTTP + interval scheduling surfaces are implemented, but closeout evidence is incomplete).
-2. Release candidate artifacts:
+1. Release candidate artifacts:
    - Runbook, deployment guide, rollback playbook.
    - Concurrent-session load test evidence and smoke-suite sign-off.
 
@@ -56,7 +53,7 @@ Close the remaining parity and release-candidate scope so the project can be dec
 
 1. Deliver browser, HTTP, and cron tool surfaces with policy controls.
 2. Add background scheduling and webhook-trigger start path.
-   - Status: HTTP + interval-based channel scheduling delivered; webhook-supervised trigger policy path remains.
+   - Status: HTTP + interval-based channel scheduling delivered, including webhook-supervised trigger path and cron/operator execution evidence.
 3. Add operator visibility for active sessions and jobs.
 4. Exit criteria:
    - Tooling/automation demo script passes with policy checks.
@@ -97,3 +94,5 @@ Close the remaining parity and release-candidate scope so the project can be dec
 7. 2026-02-21: completed outbound delivery contract slice by adding channel-scoped outbound queueing for final transcripts and retrieval via WS (`GetChannelOutbound`) and HTTP (`/channels/outbound/poll`).
 8. 2026-02-21: completed channel scheduler slice by adding principal-scoped `CreateChannelJob` / `ListChannelJobs` / `CancelChannelJob`, `active_channel_jobs` health visibility, and browser WS client controls with M6 demo coverage.
 9. 2026-02-21: completed HTTP channel-job surface (`/channels/jobs/create`, `/channels/jobs/list`, `/channels/jobs/cancel`) with token-authenticated policy checks and release-flow test coverage.
+10. 2026-02-21: completed webhook-supervised trigger path (`/channels/webhook/supervised-action`) that forces `SessionConfig.role=supervised`, executes `SessionToolCall` through the graph path, and returns action results via HTTP.
+11. 2026-02-21: closed cron/operator policy evidence by adding deterministic channel-job tick execution tests (`test_channel_job_tick_routes_text_for_owner_principal`, `test_channel_job_tick_honors_create_response_flag`) and wiring them into `scripts/demo/m6_release_flow.sh`.

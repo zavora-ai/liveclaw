@@ -43,13 +43,17 @@ demo_header "M6 Release Candidate Flow"
   cargo test -p liveclaw-gateway --lib server::tests::test_channel_job_create_http_requires_auth_token -- --exact
   cargo test -p liveclaw-gateway --lib server::tests::test_channel_job_http_create_list_cancel_with_bearer_token -- --exact
   cargo test -p liveclaw-gateway --lib server::tests::test_channel_job_http_create_rejects_zero_interval -- --exact
+  cargo test -p liveclaw-gateway --lib server::tests::test_channel_webhook_supervised_action_http_requires_auth_token -- --exact
+  cargo test -p liveclaw-gateway --lib server::tests::test_channel_webhook_supervised_action_http_returns_tool_result_and_uses_supervised_role -- --exact
   cargo test -p liveclaw-gateway --lib server::tests::test_create_channel_job_requires_auth -- --exact
   cargo test -p liveclaw-gateway --lib server::tests::test_list_channel_jobs_requires_auth -- --exact
   cargo test -p liveclaw-gateway --lib server::tests::test_cancel_channel_job_requires_auth -- --exact
   cargo test -p liveclaw-gateway --lib server::tests::test_create_channel_job_rejects_zero_interval -- --exact
   cargo test -p liveclaw-gateway --lib server::tests::test_channel_job_lifecycle_create_list_cancel -- --exact
+  cargo test -p liveclaw-gateway --lib server::tests::test_channel_job_tick_routes_text_for_owner_principal -- --exact
+  cargo test -p liveclaw-gateway --lib server::tests::test_channel_job_tick_honors_create_response_flag -- --exact
   cargo test -p liveclaw-gateway --lib server::tests::test_cancel_channel_job_rejects_non_owner -- --exact
   cargo test -p liveclaw-gateway --lib protocol::tests::test_supported_protocol_message_lists_include_diagnostics_path -- --exact
 )
 
-demo_pass "Gateway WS/HTTP health, priority control-plane, channel routing/outbound, and channel-job scheduler checks passed"
+demo_pass "Gateway WS/HTTP health, priority control-plane, channel routing/outbound, channel-job scheduler, and webhook-supervised action checks passed"
