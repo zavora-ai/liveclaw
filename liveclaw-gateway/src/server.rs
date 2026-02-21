@@ -54,6 +54,9 @@ pub trait RunnerHandle: Send + Sync {
     /// Interrupt an in-flight model response.
     async fn interrupt_response(&self, session_id: &str) -> anyhow::Result<()>;
 
+    /// Send a prompt text into the session conversation.
+    async fn send_text(&self, session_id: &str, prompt: &str) -> anyhow::Result<()>;
+
     /// Execute a tool call through the runtime graph path for deterministic
     /// M3 validation.
     async fn session_tool_call(
@@ -490,6 +493,26 @@ async fn handle_message(
             handle_session_response_interrupt(&session_id, state, conn, ws_tx, ws_priority_tx).await
         }
 
+        GatewayMessage::SessionPrompt {
+            session_id,
+            prompt,
+            create_response,
+        } => {
+            if !conn.authenticated {
+                return auth_required_error();
+            }
+            handle_session_prompt(
+                &session_id,
+                &prompt,
+                create_response.unwrap_or(true),
+                state,
+                conn,
+                ws_tx,
+                ws_priority_tx,
+            )
+            .await
+        }
+
         GatewayMessage::SessionToolCall {
             session_id,
             tool_name,
@@ -805,6 +828,57 @@ async fn handle_session_response_interrupt(
                 message: format!("Failed to interrupt response: {}", e),
             }
         }
+    }
+}
+
+/// Handle SessionPrompt — forward a text prompt to the active provider-side
+/// conversation, optionally triggering response generation.
+async fn handle_session_prompt(
+    session_id: &str,
+    prompt: &str,
+    create_response: bool,
+    state: &AppState,
+    conn: &mut ConnectionState,
+    ws_tx: &mpsc::Sender<GatewayResponse>,
+    ws_priority_tx: &mpsc::Sender<GatewayResponse>,
+) -> GatewayResponse {
+    if let Err(resp) =
+        authorize_session_access(session_id, state, conn, Some(ws_tx), Some(ws_priority_tx)).await
+    {
+        return resp;
+    }
+
+    let trimmed = prompt.trim();
+    if trimmed.is_empty() {
+        return GatewayResponse::Error {
+            code: "invalid_prompt".to_string(),
+            message: "Prompt is empty".to_string(),
+        };
+    }
+
+    if let Err(e) = state.runner.send_text(session_id, trimmed).await {
+        warn!("Failed to send prompt for session {}: {}", session_id, e);
+        return GatewayResponse::Error {
+            code: "session_prompt_failed".to_string(),
+            message: format!("Failed to send prompt: {}", e),
+        };
+    }
+
+    if create_response {
+        if let Err(e) = state.runner.create_response(session_id).await {
+            warn!(
+                "Prompt sent but failed to create response for session {}: {}",
+                session_id, e
+            );
+            return GatewayResponse::Error {
+                code: "session_prompt_response_failed".to_string(),
+                message: format!("Prompt queued, but create_response failed: {}", e),
+            };
+        }
+    }
+
+    GatewayResponse::PromptAccepted {
+        session_id: session_id.to_string(),
     }
 }
 
@@ -1137,6 +1211,8 @@ mod tests {
         response_create_err: Option<String>,
         /// If set, interrupt_response returns this error.
         response_interrupt_err: Option<String>,
+        /// If set, send_text returns this error.
+        send_text_err: Option<String>,
         /// If set, session_tool_call returns this error.
         tool_call_err: Option<String>,
         /// If set, diagnostics returns this error.
@@ -1152,6 +1228,7 @@ mod tests {
                 audio_commit_err: None,
                 response_create_err: None,
                 response_interrupt_err: None,
+                send_text_err: None,
                 tool_call_err: None,
                 diagnostics_err: None,
             }
@@ -1165,6 +1242,7 @@ mod tests {
                 audio_commit_err: None,
                 response_create_err: None,
                 response_interrupt_err: None,
+                send_text_err: None,
                 tool_call_err: None,
                 diagnostics_err: None,
             }
@@ -1215,6 +1293,13 @@ mod tests {
 
         async fn interrupt_response(&self, _session_id: &str) -> anyhow::Result<()> {
             match &self.response_interrupt_err {
+                Some(e) => Err(anyhow::anyhow!("{}", e)),
+                None => Ok(()),
+            }
+        }
+
+        async fn send_text(&self, _session_id: &str, _prompt: &str) -> anyhow::Result<()> {
+            match &self.send_text_err {
                 Some(e) => Err(anyhow::anyhow!("{}", e)),
                 None => Ok(()),
             }
@@ -1606,6 +1691,29 @@ mod tests {
         let resp = handle_message(
             GatewayMessage::SessionResponseInterrupt {
                 session_id: "s1".into(),
+            },
+            &state,
+            &mut conn,
+            &ws_tx,
+            &ws_priority_tx,
+        )
+        .await;
+        match resp {
+            GatewayResponse::Error { code, .. } => assert_eq!(code, "auth_required"),
+            other => panic!("Expected auth_required error, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_session_prompt_requires_auth() {
+        let state = make_state(MockRunner::ok(), true);
+        let mut conn = unauthed_conn();
+        let (ws_tx, ws_priority_tx) = dummy_ws_txs();
+        let resp = handle_message(
+            GatewayMessage::SessionPrompt {
+                session_id: "s1".into(),
+                prompt: "Use add_numbers for 2 and 3".into(),
+                create_response: Some(true),
             },
             &state,
             &mut conn,
@@ -2049,6 +2157,33 @@ mod tests {
                 assert_eq!(session_id, "sess-1");
             }
             other => panic!("Expected ResponseInterruptAccepted, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_session_prompt_forwards_to_runner() {
+        let state = make_state(MockRunner::ok(), false);
+        let mut conn = authed_conn();
+        let (ws_tx, ws_priority_tx) = dummy_ws_txs();
+        conn.owned_sessions.push("sess-1".to_string());
+
+        let resp = handle_message(
+            GatewayMessage::SessionPrompt {
+                session_id: "sess-1".into(),
+                prompt: "Use utc_time and return UTC".into(),
+                create_response: Some(true),
+            },
+            &state,
+            &mut conn,
+            &ws_tx,
+            &ws_priority_tx,
+        )
+        .await;
+        match resp {
+            GatewayResponse::PromptAccepted { session_id } => {
+                assert_eq!(session_id, "sess-1");
+            }
+            other => panic!("Expected PromptAccepted, got {:?}", other),
         }
     }
 

@@ -64,6 +64,7 @@ trait SessionRuntime: Send + Sync {
     async fn run(&self) -> Result<()>;
     async fn close(&self) -> Result<()>;
     async fn send_audio_base64(&self, audio_base64: &str) -> Result<()>;
+    async fn send_text(&self, text: &str) -> Result<()>;
     async fn commit_audio(&self) -> Result<()>;
     async fn create_response(&self) -> Result<()>;
     async fn interrupt_response(&self) -> Result<()>;
@@ -107,6 +108,13 @@ impl SessionRuntime for RealtimeRunnerRuntime {
             .send_audio(audio_base64)
             .await
             .map_err(|e| anyhow::anyhow!("Failed to send audio to realtime provider: {}", e))
+    }
+
+    async fn send_text(&self, text: &str) -> Result<()> {
+        self.runner
+            .send_text(text)
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to send text to realtime provider: {}", e))
     }
 
     async fn commit_audio(&self) -> Result<()> {
@@ -1174,13 +1182,32 @@ impl RunnerHandle for RunnerAdapter {
                 model = model.with_base_url(base_url);
             }
         }
+        let mut tool_names = protected_tools
+            .iter()
+            .map(|tool| tool.name().to_string())
+            .collect::<Vec<_>>();
+        tool_names.sort();
+        let merged_instruction = if !tool_names.is_empty() {
+            let tool_guidance = format!(
+                "You can call these tools: {}. When the user asks for math, current time/date, or workspace file content, call the relevant tool before answering.",
+                tool_names.join(", ")
+            );
+            match instructions {
+                Some(instr) if !instr.trim().is_empty() => {
+                    Some(format!("{}\n\n{}", instr.trim(), tool_guidance))
+                }
+                _ => Some(tool_guidance),
+            }
+        } else {
+            instructions
+        };
+
         let mut realtime_config = RealtimeConfig::default()
             .with_model(model_id)
             .with_text_and_audio()
             .with_server_vad()
             .with_voice(voice);
-
-        if let Some(instr) = instructions {
+        if let Some(instr) = merged_instruction {
             realtime_config = realtime_config.with_instruction(instr);
         }
 
@@ -1334,6 +1361,15 @@ impl RunnerHandle for RunnerAdapter {
 
         let audio_b64 = base64_encode(audio);
         runtime.send_audio_base64(&audio_b64).await
+    }
+
+    async fn send_text(&self, session_id: &str, prompt: &str) -> Result<()> {
+        let trimmed = prompt.trim();
+        if trimmed.is_empty() {
+            bail!("Prompt is empty");
+        }
+        let runtime = self.runtime_for_session(session_id).await?;
+        runtime.send_text(trimmed).await
     }
 
     async fn commit_audio(&self, session_id: &str) -> Result<()> {
@@ -2360,6 +2396,10 @@ mod tests {
         }
 
         async fn send_audio_base64(&self, _audio_base64: &str) -> Result<()> {
+            Ok(())
+        }
+
+        async fn send_text(&self, _text: &str) -> Result<()> {
             Ok(())
         }
 

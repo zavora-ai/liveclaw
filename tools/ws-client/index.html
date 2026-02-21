@@ -500,6 +500,17 @@
               <label for="graphTraceView">Graph Trace</label>
               <textarea id="graphTraceView" class="output-pane" readonly></textarea>
             </div>
+            <div class="field-stack">
+              <label for="promptInput">Prompt (LLM decides tool call)</label>
+              <textarea
+                id="promptInput"
+                class="output-pane"
+                spellcheck="false"
+              >Use add_numbers with a=12 and b=30, then answer with the computed sum.</textarea>
+            </div>
+            <div class="field-row">
+              <button id="sendPromptBtn" class="soft">Send Prompt</button>
+            </div>
             <p class="hint">
               For graph execution, create session with role `full` and `Enable Graph = true`.
             </p>
@@ -523,6 +534,7 @@
                   <option value="SessionAudioCommit">SessionAudioCommit</option>
                   <option value="SessionResponseCreate">SessionResponseCreate</option>
                   <option value="SessionResponseInterrupt">SessionResponseInterrupt</option>
+                  <option value="SessionPrompt">SessionPrompt</option>
                   <option value="SessionToolCall">SessionToolCall</option>
                 </select>
               </div>
@@ -601,6 +613,8 @@
           callToolBtn: $("callToolBtn"),
           toolResultView: $("toolResultView"),
           graphTraceView: $("graphTraceView"),
+          promptInput: $("promptInput"),
+          sendPromptBtn: $("sendPromptBtn"),
           rawJson: $("rawJson"),
           sendRawBtn: $("sendRawBtn"),
           templateType: $("templateType"),
@@ -811,6 +825,13 @@
               return { type: "SessionResponseCreate", session_id: sid };
             case "SessionResponseInterrupt":
               return { type: "SessionResponseInterrupt", session_id: sid };
+            case "SessionPrompt":
+              return {
+                type: "SessionPrompt",
+                session_id: sid,
+                prompt: els.promptInput.value.trim() || "Use utc_time and report UTC timestamp.",
+                create_response: true,
+              };
             case "SessionToolCall": {
               const toolName = els.toolName.value.trim() || "echo_text";
               const parsedArgs = parseJson(els.toolArgs.value) || { text: "hello from graph" };
@@ -1294,6 +1315,10 @@
               setPlaybackStatus("interrupted");
             }
 
+            if (parsed.type === "PromptAccepted" && parsed.session_id && parsed.session_id === activeSessionId()) {
+              els.audioProgress.textContent = "prompt accepted";
+            }
+
             if (parsed.type === "SessionToolResult" && parsed.session_id && parsed.session_id === activeSessionId()) {
               els.toolResultView.value = JSON.stringify(parsed.result ?? {}, null, 2);
               els.graphTraceView.value = formatGraphReport(parsed.graph);
@@ -1471,6 +1496,25 @@
             return;
           }
           sendObject({ type: "SessionResponseInterrupt", session_id: sid });
+        });
+
+        els.sendPromptBtn.addEventListener("click", () => {
+          const sid = activeSessionId();
+          if (!sid) {
+            log("error", "Session ID is empty.");
+            return;
+          }
+          const prompt = els.promptInput.value.trim();
+          if (!prompt) {
+            log("error", "Prompt is empty.");
+            return;
+          }
+          sendObject({
+            type: "SessionPrompt",
+            session_id: sid,
+            prompt,
+            create_response: true,
+          });
         });
 
         els.callToolBtn.addEventListener("click", () => {
