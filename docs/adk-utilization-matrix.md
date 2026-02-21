@@ -1,8 +1,8 @@
 # ADK Utilization Matrix
 
-Date: 2026-02-19
+Date: 2026-02-21
 Owner: LiveClaw core team
-Status: Active
+Status: Active (Closeout)
 
 ## Purpose
 
@@ -33,12 +33,19 @@ Track ADK-Rust crate/API usage for each roadmap milestone and explicitly documen
 3. Record new custom delta and reduction target.
 4. Link demo evidence for ADK usage path.
 
+## Closeout Snapshot (2026-02-21)
+
+1. `scripts/run_quality_gate.sh` passed.
+2. `scripts/demo/run_all.sh` passed.
+3. `scripts/demo/m1_voice_e2e_live.sh` passed in isolated mode with provider-backed audio/transcript roundtrip.
+4. Remaining ADK blockers for project closure are limited to `ADK-GAP-004` and `ADK-GAP-005`.
+
 ## Open ADK Gap Log
 
-| Gap ID | Area | Current Blocker | Proposed Approach | Owner | Due |
-|---|---|---|---|---|---|
-| ADK-GAP-001 | Voice session wiring | CLOSED in Sprint 1: Session audio now forwards through `adk-realtime::RealtimeRunner`, with callback outputs tagged by true session IDs | Maintain this path as the only audio pipeline; add session-ownership hardening in M2 | Core Runtime | M1 |
-| ADK-GAP-002 | Graph tools node | CLOSED in Sprint 4: graph tools node now drains pending calls into deterministic state updates, with supervised interrupts covered by tests | Keep tool-loop behavior on `adk-graph` nodes and wire full runtime orchestration incrementally | Core Runtime | M4 |
-| ADK-GAP-003 | Plugin parity | CLOSED in Sprint 4: config-gated plugin assembly and per-session rate-limit plugin path implemented | Keep lifecycle hook wiring on `adk-plugin::PluginManager`; avoid bespoke plugin execution paths | Platform | M4 |
-| ADK-GAP-004 | Runner lifecycle parity | Active gateway lifecycle currently remains on direct `adk-realtime::RealtimeRunner` orchestration; reconnect/compaction policy is implemented in adapter layer | Migrate active session lifecycle and compaction triggers onto `adk-runner::Runner` path while preserving gateway protocol behavior | Core Runtime | Sprint 7 |
-| ADK-GAP-005 | Docker runtime parity | Sprint 7 introduces `runtime.kind=docker` diagnostics and config surface, but execution is currently compatibility mode in-process | Implement containerized runtime bridge while preserving ADK session lifecycle semantics | Platform | Sprint 8 |
+| Gap ID | Area | Status | Current Blocker | Proposed Approach | Owner | Due |
+|---|---|---|---|---|---|---|
+| ADK-GAP-001 | Voice session wiring | CLOSED | Session audio forwards through `adk-realtime::RealtimeRunner`, with callback outputs tagged by true session IDs | Maintain this path as the only audio pipeline; add session-ownership hardening in M2 | Core Runtime | M1 |
+| ADK-GAP-002 | Graph tools node | CLOSED | Graph tools node drains pending calls into deterministic state updates, with supervised interrupts covered by tests | Keep tool-loop behavior on `adk-graph` nodes and wire full runtime orchestration incrementally | Core Runtime | M4 |
+| ADK-GAP-003 | Plugin parity | CLOSED | Config-gated plugin assembly and per-session rate-limit plugin path implemented | Keep lifecycle hook wiring on `adk-plugin::PluginManager`; avoid bespoke plugin execution paths | Platform | M4 |
+| ADK-GAP-004 | Runner lifecycle parity | IN_PROGRESS | Active gateway lifecycle remains on direct `adk-realtime::RealtimeRunner` orchestration; reconnect/compaction policy is implemented in adapter layer | Migrate active session lifecycle and compaction triggers onto `adk-runner::Runner` path while preserving gateway protocol behavior | Core Runtime | Sprint 12 |
+| ADK-GAP-005 | Docker runtime parity | IN_PROGRESS | `runtime.kind=docker` diagnostics and config surface exist, but execution remains compatibility mode in-process | Implement containerized runtime bridge while preserving ADK session lifecycle semantics | Platform | Sprint 13 |

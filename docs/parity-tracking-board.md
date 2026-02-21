@@ -8,11 +8,11 @@ Status scale: `NOT_STARTED`, `IN_PROGRESS`, `AT_RISK`, `BLOCKED`, `DONE`
 | Milestone | Status | Owner | Target Date | Demo Script | Acceptance Checks |
 |---|---|---|---|---|---|
 | M0 Baseline Recovery | DONE | Core Team | 2026-02-27 | `scripts/demo/m0_baseline.sh` | Quality gate green; CI ADK path valid; parity docs present; P0/P1 register maintained |
-| M1 Voice E2E | IN_PROGRESS | Core Team | 2026-03-13 | `scripts/demo/m1_voice_e2e.sh` + `scripts/demo/m1_voice_e2e_live.sh` | SessionAudio reaches live runtime; provider-backed transcript/audio roundtrip validated; session IDs propagate end-to-end |
-| M2 Secure Multi-Session | IN_PROGRESS | Core Team | 2026-03-27 | `scripts/demo/m2_secure_sessions.sh` | Token auth path implemented; per-session ownership enforced |
-| M3 Tool and Graph Execution | IN_PROGRESS | Core Team | 2026-04-24 | `scripts/demo/m3_tools_graph.sh` | Non-empty toolset; RBAC enforced; graph tools node executes; `SessionToolCall` emits graph trace |
-| M4 Memory, Artifacts, Resilience | IN_PROGRESS | Core Team | 2026-05-22 | `scripts/demo/m4_memory_artifacts.sh` | Persistent recall across restarts; artifact persistence; reconnect behavior validated |
-| M5 ZeroClaw Track Parity | IN_PROGRESS | Core Team | 2026-06-19 | `scripts/demo/m5_runtime_security.sh` | Runtime modes validated; provider flexibility; security hardening gates pass |
+| M1 Voice E2E | DONE | Core Team | 2026-03-13 | `scripts/demo/m1_voice_e2e.sh` + `scripts/demo/m1_voice_e2e_live.sh` | SessionAudio reaches live runtime; provider-backed transcript/audio roundtrip validated; session IDs propagate end-to-end |
+| M2 Secure Multi-Session | DONE | Core Team | 2026-03-27 | `scripts/demo/m2_secure_sessions.sh` | Token auth path implemented; per-session ownership enforced |
+| M3 Tool and Graph Execution | DONE | Core Team | 2026-04-24 | `scripts/demo/m3_tools_graph.sh` | Non-empty toolset; RBAC enforced; graph tools node executes; `SessionToolCall` emits graph trace |
+| M4 Memory, Artifacts, Resilience | DONE | Core Team | 2026-05-22 | `scripts/demo/m4_memory_artifacts.sh` | Persistent recall across restarts; artifact persistence; reconnect behavior validated |
+| M5 ZeroClaw Track Parity | DONE | Core Team | 2026-06-19 | `scripts/demo/m5_runtime_security.sh` | Runtime modes validated; provider flexibility; security hardening gates pass |
 | M6 OpenClaw Track Parity + RC | IN_PROGRESS | Core Team | 2026-07-31 | `scripts/demo/m6_release_flow.sh` | Priority channels work; ops surfaces validated; release candidate checklist passes |
 
 ## Sprint 0 Checklist
@@ -37,7 +37,7 @@ Status scale: `NOT_STARTED`, `IN_PROGRESS`, `AT_RISK`, `BLOCKED`, `DONE`
 | Sprint 1 demo script exercises data-plane checks | DONE | `scripts/demo/m1_voice_e2e.sh` targeted tests |
 | One-session voice loop integration coverage | DONE | `liveclaw-gateway/src/server.rs` + `liveclaw-app/src/main.rs` tests for audio forward + session tag propagation |
 
-## Sprint 2 Checklist (In Progress)
+## Sprint 2 Checklist (DONE)
 
 | Item | Status | Evidence |
 |---|---|---|
@@ -47,7 +47,7 @@ Status scale: `NOT_STARTED`, `IN_PROGRESS`, `AT_RISK`, `BLOCKED`, `DONE`
 | Add reconnect with token control test | DONE | `test_token_auth_can_resume_session_control` |
 | Sprint 2 demo script for secure multi-session checks | DONE | `scripts/demo/m2_secure_sessions.sh` |
 
-## Sprint 3 Checklist (In Progress)
+## Sprint 3 Checklist (DONE)
 
 | Item | Status | Evidence |
 |---|---|---|
@@ -60,7 +60,7 @@ Status scale: `NOT_STARTED`, `IN_PROGRESS`, `AT_RISK`, `BLOCKED`, `DONE`
 | Keep browser WS client aligned for tool + graph validation | DONE | `tools/ws-client/index.html` Tool + Graph panel and `SessionToolResult` trace rendering |
 | Add M3 demo checks | DONE | `scripts/demo/m3_tools_graph.sh` |
 
-## Sprint 4 Checklist (In Progress)
+## Sprint 4 Checklist (DONE)
 
 | Item | Status | Evidence |
 |---|---|---|
@@ -71,7 +71,7 @@ Status scale: `NOT_STARTED`, `IN_PROGRESS`, `AT_RISK`, `BLOCKED`, `DONE`
 | Add rate-limiting plugin path in PluginManager | DONE | `liveclaw-app/src/plugins.rs` `build_rate_limit_plugin()` with per-session enforcement |
 | Add Sprint 4 demo checks | DONE | `scripts/demo/s4_graph_plugin_completeness.sh` |
 
-## Sprint 5 Checklist (In Progress)
+## Sprint 5 Checklist (DONE)
 
 | Item | Status | Evidence |
 |---|---|---|
@@ -91,7 +91,7 @@ Status scale: `NOT_STARTED`, `IN_PROGRESS`, `AT_RISK`, `BLOCKED`, `DONE`
 | Add Sprint 6 checks to M4 demo script | DONE | `scripts/demo/m4_memory_artifacts.sh` now runs compaction + reconnect tests |
 | Keep lifecycle and compaction execution in `adk-runner` orchestration path | IN_PROGRESS | `liveclaw-app/src/runner.rs` already exposes `EventsCompactionConfig`; active gateway path still needs full adoption |
 
-## Sprint 7 Checklist (In Progress)
+## Sprint 7 Checklist (DONE)
 
 | Item | Status | Evidence |
 |---|---|---|
@@ -103,7 +103,7 @@ Status scale: `NOT_STARTED`, `IN_PROGRESS`, `AT_RISK`, `BLOCKED`, `DONE`
 | Keep browser client aligned with protocol via server-advertised message capabilities | DONE | `RuntimeDiagnostics.supported_client_messages` consumed by `tools/ws-client/index.html` template sync |
 | Add Sprint 7 checks in M5 demo script | DONE | `scripts/demo/m5_runtime_security.sh` |
 
-## Sprint 8 Checklist (In Progress)
+## Sprint 8 Checklist (DONE)
 
 | Item | Status | Evidence |
 |---|---|---|
@@ -113,7 +113,7 @@ Status scale: `NOT_STARTED`, `IN_PROGRESS`, `AT_RISK`, `BLOCKED`, `DONE`
 | Expose security posture in diagnostics and keep browser client aligned | DONE | `liveclaw-gateway/src/protocol.rs` security diagnostics fields + `tools/ws-client/index.html` security badge updates |
 | Extend M5 parity script with Sprint 8 security checks | DONE | `scripts/demo/m5_runtime_security.sh` includes public bind and allowlist tests |
 
-## Sprint 9 Checklist (In Progress)
+## Sprint 9 Checklist (DONE)
 
 | Item | Status | Evidence |
 |---|---|---|
@@ -121,7 +121,7 @@ Status scale: `NOT_STARTED`, `IN_PROGRESS`, `AT_RISK`, `BLOCKED`, `DONE`
 | Keep browser WS client aligned with gateway health surfaces | DONE | `tools/ws-client/index.html` adds Gateway Health action and `gw` badge |
 | Replace M6 placeholder demo with executable ops-surface checks | DONE | `scripts/demo/m6_release_flow.sh` now runs targeted protocol/server tests |
 
-## Sprint 10 Checklist (In Progress)
+## Sprint 10 Checklist (DONE)
 
 | Item | Status | Evidence |
 |---|---|---|
@@ -130,7 +130,7 @@ Status scale: `NOT_STARTED`, `IN_PROGRESS`, `AT_RISK`, `BLOCKED`, `DONE`
 | Keep browser WS client aligned with priority probe/notice flow | DONE | `tools/ws-client/index.html` adds Priority Probe action, template, and `prio` badge |
 | Extend M6 release-flow demo for priority-path verification | DONE | `scripts/demo/m6_release_flow.sh` includes priority probe tests |
 
-## Sprint 11 Checklist (In Progress)
+## Sprint 11 Checklist (DONE)
 
 | Item | Status | Evidence |
 |---|---|---|
@@ -140,6 +140,16 @@ Status scale: `NOT_STARTED`, `IN_PROGRESS`, `AT_RISK`, `BLOCKED`, `DONE`
 | Harden live harness for operator environments with running gateways | DONE | `scripts/demo/m1_voice_e2e_live.sh` supports `LIVECLAW_E2E_USE_EXISTING_GATEWAY`, token/pair-code auth overrides, and richer failure diagnostics |
 | Add manual turn-control voice protocol for deterministic prerecorded-audio flows | DONE | `SessionAudioCommit` / `SessionResponseCreate` / `SessionResponseInterrupt` in `liveclaw-gateway/src/protocol.rs` + `liveclaw-gateway/src/server.rs` + `liveclaw-app/src/main.rs` runner wiring |
 | Keep reusable browser WS client aligned with full voice E2E path | DONE | `tools/ws-client/index.html` adds mic streaming, upload-to-PCM conversion, `AudioOutput` playback, and session transcript pane |
+
+## Closeout Phase 1 Kickoff (2026-02-21)
+
+| Item | Status | Evidence |
+|---|---|---|
+| Re-run deterministic quality gate | DONE | `scripts/run_quality_gate.sh` passed (`check`, `test`, `clippy`, `fmt`) |
+| Re-run milestone demo harness | DONE | `scripts/demo/run_all.sh` passed end-to-end |
+| Validate provider-backed live voice roundtrip | DONE | `scripts/demo/m1_voice_e2e_live.sh` passed in isolated mode (`LIVECLAW_E2E_USE_EXISTING_GATEWAY=never`) |
+| Promote milestone statuses where acceptance is fully evidenced | DONE | M1-M5 moved to `DONE`; M6 remains `IN_PROGRESS` |
+| Capture remaining project-complete blockers and execution plan | DONE | `docs/closeout-plan.md` |
 
 ## Notes
 

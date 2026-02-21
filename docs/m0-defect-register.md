@@ -1,9 +1,9 @@
 # M0 Defect Register (P0/P1)
 
-Date: 2026-02-19
+Date: 2026-02-21
 Scope: Baseline defects identified during parity/readiness review
 
-## Open Defects
+## Defect Register
 
 | ID | Severity | Area | Defect | Owner | Target Milestone | Status |
 |---|---|---|---|---|---|---|
@@ -15,7 +15,7 @@ Scope: Baseline defects identified during parity/readiness review
 | LC-006 | P1 | Tooling | Tool loader is placeholder (empty) and does not provide production-capable baseline tools | Agent Runtime | M3 | CLOSED |
 | LC-007 | P1 | Graph execution | Graph tools node is stubbed and does not execute pending tool calls | Agent Runtime | M3 | CLOSED |
 | LC-008 | P1 | Plugin completeness | Plugin config toggles not fully enforced and rate-limiting plugin path incomplete | Platform | M4 | CLOSED |
-| LC-009 | P1 | Compaction | Compaction config exists but runtime compaction is disabled | Platform | M4 | OPEN |
+| LC-009 | P1 | Compaction | Compaction config exists but runtime compaction is disabled | Platform | M4 | CLOSED |
 
 ## Ownership Notes
 
@@ -38,3 +38,13 @@ Scope: Baseline defects identified during parity/readiness review
 
 1. `LC-007` closed by implementing deterministic tools-node execution state updates in `liveclaw-app/src/graph.rs` (`execute_pending_tool_calls`) and covering supervised/non-supervised execution paths in graph tests.
 2. `LC-008` closed by adding config-driven plugin assembly (`PluginRuntimeConfig`) and per-session rate-limiting plugin enforcement in `liveclaw-app/src/plugins.rs`, with toggle and behavior tests.
+
+## Resolution Notes (Sprint 6)
+
+1. `LC-009` closed by commit `fbaf577` (`feat(sprint6): add reconnect backoff and memory compaction checks`), which enabled config-driven compaction in the active transcript persistence path (`MemoryCompactionPolicy` + `compact_memory_entries()` in `liveclaw-app/src/main.rs`).
+2. Test evidence:
+   - `tests::test_compact_memory_entries_reduces_history_when_threshold_exceeded`.
+   - `tests::test_runtime_loop_recovers_from_interrupted_provider_session`.
+   - `tests::test_runtime_loop_stops_when_reconnect_budget_exhausted`.
+3. Demo evidence:
+   - `scripts/demo/m4_memory_artifacts.sh` now runs compaction and reconnect checks for the M4 acceptance path.
