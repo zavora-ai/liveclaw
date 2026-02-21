@@ -160,6 +160,18 @@ This script:
 - asserts `AudioAccepted`, `TranscriptUpdate`, and `AudioOutput` for the created session ID,
 - terminates the session and verifies `SessionTerminated`.
 
+Run the prompt-driven tool-call live probe and print model transcript output:
+
+```bash
+cd /Users/jameskaranja/Developer/projects/liveclaw
+./scripts/demo/m3_prompt_tool_live.sh
+```
+
+Useful overrides:
+- `LIVECLAW_PROMPT_TEXT="Use utc_time and answer with current UTC only."`
+- `LIVECLAW_PROMPT_USE_EXISTING_GATEWAY=auto|always|never`
+- `LIVECLAW_PROMPT_TOKEN=<token>` for pairing-required existing gateway runs
+
 Required:
 - `OPENAI_API_KEY` or `LIVECLAW_API_KEY`
 - `websocat`

@@ -958,6 +958,27 @@ impl EventHandler for GatewayEventForwarder {
         Ok(())
     }
 
+    async fn on_text(&self, text: &str, _item_id: &str) -> adk_realtime::Result<()> {
+        if self
+            .transcript_tx
+            .send(SessionTranscriptOutput {
+                session_id: self.session_id.clone(),
+                text: text.to_string(),
+                is_final: false,
+            })
+            .await
+            .is_err()
+        {
+            warn!(
+                session_id = %self.session_id,
+                "Gateway transcript output channel is closed"
+            );
+        }
+        self.persist_transcript_memory(text).await;
+        self.persist_transcript_artifact(text).await;
+        Ok(())
+    }
+
     async fn on_transcript(&self, transcript: &str, _item_id: &str) -> adk_realtime::Result<()> {
         if self
             .transcript_tx
