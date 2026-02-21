@@ -828,7 +828,7 @@
           flowState.requirePairing = true;
           flowState.paired = false;
           flowState.authenticated = false;
-          flowState.sessionReady = Boolean(activeSessionId());
+          flowState.sessionReady = false;
         }
 
         function refreshFlowControls() {
@@ -855,7 +855,7 @@
           } else if (flowState.paired) {
             setButtonVariant(els.pairBtn, "step-done");
             els.pairBtn.textContent = "Paired";
-            els.pairBtn.disabled = false;
+            els.pairBtn.disabled = true;
           } else {
             setButtonVariant(els.pairBtn, "step-pending");
             els.pairBtn.textContent = "Send Pair";
@@ -877,14 +877,14 @@
           } else if (flowState.authenticated) {
             setButtonVariant(els.authBtn, "step-done");
             els.authBtn.textContent = "Authenticated";
-            els.authBtn.disabled = false;
+            els.authBtn.disabled = true;
           } else {
             setButtonVariant(els.authBtn, "soft");
             els.authBtn.textContent = "Authenticate";
             els.authBtn.disabled = false;
           }
 
-          const canCreateSession = open && (!authRequired || flowState.authenticated);
+          const canCreateSession = open && (!authRequired || flowState.authenticated) && !flowState.sessionReady;
           if (flowState.sessionReady) {
             setButtonVariant(els.createSessionBtn, "step-done");
             els.createSessionBtn.textContent = "Session Ready";
