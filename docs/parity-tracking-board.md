@@ -262,6 +262,15 @@ Status scale: `NOT_STARTED`, `IN_PROGRESS`, `AT_RISK`, `BLOCKED`, `DONE`
 | Validate installer script safety/usage paths | DONE | `scripts/install_local_release.sh --help` and `bash -n scripts/install_local_release.sh` |
 | Keep quick-start/parity docs aligned to install hardening | DONE | `README.md` optional local binary install section and `docs/openclaw-zeroclaw-parity-comparison.md` install-path updates |
 
+## Sprint 25 Checklist (DONE)
+
+| Item | Status | Evidence |
+|---|---|---|
+| Add Teams HTTP ingress adapter path | DONE | `liveclaw-gateway/src/server.rs` adds `/channels/teams/events` with payload mapping to `ChannelInbound` route |
+| Extend supported channel normalization to include Teams | DONE | `liveclaw-gateway/src/server.rs` `normalize_channel()` now accepts `teams` across inbound/outbound/job paths |
+| Add Teams adapter coverage tests | DONE | `server::tests::test_channel_teams_http_routes_message_activity` and `server::tests::test_channel_teams_http_ignores_non_message_type` |
+| Keep release-flow/demo and client docs aligned | DONE | `scripts/demo/m6_release_flow.sh`, `tools/ws-client/index.html`, and `README.md` updated for Teams channel path |
+
 ## Closeout Phase 1 Kickoff (2026-02-21)
 
 | Item | Status | Evidence |

@@ -114,3 +114,4 @@ Close the remaining parity and release-candidate scope so the project can be dec
 23. 2026-02-21: reduced user-surface parity gap by adding a simple chat lane to the browser WS client (session prompt + transcript history UX) and aligning README/parity-board reporting.
 24. 2026-02-21: expanded channel breadth again by adding Matrix ingress (`/channels/matrix/events`) with payload translation, route normalization support, gateway tests, demo coverage, and WS client/docs updates.
 25. 2026-02-21: improved distribution hardening by adding `scripts/install_local_release.sh` for release-binary installation and aligning quick-start/parity documentation.
+26. 2026-02-21: expanded channel breadth by adding Teams ingress (`/channels/teams/events`) with payload translation, route normalization support, gateway tests, demo coverage, and WS client/docs updates.

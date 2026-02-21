@@ -190,7 +190,7 @@ The client now supports:
 - Prompt tool activity panel that confirms prompt-driven `read_workspace_file` execution details
 - Dedicated M4 evidence panel for memory/artifact/resilience snapshots
 - One-click memory/artifact `read_workspace_file` probes plus live diagnostics counters in the UI
-- Channel bridge panel for `ChannelInbound` routing tests (telegram/slack/webhook/discord/matrix keys)
+- Channel bridge panel for `ChannelInbound` routing tests (telegram/slack/webhook/discord/matrix/teams keys)
 - Channel outbound poll controls for `GetChannelOutbound` validation
 - Channel job scheduler controls for `CreateChannelJob` / `ListChannelJobs` / `CancelChannelJob`
 
@@ -317,13 +317,14 @@ Clients connect via WebSocket and exchange JSON messages:
 ## Channel Adapter HTTP Endpoints
 
 LiveClaw now exposes token-authenticated ingress adapters that translate
-Webhook/Slack/Telegram/Discord/Matrix payloads into the same `ChannelInbound` route used by WS clients.
+Webhook/Slack/Telegram/Discord/Matrix/Teams payloads into the same `ChannelInbound` route used by WS clients.
 
 - `POST /channels/webhook`
 - `POST /channels/slack/events`
 - `POST /channels/telegram/update`
 - `POST /channels/discord/events`
 - `POST /channels/matrix/events`
+- `POST /channels/teams/events`
 - `POST /channels/outbound/poll`
 - `POST /channels/jobs/create`
 - `GET /channels/jobs/list`
@@ -399,6 +400,20 @@ curl -sS -X POST http://127.0.0.1:8420/channels/matrix/events \
     "room_id":"!room:example.org",
     "sender":"@alice:example.org",
     "content": { "msgtype":"m.text", "body":"hello from matrix" }
+  }'
+```
+
+Example Teams message ingress:
+
+```bash
+curl -sS -X POST http://127.0.0.1:8420/channels/teams/events \
+  -H "Authorization: Bearer ${LIVECLAW_TOKEN}" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "type":"message",
+    "conversation": { "id":"19:thread@thread.v2" },
+    "from": { "id":"29:user-1" },
+    "text":"hello from teams"
   }'
 ```
 

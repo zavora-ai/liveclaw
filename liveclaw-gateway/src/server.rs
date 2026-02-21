@@ -304,6 +304,25 @@ struct MatrixEventContent {
     body: Option<String>,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+struct TeamsActivityEvent {
+    #[serde(rename = "type")]
+    activity_type: Option<String>,
+    conversation: Option<TeamsConversation>,
+    from: Option<TeamsUser>,
+    text: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct TeamsConversation {
+    id: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct TeamsUser {
+    id: Option<String>,
+}
+
 // ---------------------------------------------------------------------------
 // Health check response
 // ---------------------------------------------------------------------------
@@ -476,6 +495,7 @@ fn build_router(state: AppState) -> Router {
             "/channels/matrix/events",
             post(channel_matrix_events_handler),
         )
+        .route("/channels/teams/events", post(channel_teams_events_handler))
         .route(
             "/channels/outbound/poll",
             post(channel_outbound_poll_handler),
@@ -861,6 +881,93 @@ async fn channel_matrix_events_handler(
     let resp = handle_channel_http_route(
         ChannelInboundRequest {
             channel: "matrix",
+            account_id,
+            external_user_id,
+            text,
+            create_response: query.create_response.unwrap_or(true),
+            session_config_on_create: None,
+            force_session_recreate: false,
+        },
+        token,
+        &state,
+    )
+    .await;
+    http_response_from_gateway(resp)
+}
+
+async fn channel_teams_events_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(query): Query<ChannelIngressQuery>,
+    JsonExtract(payload): JsonExtract<TeamsActivityEvent>,
+) -> impl IntoResponse {
+    if let Some(activity_type) = payload.activity_type.as_deref() {
+        if !activity_type.eq_ignore_ascii_case("message") {
+            return (
+                StatusCode::ACCEPTED,
+                Json(serde_json::json!({
+                    "status": "ignored",
+                    "reason": "unsupported_event_type",
+                })),
+            );
+        }
+    }
+
+    let token = extract_channel_token(&headers, &query);
+
+    let Some(conversation) = payload.conversation.as_ref() else {
+        return http_json_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_teams_payload",
+            "Teams payload is missing 'conversation'",
+        );
+    };
+    let Some(account_id) = conversation.id.as_deref() else {
+        return http_json_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_teams_payload",
+            "Teams payload is missing 'conversation.id'",
+        );
+    };
+
+    let Some(from) = payload.from.as_ref() else {
+        return http_json_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_teams_payload",
+            "Teams payload is missing 'from'",
+        );
+    };
+    let Some(external_user_id) = from.id.as_deref() else {
+        return http_json_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_teams_payload",
+            "Teams payload is missing 'from.id'",
+        );
+    };
+
+    let Some(text_raw) = payload.text.as_deref() else {
+        return (
+            StatusCode::ACCEPTED,
+            Json(serde_json::json!({
+                "status": "ignored",
+                "reason": "no_text",
+            })),
+        );
+    };
+    let text = text_raw.trim();
+    if text.is_empty() {
+        return (
+            StatusCode::ACCEPTED,
+            Json(serde_json::json!({
+                "status": "ignored",
+                "reason": "no_text",
+            })),
+        );
+    }
+
+    let resp = handle_channel_http_route(
+        ChannelInboundRequest {
+            channel: "teams",
             account_id,
             external_user_id,
             text,
@@ -1986,7 +2093,7 @@ fn build_workspace_summary_prompt(
 }
 
 const SUPPORTED_CHANNELS_MESSAGE: &str =
-    "Supported channels are telegram, slack, webhook, discord, and matrix";
+    "Supported channels are telegram, slack, webhook, discord, matrix, and teams";
 
 fn normalize_channel(channel: &str) -> Option<String> {
     match channel.trim().to_ascii_lowercase().as_str() {
@@ -1995,6 +2102,7 @@ fn normalize_channel(channel: &str) -> Option<String> {
         "webhook" => Some("webhook".to_string()),
         "discord" => Some("discord".to_string()),
         "matrix" => Some("matrix".to_string()),
+        "teams" => Some("teams".to_string()),
         _ => None,
     }
 }
@@ -5168,6 +5276,52 @@ mod tests {
             .header(header::AUTHORIZATION, format!("Bearer {}", token))
             .body(Body::from(
                 r#"{"type":"m.room.member","room_id":"!room:example.org","sender":"@alice:example.org","content":{"body":"ignored"}} "#,
+            ))
+            .expect("request");
+
+        let (status, body) = request_json(app, request).await;
+        assert_eq!(status, StatusCode::ACCEPTED);
+        assert_eq!(body["status"], serde_json::json!("ignored"));
+        assert_eq!(body["reason"], serde_json::json!("unsupported_event_type"));
+    }
+
+    #[tokio::test]
+    async fn test_channel_teams_http_routes_message_activity() {
+        let state = make_state(MockRunner::ok(), true);
+        let token = paired_token(&state);
+        let app = build_router(state);
+
+        let request = Request::builder()
+            .method("POST")
+            .uri("/channels/teams/events")
+            .header(header::CONTENT_TYPE, "application/json")
+            .header(header::AUTHORIZATION, format!("Bearer {}", token))
+            .body(Body::from(
+                r#"{"type":"message","conversation":{"id":"19:thread@thread.v2"},"from":{"id":"29:user-1"},"text":"hello from teams"}"#,
+            ))
+            .expect("request");
+
+        let (status, body) = request_json(app, request).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["type"], serde_json::json!("ChannelRouted"));
+        assert_eq!(body["channel"], serde_json::json!("teams"));
+        assert_eq!(body["account_id"], serde_json::json!("19:thread@thread.v2"));
+        assert_eq!(body["external_user_id"], serde_json::json!("29:user-1"));
+    }
+
+    #[tokio::test]
+    async fn test_channel_teams_http_ignores_non_message_type() {
+        let state = make_state(MockRunner::ok(), true);
+        let token = paired_token(&state);
+        let app = build_router(state);
+
+        let request = Request::builder()
+            .method("POST")
+            .uri("/channels/teams/events")
+            .header(header::CONTENT_TYPE, "application/json")
+            .header(header::AUTHORIZATION, format!("Bearer {}", token))
+            .body(Body::from(
+                r#"{"type":"typing","conversation":{"id":"19:thread@thread.v2"},"from":{"id":"29:user-1"},"text":"ignore me"}"#,
             ))
             .expect("request");
 
