@@ -211,6 +211,15 @@ Status scale: `NOT_STARTED`, `IN_PROGRESS`, `AT_RISK`, `BLOCKED`, `DONE`
 | Add guided README summary workflow for tool-path verification | DONE | `tools/ws-client/index.html` `Run README Summary Flow` chaining bootstrap + `SessionPrompt` submission |
 | Keep docs aligned with client workflow UX | DONE | `README.md` browser client capabilities and `docs/openclaw-zeroclaw-parity-comparison.md` parity note |
 
+## Sprint 19 Checklist (DONE)
+
+| Item | Status | Evidence |
+|---|---|---|
+| Add service log-tail command for operator ergonomics | DONE | `liveclaw-app/src/main.rs` `service logs` parser + macOS launchd log tail + Linux `journalctl --user` integration |
+| Add service diagnostics shortcut without changing top-level doctor behavior | DONE | `liveclaw-app/src/main.rs` `service doctor --config ...` maps to existing doctor report path |
+| Add parser test coverage for new service commands | DONE | `tests::test_parse_service_logs_args_supports_lines_follow_and_stream`, `tests::test_parse_service_doctor_alias_supports_config`, `tests::test_parse_service_logs_rejects_zero_lines` |
+| Update user docs and parity comparison for service ergonomics | DONE | `README.md` service diagnostics/logs examples and `docs/openclaw-zeroclaw-parity-comparison.md` updates |
+
 ## Closeout Phase 1 Kickoff (2026-02-21)
 
 | Item | Status | Evidence |

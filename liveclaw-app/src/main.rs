@@ -2465,12 +2465,27 @@ fn effective_api_key(configured: &str) -> String {
 const DEFAULT_CONFIG_PATH: &str = "liveclaw.toml";
 
 #[derive(Debug, Clone, PartialEq)]
+enum ServiceLogStream {
+    Stdout,
+    Stderr,
+    Both,
+}
+
+#[derive(Debug, Clone, PartialEq)]
 enum ServiceCommand {
-    Install { config_path: String, force: bool },
+    Install {
+        config_path: String,
+        force: bool,
+    },
     Start,
     Stop,
     Restart,
     Status,
+    Logs {
+        lines: usize,
+        follow: bool,
+        stream: ServiceLogStream,
+    },
     Uninstall,
 }
 
@@ -2539,6 +2554,8 @@ fn cli_usage() -> &'static str {
       [--install-service] [--start-service]
   liveclaw-app service install [--config CONFIG_PATH] [--force]
   liveclaw-app service start|stop|restart|status|uninstall
+  liveclaw-app service logs [--lines N] [--follow] [--stream both|stdout|stderr]
+  liveclaw-app service doctor [--config CONFIG_PATH]
   liveclaw-app --runtime-worker
 "
 }
@@ -2665,6 +2682,18 @@ fn parse_onboard_args(args: &[String]) -> Result<AppCommand> {
     Ok(AppCommand::Onboard(opts))
 }
 
+fn parse_service_log_stream(raw: &str) -> Result<ServiceLogStream> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "stdout" | "out" => Ok(ServiceLogStream::Stdout),
+        "stderr" | "err" => Ok(ServiceLogStream::Stderr),
+        "both" | "all" => Ok(ServiceLogStream::Both),
+        _ => bail!(
+            "Invalid --stream value '{}' (expected both|stdout|stderr)",
+            raw
+        ),
+    }
+}
+
 fn parse_service_args(args: &[String]) -> Result<AppCommand> {
     let action = args
         .first()
@@ -2706,6 +2735,74 @@ fn parse_service_args(args: &[String]) -> Result<AppCommand> {
         "stop" => Ok(AppCommand::Service(ServiceCommand::Stop)),
         "restart" => Ok(AppCommand::Service(ServiceCommand::Restart)),
         "status" => Ok(AppCommand::Service(ServiceCommand::Status)),
+        "logs" => {
+            let mut lines: usize = 80;
+            let mut follow = false;
+            let mut stream = ServiceLogStream::Both;
+            let mut idx = 1;
+            while idx < args.len() {
+                match args[idx].as_str() {
+                    "--lines" => {
+                        let value = args.get(idx + 1).ok_or_else(|| {
+                            anyhow::anyhow!("service logs --lines requires a number")
+                        })?;
+                        lines = value
+                            .parse::<usize>()
+                            .map_err(|e| anyhow::anyhow!("Invalid --lines '{}': {}", value, e))?;
+                        if lines == 0 {
+                            bail!("service logs --lines must be greater than zero");
+                        }
+                        idx += 2;
+                    }
+                    "--follow" => {
+                        follow = true;
+                        idx += 1;
+                    }
+                    "--stream" => {
+                        let value = args.get(idx + 1).ok_or_else(|| {
+                            anyhow::anyhow!("service logs --stream requires a value")
+                        })?;
+                        stream = parse_service_log_stream(value)?;
+                        idx += 2;
+                    }
+                    "--stdout" => {
+                        stream = ServiceLogStream::Stdout;
+                        idx += 1;
+                    }
+                    "--stderr" => {
+                        stream = ServiceLogStream::Stderr;
+                        idx += 1;
+                    }
+                    other => {
+                        bail!("Unknown service logs option '{}'\n{}", other, cli_usage());
+                    }
+                }
+            }
+            Ok(AppCommand::Service(ServiceCommand::Logs {
+                lines,
+                follow,
+                stream,
+            }))
+        }
+        "doctor" => {
+            let mut config_path = DEFAULT_CONFIG_PATH.to_string();
+            let mut idx = 1;
+            while idx < args.len() {
+                match args[idx].as_str() {
+                    "--config" => {
+                        let value = args.get(idx + 1).ok_or_else(|| {
+                            anyhow::anyhow!("service doctor --config requires a path")
+                        })?;
+                        config_path = value.clone();
+                        idx += 2;
+                    }
+                    other => {
+                        bail!("Unknown service doctor option '{}'\n{}", other, cli_usage());
+                    }
+                }
+            }
+            Ok(AppCommand::Doctor { config_path })
+        }
         "uninstall" => Ok(AppCommand::Service(ServiceCommand::Uninstall)),
         other => bail!("Unknown service subcommand '{}'\n{}", other, cli_usage()),
     }
@@ -3259,6 +3356,54 @@ fn run_command_capture(mut cmd: StdCommand, context: &str) -> Result<String> {
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
+fn print_text_file_tail(path: &Path, lines: usize, label: &str) -> Result<()> {
+    println!("--- {} ({}) ---", label, path.to_string_lossy());
+    if !path.exists() {
+        println!("(missing)");
+        return Ok(());
+    }
+
+    let content = fs::read_to_string(path)
+        .with_context(|| format!("Failed reading service log '{}'", path.to_string_lossy()))?;
+    let mut tail = content.lines().rev().take(lines).collect::<Vec<_>>();
+    tail.reverse();
+    if tail.is_empty() {
+        println!("(empty)");
+    } else {
+        for line in tail {
+            println!("{}", line);
+        }
+    }
+    Ok(())
+}
+
+fn follow_text_files(paths: &[PathBuf], lines: usize, context: &str) -> Result<()> {
+    let mut existing = Vec::new();
+    for path in paths {
+        if path.exists() {
+            existing.push(path.clone());
+        } else {
+            println!("Missing log file: {}", path.to_string_lossy());
+        }
+    }
+    if existing.is_empty() {
+        println!("No log files found to follow.");
+        return Ok(());
+    }
+
+    let status = StdCommand::new("tail")
+        .arg("-n")
+        .arg(lines.to_string())
+        .arg("-f")
+        .args(existing.iter().map(|p| p.as_os_str()))
+        .status()
+        .with_context(|| format!("Failed to execute {}", context))?;
+    if !status.success() {
+        bail!("{} failed (exit={})", context, status.code().unwrap_or(-1));
+    }
+    Ok(())
+}
+
 #[cfg(target_os = "macos")]
 fn service_manifest_path() -> Result<PathBuf> {
     let home = home_dir()?;
@@ -3266,6 +3411,15 @@ fn service_manifest_path() -> Result<PathBuf> {
         .join("Library")
         .join("LaunchAgents")
         .join("ai.liveclaw.gateway.plist"))
+}
+
+#[cfg(target_os = "macos")]
+fn service_log_paths() -> Result<(PathBuf, PathBuf)> {
+    let logs_dir = home_dir()?.join(".liveclaw").join("logs");
+    Ok((
+        logs_dir.join("service.out.log"),
+        logs_dir.join("service.err.log"),
+    ))
 }
 
 #[cfg(target_os = "linux")]
@@ -3408,6 +3562,43 @@ fn run_service_command(command: ServiceCommand) -> Result<()> {
                 if active { "active" } else { "inactive" }
             );
         }
+        ServiceCommand::Logs {
+            lines,
+            follow,
+            stream,
+        } => {
+            service_manifest_missing(&manifest)?;
+            let (stdout_path, stderr_path) = service_log_paths()?;
+
+            if follow {
+                match stream {
+                    ServiceLogStream::Stdout => {
+                        follow_text_files(&[stdout_path], lines, "tail -f (launchd stdout logs)")?
+                    }
+                    ServiceLogStream::Stderr => {
+                        follow_text_files(&[stderr_path], lines, "tail -f (launchd stderr logs)")?
+                    }
+                    ServiceLogStream::Both => follow_text_files(
+                        &[stdout_path, stderr_path],
+                        lines,
+                        "tail -f (launchd logs)",
+                    )?,
+                }
+            } else {
+                match stream {
+                    ServiceLogStream::Stdout => {
+                        print_text_file_tail(&stdout_path, lines, "launchd stdout")
+                    }
+                    ServiceLogStream::Stderr => {
+                        print_text_file_tail(&stderr_path, lines, "launchd stderr")
+                    }
+                    ServiceLogStream::Both => {
+                        print_text_file_tail(&stdout_path, lines, "launchd stdout")?;
+                        print_text_file_tail(&stderr_path, lines, "launchd stderr")
+                    }
+                }?;
+            }
+        }
         ServiceCommand::Uninstall => {
             if manifest.exists() {
                 let _ = run_service_command(ServiceCommand::Stop);
@@ -3542,6 +3733,45 @@ fn run_service_command(command: ServiceCommand) -> Result<()> {
                 "LiveClaw service status: {}",
                 if active { "active" } else { "inactive" }
             );
+        }
+        ServiceCommand::Logs {
+            lines,
+            follow,
+            stream,
+        } => {
+            service_manifest_missing(&manifest)?;
+            if !matches!(stream, ServiceLogStream::Both) {
+                println!(
+                    "Note: --stream filtering is not supported for journalctl; showing combined logs."
+                );
+            }
+
+            let mut cmd = StdCommand::new("journalctl");
+            cmd.arg("--user")
+                .arg("-u")
+                .arg(unit_name)
+                .arg("-n")
+                .arg(lines.to_string())
+                .arg("--no-pager");
+            if follow {
+                cmd.arg("-f");
+                let status = cmd
+                    .status()
+                    .context("Failed to execute journalctl --user (follow)")?;
+                if !status.success() {
+                    bail!(
+                        "journalctl --user follow failed (exit={})",
+                        status.code().unwrap_or(-1)
+                    );
+                }
+            } else {
+                let output = run_command_capture(cmd, "journalctl --user")?;
+                if output.is_empty() {
+                    println!("(no logs yet)");
+                } else {
+                    println!("{}", output);
+                }
+            }
         }
         ServiceCommand::Uninstall => {
             if manifest.exists() {
@@ -4874,6 +5104,52 @@ mod tests {
                 force: true
             })
         );
+    }
+
+    #[test]
+    fn test_parse_service_logs_args_supports_lines_follow_and_stream() {
+        let args = vec![
+            "logs".to_string(),
+            "--lines".to_string(),
+            "120".to_string(),
+            "--follow".to_string(),
+            "--stream".to_string(),
+            "stderr".to_string(),
+        ];
+
+        let command = parse_service_args(&args).unwrap();
+        assert_eq!(
+            command,
+            AppCommand::Service(ServiceCommand::Logs {
+                lines: 120,
+                follow: true,
+                stream: ServiceLogStream::Stderr,
+            })
+        );
+    }
+
+    #[test]
+    fn test_parse_service_doctor_alias_supports_config() {
+        let args = vec![
+            "doctor".to_string(),
+            "--config".to_string(),
+            "config/liveclaw.toml".to_string(),
+        ];
+
+        let command = parse_service_args(&args).unwrap();
+        assert_eq!(
+            command,
+            AppCommand::Doctor {
+                config_path: "config/liveclaw.toml".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn test_parse_service_logs_rejects_zero_lines() {
+        let args = vec!["logs".to_string(), "--lines".to_string(), "0".to_string()];
+        let err = parse_service_args(&args).unwrap_err();
+        assert!(err.to_string().contains("greater than zero"));
     }
 
     #[test]
