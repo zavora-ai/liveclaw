@@ -184,13 +184,13 @@ Status scale: `NOT_STARTED`, `IN_PROGRESS`, `AT_RISK`, `BLOCKED`, `DONE`
 | Create release runbook, deployment guide, and rollback playbook | DONE | `docs/release-runbook.md`, `docs/deployment-guide.md`, `docs/rollback-playbook.md` |
 | Finalize smoke suite and CI sign-off path | DONE | `scripts/demo/m6_rc_signoff.sh` writes `docs/rc-signoff-record.md` with latest `scripts/run_quality_gate.sh` and `scripts/demo/run_all.sh` evidence logs |
 
-## Sprint 16 Checklist (IN_PROGRESS)
+## Sprint 16 Checklist (DONE)
 
 | Item | Status | Evidence |
 |---|---|---|
 | Publish final parity closeout summary | DONE | `docs/final-parity-closeout-summary.md` |
 | Publish ADK delta report and closeout snapshot | DONE | `docs/adk-delta-report.md` + `docs/adk-utilization-matrix.md` |
-| Tag release-candidate milestone and archive closeout evidence | IN_PROGRESS | Awaiting milestone tag publication |
+| Tag release-candidate milestone and archive closeout evidence | DONE | `milestone/M6` |
 
 ## Closeout Phase 1 Kickoff (2026-02-21)
 

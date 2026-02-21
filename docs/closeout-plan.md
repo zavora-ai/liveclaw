@@ -1,7 +1,7 @@
 # LiveClaw Project Closeout Plan
 
 Date: 2026-02-21
-Status: Phase 4 complete; Phase 5 in progress
+Status: Phase 5 complete
 Owner: Core Team
 
 ## Objective
@@ -28,8 +28,7 @@ Close the remaining parity and release-candidate scope so the project can be dec
 
 ## Remaining Blockers
 
-1. No open technical blockers for RC hardening.
-2. Remaining closure action: create and publish release-candidate milestone tag.
+1. None.
 
 ## Phase Plan and Sprints
 
@@ -75,6 +74,7 @@ Close the remaining parity and release-candidate scope so the project can be dec
 2. Publish final parity closeout summary and ADK delta report.
    - Status: delivered (`docs/final-parity-closeout-summary.md`, `docs/adk-delta-report.md`).
 3. Tag release-candidate milestone and archive closeout evidence.
+   - Status: delivered (`milestone/M6` tag published).
 4. Exit criteria:
    - Project completion criteria are fully satisfied.
 
@@ -105,3 +105,4 @@ Close the remaining parity and release-candidate scope so the project can be dec
 14. 2026-02-21: published RC operational limits (`docs/rc-operational-limits.md`) with deterministic burst evidence and re-verification command path.
 15. 2026-02-21: completed smoke-suite sign-off workflow via `scripts/demo/m6_rc_signoff.sh` and published `docs/rc-signoff-record.md`.
 16. 2026-02-21: published Phase 5 closure artifacts (`docs/final-parity-closeout-summary.md`, `docs/adk-delta-report.md`) and promoted milestone board to M0-M6 `DONE`.
+17. 2026-02-21: published release-candidate milestone tag `milestone/M6` and completed Phase 5 closure.
