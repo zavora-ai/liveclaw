@@ -1847,7 +1847,11 @@ mod tests {
     use std::collections::VecDeque;
     use std::sync::atomic::AtomicUsize;
 
-    fn test_adapter(default_role: &str, allowlist: Vec<&str>) -> RunnerAdapter {
+    fn test_adapter_with_workspace(
+        default_role: &str,
+        allowlist: Vec<&str>,
+        workspace_root: &std::path::Path,
+    ) -> RunnerAdapter {
         let voice_cfg = VoiceConfig {
             provider: "openai".to_string(),
             api_key: "test-key".to_string(),
@@ -1863,7 +1867,7 @@ mod tests {
             tool_allowlist: allowlist.into_iter().map(str::to_string).collect(),
             rate_limit_per_session: 100,
             audit_log_path: "/tmp/liveclaw-test-audit.jsonl".to_string(),
-            workspace_root: ".".to_string(),
+            workspace_root: workspace_root.to_string_lossy().to_string(),
             forbidden_tool_paths: vec![".git".to_string(), "target".to_string()],
             principal_allowlist: Vec::new(),
             deny_by_default_principal_allowlist: false,
@@ -1899,6 +1903,10 @@ mod tests {
                 transcript_tx,
             },
         )
+    }
+
+    fn test_adapter(default_role: &str, allowlist: Vec<&str>) -> RunnerAdapter {
+        test_adapter_with_workspace(default_role, allowlist, std::path::Path::new("."))
     }
 
     #[test]
@@ -2177,6 +2185,64 @@ mod tests {
         assert_eq!(result["status"], json!("interrupted"));
         assert!(report.interrupted);
         assert!(!report.completed);
+    }
+
+    #[tokio::test]
+    async fn test_execute_session_tool_call_graph_reads_workspace_file_from_prompt_payload() {
+        let workspace = std::env::temp_dir().join(format!(
+            "liveclaw-prompt-read-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let target_file = workspace.join("notes").join("prompt.txt");
+        std::fs::create_dir_all(target_file.parent().unwrap()).unwrap();
+        std::fs::write(&target_file, "tool prompt read success").unwrap();
+
+        let adapter = test_adapter_with_workspace("full", vec![], &workspace);
+        let tools = adapter
+            .build_protected_tools("principal-1", "full")
+            .unwrap()
+            .into_iter()
+            .map(|tool| (tool.name().to_string(), tool))
+            .collect::<HashMap<_, _>>();
+
+        let (result, report) = execute_session_tool_call_graph(
+            "sess-graph-read-1",
+            "principal-1",
+            "full",
+            "read_workspace_file",
+            json!({
+                "path": "notes/prompt.txt",
+                "max_bytes": 256,
+                "prompt": "Use read_workspace_file to load notes/prompt.txt"
+            }),
+            tools,
+            25,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result["status"], json!("ok"));
+        assert_eq!(result["tool"], json!("read_workspace_file"));
+        assert_eq!(result["result"]["path"], json!("notes/prompt.txt"));
+        assert_eq!(result["result"]["truncated"], json!(false));
+        let content = result["result"]["content"].as_str().unwrap_or_default();
+        assert!(
+            content.contains("tool prompt read success"),
+            "unexpected read content: {}",
+            content
+        );
+        assert!(report.completed);
+        assert!(!report.interrupted);
+        assert!(
+            report.events.iter().any(|event| event.node == "tools"),
+            "expected tools node execution in graph trace"
+        );
+
+        let _ = std::fs::remove_dir_all(workspace);
     }
 
     #[test]
