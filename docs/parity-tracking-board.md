@@ -237,6 +237,14 @@ Status scale: `NOT_STARTED`, `IN_PROGRESS`, `AT_RISK`, `BLOCKED`, `DONE`
 | Add Discord adapter coverage tests | DONE | `server::tests::test_channel_discord_http_routes_message_event` and `server::tests::test_channel_discord_http_ignores_bot_message` |
 | Keep release-flow/demo and client docs aligned | DONE | `scripts/demo/m6_release_flow.sh`, `tools/ws-client/index.html`, and `README.md` updated for Discord channel path |
 
+## Sprint 22 Checklist (DONE)
+
+| Item | Status | Evidence |
+|---|---|---|
+| Add simple user-facing chat lane to browser client | DONE | `tools/ws-client/index.html` adds `Assistant Chat (Simple)` panel with message input/history and `SessionPrompt` send flow |
+| Add chat lifecycle handling for active-session transcript responses | DONE | `tools/ws-client/index.html` tracks pending simple-chat prompt state and appends final `TranscriptUpdate` responses |
+| Keep documentation and parity narrative aligned | DONE | `README.md` browser client feature list and `docs/openclaw-zeroclaw-parity-comparison.md` parity summary updates |
+
 ## Closeout Phase 1 Kickoff (2026-02-21)
 
 | Item | Status | Evidence |

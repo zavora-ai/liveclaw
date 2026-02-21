@@ -172,6 +172,7 @@ The client now supports:
   - Bootstrap Flow (`Connect -> Pair -> Authenticate -> CreateSession`)
   - Ops Check (`Ping + GetGatewayHealth + GetDiagnostics`)
   - README Summary flow (bootstrap + prompt submission)
+- Simple user-facing chat lane built on `SessionPrompt` with message history and Enter-to-send input
 - Uploading common audio formats and converting them to PCM16 mono for `SessionAudio`
 - Live microphone streaming to `SessionAudio`
 - Decoding and playback of `AudioOutput`

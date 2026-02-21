@@ -613,6 +613,39 @@
         </article>
 
         <article class="card panel span-6">
+          <h2>Assistant Chat (Simple)</h2>
+          <div class="field-grid">
+            <div class="field-stack">
+              <label for="simpleChatView">Conversation</label>
+              <textarea
+                id="simpleChatView"
+                class="output-pane"
+                readonly
+                placeholder="Simple chat history for the active session."
+              ></textarea>
+            </div>
+            <div class="field-stack">
+              <label for="simpleChatInput">Message</label>
+              <textarea
+                id="simpleChatInput"
+                placeholder="Type a message and press Enter to send (Shift+Enter for newline)."
+              ></textarea>
+            </div>
+            <label class="inline-check">
+              <input id="simpleChatAutoResponse" type="checkbox" checked />
+              Create response automatically
+            </label>
+            <div class="field-row compact">
+              <button id="simpleChatSendBtn" class="primary">Send Message</button>
+              <button id="simpleChatClearBtn" class="soft">Clear Conversation</button>
+            </div>
+            <p class="hint">
+              This panel is a lightweight user flow over `SessionPrompt`. It expects an active session.
+            </p>
+          </div>
+        </article>
+
+        <article class="card panel span-6">
           <h2>M4 Evidence (Memory, Artifacts, Resilience)</h2>
           <div class="field-grid">
             <div class="field-row compact">
@@ -857,6 +890,11 @@
           summaryBullets: $("summaryBullets"),
           runReadSummaryBtn: $("runReadSummaryBtn"),
           applyReadSummaryPromptBtn: $("applyReadSummaryPromptBtn"),
+          simpleChatView: $("simpleChatView"),
+          simpleChatInput: $("simpleChatInput"),
+          simpleChatAutoResponse: $("simpleChatAutoResponse"),
+          simpleChatSendBtn: $("simpleChatSendBtn"),
+          simpleChatClearBtn: $("simpleChatClearBtn"),
           promptToolActivityView: $("promptToolActivityView"),
           refreshM4Btn: $("refreshM4Btn"),
           captureM4Btn: $("captureM4Btn"),
@@ -907,6 +945,7 @@
           channelJobId: "liveclaw.ws.channel_job_id",
           channelText: "liveclaw.ws.channel_text",
           channelCreateResponse: "liveclaw.ws.channel_create_response",
+          simpleChatAutoResponse: "liveclaw.ws.simple_chat_auto_response",
         };
         const profileStoreKey = "liveclaw.ws.connection_profiles";
 
@@ -944,6 +983,9 @@
         const workflowState = {
           running: false,
           controller: null,
+        };
+        const simpleChatState = {
+          awaitingResponse: false,
         };
         const eventWaiters = [];
 
@@ -1118,6 +1160,8 @@
           els.toolResultView.value = "";
           els.graphTraceView.value = "";
           els.promptToolActivityView.value = "";
+          els.simpleChatView.value = "";
+          simpleChatState.awaitingResponse = false;
           els.channelRouteView.value = "";
           els.channelJobView.value = "";
           els.channelOutboundView.value = "";
@@ -1145,6 +1189,7 @@
           localStorage.setItem(keys.channelJobId, els.channelJobId.value.trim());
           localStorage.setItem(keys.channelText, els.channelText.value);
           localStorage.setItem(keys.channelCreateResponse, String(Boolean(els.channelCreateResponse.checked)));
+          localStorage.setItem(keys.simpleChatAutoResponse, String(Boolean(els.simpleChatAutoResponse.checked)));
         }
 
         function readProfiles() {
@@ -1172,6 +1217,7 @@
             voice: els.voiceInput.value.trim(),
             summaryFilePath: els.summaryFilePath.value.trim(),
             summaryBullets: els.summaryBullets.value.trim(),
+            simpleChatAutoResponse: Boolean(els.simpleChatAutoResponse.checked),
             channelType: els.channelType.value.trim(),
             channelAccountId: els.channelAccountId.value.trim(),
             channelExternalUserId: els.channelExternalUserId.value.trim(),
@@ -1193,6 +1239,9 @@
             if (matches) {
               els.summaryBullets.value = payload.summaryBullets;
             }
+          }
+          if (payload.simpleChatAutoResponse !== undefined) {
+            els.simpleChatAutoResponse.checked = Boolean(payload.simpleChatAutoResponse);
           }
           if (payload.channelType !== undefined) {
             const matches = [...els.channelType.options].some((opt) => opt.value === payload.channelType);
@@ -1301,6 +1350,7 @@
           const channelJobId = localStorage.getItem(keys.channelJobId);
           const channelText = localStorage.getItem(keys.channelText);
           const channelCreateResponse = localStorage.getItem(keys.channelCreateResponse);
+          const simpleChatAutoResponse = localStorage.getItem(keys.simpleChatAutoResponse);
           if (url) els.wsUrl.value = url;
           if (pairCode) els.pairCode.value = pairCode;
           if (token) els.tokenInput.value = token;
@@ -1324,6 +1374,9 @@
           if (channelText) els.channelText.value = channelText;
           if (channelCreateResponse !== null) {
             els.channelCreateResponse.checked = channelCreateResponse === "true";
+          }
+          if (simpleChatAutoResponse !== null) {
+            els.simpleChatAutoResponse.checked = simpleChatAutoResponse === "true";
           }
           refreshProfileOptions();
           updateBadges();
@@ -1776,6 +1829,16 @@
           const existing = els.promptToolActivityView.value;
           els.promptToolActivityView.value = existing ? `${existing}\n${text}` : text;
           els.promptToolActivityView.scrollTop = els.promptToolActivityView.scrollHeight;
+        }
+
+        function appendSimpleChatLine(role, text) {
+          const trimmed = (text || "").trim();
+          if (!trimmed) return;
+          const label = role === "user" ? "You" : "Agent";
+          const line = `[${now()}] ${label}: ${trimmed}`;
+          const existing = els.simpleChatView.value;
+          els.simpleChatView.value = existing ? `${existing}\n${line}` : line;
+          els.simpleChatView.scrollTop = els.simpleChatView.scrollHeight;
         }
 
         function appendChannelRouteActivity(text) {
@@ -2385,6 +2448,7 @@
                 els.sessionId.value = "";
                 flowState.sessionReady = false;
                 flowState.readySessionId = "";
+                simpleChatState.awaitingResponse = false;
                 savePrefs();
                 updateBadges();
               }
@@ -2488,6 +2552,10 @@
               m4State.transcriptChars += textChunk.length;
               appendTranscript(textChunk, Boolean(parsed.is_final));
               if (parsed.is_final) {
+                if (simpleChatState.awaitingResponse) {
+                  appendSimpleChatLine("agent", textChunk);
+                  simpleChatState.awaitingResponse = false;
+                }
                 recordM4Snapshot(`final transcript chunk observed (${textChunk.length} chars)`);
               } else {
                 updateM4EvidenceView();
@@ -2496,6 +2564,7 @@
 
             if (parsed.type === "Error") {
               m4State.lastError = `${parsed.code || "unknown"}: ${parsed.message || "unknown"}`;
+              simpleChatState.awaitingResponse = false;
               appendPromptToolActivity(`[${now()}] error ${parsed.code || "unknown"}: ${parsed.message || "unknown"}`);
               if (parsed.code === "invalid_token" || parsed.code === "auth_required") {
                 flowState.authenticated = false;
@@ -2865,6 +2934,43 @@
           });
         });
 
+        els.simpleChatSendBtn.addEventListener("click", () => {
+          const sid = activeSessionId();
+          if (!sid) {
+            log("error", "Session ID is empty.");
+            return;
+          }
+          const prompt = els.simpleChatInput.value.trim();
+          if (!prompt) {
+            log("error", "Simple chat message is empty.");
+            return;
+          }
+
+          const createResponse = Boolean(els.simpleChatAutoResponse.checked);
+          appendSimpleChatLine("user", prompt);
+          simpleChatState.awaitingResponse = createResponse;
+          sendObject({
+            type: "SessionPrompt",
+            session_id: sid,
+            prompt,
+            create_response: createResponse,
+          });
+          els.simpleChatInput.value = "";
+          savePrefs();
+        });
+
+        els.simpleChatClearBtn.addEventListener("click", () => {
+          els.simpleChatView.value = "";
+          simpleChatState.awaitingResponse = false;
+        });
+
+        els.simpleChatInput.addEventListener("keydown", (event) => {
+          if (event.key === "Enter" && !event.shiftKey) {
+            event.preventDefault();
+            els.simpleChatSendBtn.click();
+          }
+        });
+
         els.callToolBtn.addEventListener("click", () => {
           const sid = activeSessionId();
           if (!sid) {
@@ -2945,7 +3051,7 @@
             updateBadges();
           });
         });
-        [els.channelText, els.channelCreateResponse].forEach((el) => {
+        [els.channelText, els.channelCreateResponse, els.simpleChatAutoResponse].forEach((el) => {
           el.addEventListener("input", savePrefs);
           el.addEventListener("change", savePrefs);
         });

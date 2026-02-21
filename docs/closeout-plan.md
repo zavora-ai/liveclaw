@@ -111,3 +111,4 @@ Close the remaining parity and release-candidate scope so the project can be dec
 20. 2026-02-21: closed service-ergonomics parity slice by adding `service logs` and `service doctor` shortcuts in `liveclaw-app`, with parser tests and README/parity documentation updates.
 21. 2026-02-21: improved install-path parity by adding `scripts/bootstrap_local.sh` for one-command local setup + non-interactive onboarding (including optional `--clone-adk` auto-bootstrap), and aligned README/parity tracking docs.
 22. 2026-02-21: expanded channel breadth by adding Discord ingress (`/channels/discord/events`) with payload translation, route normalization support, gateway tests, demo coverage, and WS client/docs updates.
+23. 2026-02-21: reduced user-surface parity gap by adding a simple chat lane to the browser WS client (session prompt + transcript history UX) and aligning README/parity-board reporting.

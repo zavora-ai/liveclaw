@@ -81,17 +81,18 @@ Status legend:
 4. Runtime/provider security hardening is explicit (`native`/`docker`, allowlist enforcement, public bind safety checks).
 5. Browser client now includes guided bootstrap/ops workflows plus reusable saved connection profiles.
 6. Service operator ergonomics now include `service doctor` and `service logs` shortcuts.
+7. Browser client now includes a simple chat lane for non-operator `SessionPrompt` usage.
 
 ### Main parity gaps versus OpenClaw + ZeroClaw
 
-1. User-facing product surfaces gap: OpenClaw has richer end-user app/dashboard experience out of the box.
+1. User-facing product surfaces gap: narrowed by the simple chat lane, but OpenClaw still has a richer end-user app/dashboard experience.
 2. Channel breadth gap: LiveClaw now covers Telegram/Slack/Webhook/Discord, but still trails broader ecosystem depth.
 
 ## 4) Recommended Closure Order (Pragmatic)
 
 1. `P1` Channel breadth expansion based on actual user demand sequence.
-2. `P1` Install simplification: reduce first-time setup dependence on manual Rust/ADK sibling orchestration.
-3. `P2` End-user surface expansion beyond operator-focused WS client workflows.
+2. `P1` End-user surface expansion beyond operator-focused workflows.
+3. `P2` Distribution hardening: reduce source-centric setup requirements further.
 
 ## 5) Bottom Line
 
