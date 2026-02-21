@@ -29,7 +29,7 @@ Close the remaining parity and release-candidate scope so the project can be dec
 ## Remaining Blockers
 
 1. No open technical blockers for RC hardening.
-2. Phase 5 closure actions remain: final parity closeout summary, ADK delta report publication, and release-candidate tagging.
+2. Remaining closure action: create and publish release-candidate milestone tag.
 
 ## Phase Plan and Sprints
 
@@ -71,7 +71,9 @@ Close the remaining parity and release-candidate scope so the project can be dec
 ## Phase 5: Closure and Tagging (Sprint 16, 2026-04-20 to 2026-04-24)
 
 1. Mark milestone board complete.
+   - Status: delivered (`docs/parity-tracking-board.md` marks M0-M6 `DONE`).
 2. Publish final parity closeout summary and ADK delta report.
+   - Status: delivered (`docs/final-parity-closeout-summary.md`, `docs/adk-delta-report.md`).
 3. Tag release-candidate milestone and archive closeout evidence.
 4. Exit criteria:
    - Project completion criteria are fully satisfied.
@@ -102,3 +104,4 @@ Close the remaining parity and release-candidate scope so the project can be dec
 13. 2026-02-21: published RC operation artifacts (`docs/release-runbook.md`, `docs/deployment-guide.md`, `docs/rollback-playbook.md`).
 14. 2026-02-21: published RC operational limits (`docs/rc-operational-limits.md`) with deterministic burst evidence and re-verification command path.
 15. 2026-02-21: completed smoke-suite sign-off workflow via `scripts/demo/m6_rc_signoff.sh` and published `docs/rc-signoff-record.md`.
+16. 2026-02-21: published Phase 5 closure artifacts (`docs/final-parity-closeout-summary.md`, `docs/adk-delta-report.md`) and promoted milestone board to M0-M6 `DONE`.

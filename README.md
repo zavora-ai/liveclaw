@@ -117,6 +117,8 @@ cargo fmt --check
 - Rollback playbook: [`docs/rollback-playbook.md`](docs/rollback-playbook.md)
 - Operational limits: [`docs/rc-operational-limits.md`](docs/rc-operational-limits.md)
 - Latest smoke sign-off record: [`docs/rc-signoff-record.md`](docs/rc-signoff-record.md)
+- Final parity closeout summary: [`docs/final-parity-closeout-summary.md`](docs/final-parity-closeout-summary.md)
+- ADK delta report: [`docs/adk-delta-report.md`](docs/adk-delta-report.md)
 
 Generate/update the RC smoke sign-off record:
 
