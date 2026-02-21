@@ -38,6 +38,7 @@ demo_header "M6 Release Candidate Flow"
   cargo test -p liveclaw-gateway --lib server::tests::test_channel_slack_http_url_verification_returns_challenge -- --exact
   cargo test -p liveclaw-gateway --lib server::tests::test_channel_telegram_http_routes_message -- --exact
   cargo test -p liveclaw-gateway --lib server::tests::test_channel_discord_http_routes_message_event -- --exact
+  cargo test -p liveclaw-gateway --lib server::tests::test_channel_matrix_http_routes_message_event -- --exact
   cargo test -p liveclaw-gateway --lib server::tests::test_get_channel_outbound_requires_auth -- --exact
   cargo test -p liveclaw-gateway --lib server::tests::test_get_channel_outbound_returns_queued_final_transcript_items -- --exact
   cargo test -p liveclaw-gateway --lib server::tests::test_channel_outbound_poll_http_requires_auth_token -- --exact

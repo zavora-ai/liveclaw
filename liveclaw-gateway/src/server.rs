@@ -289,6 +289,21 @@ struct DiscordAuthor {
     bot: Option<bool>,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+struct MatrixEventPayload {
+    #[serde(rename = "type")]
+    event_type: Option<String>,
+    room_id: Option<String>,
+    sender: Option<String>,
+    content: Option<MatrixEventContent>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct MatrixEventContent {
+    msgtype: Option<String>,
+    body: Option<String>,
+}
+
 // ---------------------------------------------------------------------------
 // Health check response
 // ---------------------------------------------------------------------------
@@ -456,6 +471,10 @@ fn build_router(state: AppState) -> Router {
         .route(
             "/channels/discord/events",
             post(channel_discord_events_handler),
+        )
+        .route(
+            "/channels/matrix/events",
+            post(channel_matrix_events_handler),
         )
         .route(
             "/channels/outbound/poll",
@@ -748,6 +767,100 @@ async fn channel_discord_events_handler(
     let resp = handle_channel_http_route(
         ChannelInboundRequest {
             channel: "discord",
+            account_id,
+            external_user_id,
+            text,
+            create_response: query.create_response.unwrap_or(true),
+            session_config_on_create: None,
+            force_session_recreate: false,
+        },
+        token,
+        &state,
+    )
+    .await;
+    http_response_from_gateway(resp)
+}
+
+async fn channel_matrix_events_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(query): Query<ChannelIngressQuery>,
+    JsonExtract(payload): JsonExtract<MatrixEventPayload>,
+) -> impl IntoResponse {
+    if let Some(event_type) = payload.event_type.as_deref() {
+        if !event_type.eq_ignore_ascii_case("m.room.message") {
+            return (
+                StatusCode::ACCEPTED,
+                Json(serde_json::json!({
+                    "status": "ignored",
+                    "reason": "unsupported_event_type",
+                })),
+            );
+        }
+    }
+
+    let token = extract_channel_token(&headers, &query);
+
+    let Some(account_id) = payload.room_id.as_deref() else {
+        return http_json_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_matrix_payload",
+            "Matrix payload is missing 'room_id'",
+        );
+    };
+    let Some(external_user_id) = payload.sender.as_deref() else {
+        return http_json_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_matrix_payload",
+            "Matrix payload is missing 'sender'",
+        );
+    };
+
+    let Some(content) = payload.content.as_ref() else {
+        return (
+            StatusCode::ACCEPTED,
+            Json(serde_json::json!({
+                "status": "ignored",
+                "reason": "no_text",
+            })),
+        );
+    };
+
+    if let Some(msg_type) = content.msgtype.as_deref() {
+        if !msg_type.eq_ignore_ascii_case("m.text") && !msg_type.eq_ignore_ascii_case("m.notice") {
+            return (
+                StatusCode::ACCEPTED,
+                Json(serde_json::json!({
+                    "status": "ignored",
+                    "reason": "unsupported_message_type",
+                })),
+            );
+        }
+    }
+
+    let Some(text_raw) = content.body.as_deref() else {
+        return (
+            StatusCode::ACCEPTED,
+            Json(serde_json::json!({
+                "status": "ignored",
+                "reason": "no_text",
+            })),
+        );
+    };
+    let text = text_raw.trim();
+    if text.is_empty() {
+        return (
+            StatusCode::ACCEPTED,
+            Json(serde_json::json!({
+                "status": "ignored",
+                "reason": "no_text",
+            })),
+        );
+    }
+
+    let resp = handle_channel_http_route(
+        ChannelInboundRequest {
+            channel: "matrix",
             account_id,
             external_user_id,
             text,
@@ -1873,7 +1986,7 @@ fn build_workspace_summary_prompt(
 }
 
 const SUPPORTED_CHANNELS_MESSAGE: &str =
-    "Supported channels are telegram, slack, webhook, and discord";
+    "Supported channels are telegram, slack, webhook, discord, and matrix";
 
 fn normalize_channel(channel: &str) -> Option<String> {
     match channel.trim().to_ascii_lowercase().as_str() {
@@ -1881,6 +1994,7 @@ fn normalize_channel(channel: &str) -> Option<String> {
         "slack" => Some("slack".to_string()),
         "webhook" => Some("webhook".to_string()),
         "discord" => Some("discord".to_string()),
+        "matrix" => Some("matrix".to_string()),
         _ => None,
     }
 }
@@ -5012,6 +5126,55 @@ mod tests {
         assert_eq!(status, StatusCode::ACCEPTED);
         assert_eq!(body["status"], serde_json::json!("ignored"));
         assert_eq!(body["reason"], serde_json::json!("bot_message"));
+    }
+
+    #[tokio::test]
+    async fn test_channel_matrix_http_routes_message_event() {
+        let state = make_state(MockRunner::ok(), true);
+        let token = paired_token(&state);
+        let app = build_router(state);
+
+        let request = Request::builder()
+            .method("POST")
+            .uri("/channels/matrix/events")
+            .header(header::CONTENT_TYPE, "application/json")
+            .header(header::AUTHORIZATION, format!("Bearer {}", token))
+            .body(Body::from(
+                r#"{"type":"m.room.message","room_id":"!room:example.org","sender":"@alice:example.org","content":{"msgtype":"m.text","body":"hello from matrix"}}"#,
+            ))
+            .expect("request");
+
+        let (status, body) = request_json(app, request).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["type"], serde_json::json!("ChannelRouted"));
+        assert_eq!(body["channel"], serde_json::json!("matrix"));
+        assert_eq!(body["account_id"], serde_json::json!("!room:example.org"));
+        assert_eq!(
+            body["external_user_id"],
+            serde_json::json!("@alice:example.org")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_channel_matrix_http_ignores_non_message_type() {
+        let state = make_state(MockRunner::ok(), true);
+        let token = paired_token(&state);
+        let app = build_router(state);
+
+        let request = Request::builder()
+            .method("POST")
+            .uri("/channels/matrix/events")
+            .header(header::CONTENT_TYPE, "application/json")
+            .header(header::AUTHORIZATION, format!("Bearer {}", token))
+            .body(Body::from(
+                r#"{"type":"m.room.member","room_id":"!room:example.org","sender":"@alice:example.org","content":{"body":"ignored"}} "#,
+            ))
+            .expect("request");
+
+        let (status, body) = request_json(app, request).await;
+        assert_eq!(status, StatusCode::ACCEPTED);
+        assert_eq!(body["status"], serde_json::json!("ignored"));
+        assert_eq!(body["reason"], serde_json::json!("unsupported_event_type"));
     }
 
     #[tokio::test]

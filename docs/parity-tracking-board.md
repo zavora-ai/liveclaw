@@ -245,6 +245,15 @@ Status scale: `NOT_STARTED`, `IN_PROGRESS`, `AT_RISK`, `BLOCKED`, `DONE`
 | Add chat lifecycle handling for active-session transcript responses | DONE | `tools/ws-client/index.html` tracks pending simple-chat prompt state and appends final `TranscriptUpdate` responses |
 | Keep documentation and parity narrative aligned | DONE | `README.md` browser client feature list and `docs/openclaw-zeroclaw-parity-comparison.md` parity summary updates |
 
+## Sprint 23 Checklist (DONE)
+
+| Item | Status | Evidence |
+|---|---|---|
+| Add Matrix HTTP ingress adapter path | DONE | `liveclaw-gateway/src/server.rs` adds `/channels/matrix/events` with payload mapping to `ChannelInbound` route |
+| Extend supported channel normalization to include Matrix | DONE | `liveclaw-gateway/src/server.rs` `normalize_channel()` now accepts `matrix` across inbound/outbound/job paths |
+| Add Matrix adapter coverage tests | DONE | `server::tests::test_channel_matrix_http_routes_message_event` and `server::tests::test_channel_matrix_http_ignores_non_message_type` |
+| Keep release-flow/demo and client docs aligned | DONE | `scripts/demo/m6_release_flow.sh`, `tools/ws-client/index.html`, and `README.md` updated for Matrix channel path |
+
 ## Closeout Phase 1 Kickoff (2026-02-21)
 
 | Item | Status | Evidence |
