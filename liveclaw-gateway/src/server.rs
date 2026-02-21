@@ -16,8 +16,8 @@ use tracing::{error, info, warn};
 
 use crate::pairing::PairingGuard;
 use crate::protocol::{
-    GatewayHealth, GatewayMessage, GatewayResponse, PriorityNotice, RuntimeDiagnostics,
-    SessionConfig, PROTOCOL_VERSION,
+    GatewayHealth, GatewayMessage, GatewayResponse, GraphExecutionReport, PriorityNotice,
+    RuntimeDiagnostics, SessionConfig, PROTOCOL_VERSION,
 };
 
 // ---------------------------------------------------------------------------
@@ -53,6 +53,15 @@ pub trait RunnerHandle: Send + Sync {
 
     /// Interrupt an in-flight model response.
     async fn interrupt_response(&self, session_id: &str) -> anyhow::Result<()>;
+
+    /// Execute a tool call through the runtime graph path for deterministic
+    /// M3 validation.
+    async fn session_tool_call(
+        &self,
+        session_id: &str,
+        tool_name: &str,
+        arguments: serde_json::Value,
+    ) -> anyhow::Result<(serde_json::Value, GraphExecutionReport)>;
 
     /// Return runtime diagnostics for operator validation.
     async fn diagnostics(&self) -> anyhow::Result<RuntimeDiagnostics>;
@@ -481,6 +490,26 @@ async fn handle_message(
             handle_session_response_interrupt(&session_id, state, conn, ws_tx, ws_priority_tx).await
         }
 
+        GatewayMessage::SessionToolCall {
+            session_id,
+            tool_name,
+            arguments,
+        } => {
+            if !conn.authenticated {
+                return auth_required_error();
+            }
+            handle_session_tool_call(
+                &session_id,
+                &tool_name,
+                arguments,
+                state,
+                conn,
+                ws_tx,
+                ws_priority_tx,
+            )
+            .await
+        }
+
         GatewayMessage::GetDiagnostics => {
             if !conn.authenticated {
                 return auth_required_error();
@@ -779,6 +808,47 @@ async fn handle_session_response_interrupt(
     }
 }
 
+/// Handle SessionToolCall — execute deterministic tool invocation and return
+/// graph execution report for operator validation.
+async fn handle_session_tool_call(
+    session_id: &str,
+    tool_name: &str,
+    arguments: serde_json::Value,
+    state: &AppState,
+    conn: &mut ConnectionState,
+    ws_tx: &mpsc::Sender<GatewayResponse>,
+    ws_priority_tx: &mpsc::Sender<GatewayResponse>,
+) -> GatewayResponse {
+    if let Err(resp) =
+        authorize_session_access(session_id, state, conn, Some(ws_tx), Some(ws_priority_tx)).await
+    {
+        return resp;
+    }
+
+    match state
+        .runner
+        .session_tool_call(session_id, tool_name, arguments)
+        .await
+    {
+        Ok((result, graph)) => GatewayResponse::SessionToolResult {
+            session_id: session_id.to_string(),
+            tool_name: tool_name.to_string(),
+            result,
+            graph,
+        },
+        Err(e) => {
+            warn!(
+                "Failed to execute SessionToolCall '{}' for session {}: {}",
+                tool_name, session_id, e
+            );
+            GatewayResponse::Error {
+                code: "session_tool_call_failed".to_string(),
+                message: format!("Failed to execute tool call: {}", e),
+            }
+        }
+    }
+}
+
 /// Handle GetDiagnostics — returns runtime/provider/resilience/compaction
 /// metrics from the active runner.
 async fn handle_get_diagnostics(state: &AppState) -> GatewayResponse {
@@ -1067,6 +1137,8 @@ mod tests {
         response_create_err: Option<String>,
         /// If set, interrupt_response returns this error.
         response_interrupt_err: Option<String>,
+        /// If set, session_tool_call returns this error.
+        tool_call_err: Option<String>,
         /// If set, diagnostics returns this error.
         diagnostics_err: Option<String>,
     }
@@ -1080,6 +1152,7 @@ mod tests {
                 audio_commit_err: None,
                 response_create_err: None,
                 response_interrupt_err: None,
+                tool_call_err: None,
                 diagnostics_err: None,
             }
         }
@@ -1092,6 +1165,7 @@ mod tests {
                 audio_commit_err: None,
                 response_create_err: None,
                 response_interrupt_err: None,
+                tool_call_err: None,
                 diagnostics_err: None,
             }
         }
@@ -1143,6 +1217,38 @@ mod tests {
             match &self.response_interrupt_err {
                 Some(e) => Err(anyhow::anyhow!("{}", e)),
                 None => Ok(()),
+            }
+        }
+
+        async fn session_tool_call(
+            &self,
+            _session_id: &str,
+            tool_name: &str,
+            arguments: serde_json::Value,
+        ) -> anyhow::Result<(serde_json::Value, GraphExecutionReport)> {
+            match &self.tool_call_err {
+                Some(e) => Err(anyhow::anyhow!("{}", e)),
+                None => Ok((
+                    serde_json::json!({
+                        "tool": tool_name,
+                        "arguments": arguments,
+                        "status": "ok",
+                    }),
+                    GraphExecutionReport {
+                        thread_id: "test-thread".to_string(),
+                        completed: true,
+                        interrupted: false,
+                        events: vec![crate::protocol::GraphExecutionEvent {
+                            step: 0,
+                            node: "tools".to_string(),
+                            action: "node_end".to_string(),
+                            detail: "tool executed".to_string(),
+                        }],
+                        final_state: serde_json::json!({
+                            "tools_executed_count": 1
+                        }),
+                    },
+                )),
             }
         }
 
@@ -1500,6 +1606,29 @@ mod tests {
         let resp = handle_message(
             GatewayMessage::SessionResponseInterrupt {
                 session_id: "s1".into(),
+            },
+            &state,
+            &mut conn,
+            &ws_tx,
+            &ws_priority_tx,
+        )
+        .await;
+        match resp {
+            GatewayResponse::Error { code, .. } => assert_eq!(code, "auth_required"),
+            other => panic!("Expected auth_required error, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_session_tool_call_requires_auth() {
+        let state = make_state(MockRunner::ok(), true);
+        let mut conn = unauthed_conn();
+        let (ws_tx, ws_priority_tx) = dummy_ws_txs();
+        let resp = handle_message(
+            GatewayMessage::SessionToolCall {
+                session_id: "s1".into(),
+                tool_name: "echo_text".into(),
+                arguments: serde_json::json!({ "text": "hello" }),
             },
             &state,
             &mut conn,
@@ -1920,6 +2049,42 @@ mod tests {
                 assert_eq!(session_id, "sess-1");
             }
             other => panic!("Expected ResponseInterruptAccepted, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_session_tool_call_forwards_to_runner() {
+        let state = make_state(MockRunner::ok(), false);
+        let mut conn = authed_conn();
+        let (ws_tx, ws_priority_tx) = dummy_ws_txs();
+        conn.owned_sessions.push("sess-1".to_string());
+
+        let resp = handle_message(
+            GatewayMessage::SessionToolCall {
+                session_id: "sess-1".into(),
+                tool_name: "echo_text".into(),
+                arguments: serde_json::json!({ "text": "hello" }),
+            },
+            &state,
+            &mut conn,
+            &ws_tx,
+            &ws_priority_tx,
+        )
+        .await;
+        match resp {
+            GatewayResponse::SessionToolResult {
+                session_id,
+                tool_name,
+                result,
+                graph,
+            } => {
+                assert_eq!(session_id, "sess-1");
+                assert_eq!(tool_name, "echo_text");
+                assert_eq!(result["status"], serde_json::json!("ok"));
+                assert!(graph.completed);
+                assert!(!graph.interrupted);
+            }
+            other => panic!("Expected SessionToolResult, got {:?}", other),
         }
     }
 

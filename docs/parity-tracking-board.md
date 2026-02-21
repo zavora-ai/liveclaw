@@ -1,6 +1,6 @@
 # LiveClaw Parity Tracking Board
 
-Date: 2026-02-20
+Date: 2026-02-21
 Status scale: `NOT_STARTED`, `IN_PROGRESS`, `AT_RISK`, `BLOCKED`, `DONE`
 
 ## Milestone Board
@@ -10,7 +10,7 @@ Status scale: `NOT_STARTED`, `IN_PROGRESS`, `AT_RISK`, `BLOCKED`, `DONE`
 | M0 Baseline Recovery | DONE | Core Team | 2026-02-27 | `scripts/demo/m0_baseline.sh` | Quality gate green; CI ADK path valid; parity docs present; P0/P1 register maintained |
 | M1 Voice E2E | IN_PROGRESS | Core Team | 2026-03-13 | `scripts/demo/m1_voice_e2e.sh` + `scripts/demo/m1_voice_e2e_live.sh` | SessionAudio reaches live runtime; provider-backed transcript/audio roundtrip validated; session IDs propagate end-to-end |
 | M2 Secure Multi-Session | IN_PROGRESS | Core Team | 2026-03-27 | `scripts/demo/m2_secure_sessions.sh` | Token auth path implemented; per-session ownership enforced |
-| M3 Tool and Graph Execution | IN_PROGRESS | Core Team | 2026-04-24 | `scripts/demo/m3_tools_graph.sh` | Non-empty toolset; RBAC enforced; graph tools node executes |
+| M3 Tool and Graph Execution | IN_PROGRESS | Core Team | 2026-04-24 | `scripts/demo/m3_tools_graph.sh` | Non-empty toolset; RBAC enforced; graph tools node executes; `SessionToolCall` emits graph trace |
 | M4 Memory, Artifacts, Resilience | IN_PROGRESS | Core Team | 2026-05-22 | `scripts/demo/m4_memory_artifacts.sh` | Persistent recall across restarts; artifact persistence; reconnect behavior validated |
 | M5 ZeroClaw Track Parity | IN_PROGRESS | Core Team | 2026-06-19 | `scripts/demo/m5_runtime_security.sh` | Runtime modes validated; provider flexibility; security hardening gates pass |
 | M6 OpenClaw Track Parity + RC | IN_PROGRESS | Core Team | 2026-07-31 | `scripts/demo/m6_release_flow.sh` | Priority channels work; ops surfaces validated; release candidate checklist passes |
@@ -55,6 +55,9 @@ Status scale: `NOT_STARTED`, `IN_PROGRESS`, `AT_RISK`, `BLOCKED`, `DONE`
 | Wire tools into realtime runtime with ADK interfaces | DONE | `liveclaw-app/src/main.rs` converts `Arc<dyn adk_core::Tool>` into realtime tool definitions + handlers |
 | Enforce RBAC on tool execution path | DONE | `liveclaw-app/src/main.rs` session-specific `AuthMiddleware::with_audit` |
 | Add explicit tool execution metrics (count/failures/duration) | DONE | `liveclaw-app/src/main.rs` `ToolExecutionMetrics` and structured logs |
+| Add client-triggered tool invocation message | DONE | `liveclaw-gateway/src/protocol.rs` + `liveclaw-gateway/src/server.rs` `SessionToolCall` and `SessionToolResult` |
+| Execute tool calls through graph path and return execution trace | DONE | `liveclaw-app/src/main.rs` `execute_session_tool_call_graph()` + graph trace tests |
+| Keep browser WS client aligned for tool + graph validation | DONE | `tools/ws-client/index.html` Tool + Graph panel and `SessionToolResult` trace rendering |
 | Add M3 demo checks | DONE | `scripts/demo/m3_tools_graph.sh` |
 
 ## Sprint 4 Checklist (In Progress)

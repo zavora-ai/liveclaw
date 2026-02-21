@@ -468,6 +468,44 @@
           </div>
         </article>
 
+        <article class="card panel span-6">
+          <h2>Tool + Graph (M3)</h2>
+          <div class="field-grid">
+            <div class="field-row compact">
+              <div class="field-stack">
+                <label for="toolName">Tool Name</label>
+                <select id="toolName">
+                  <option value="echo_text">echo_text</option>
+                  <option value="add_numbers">add_numbers</option>
+                  <option value="utc_time">utc_time</option>
+                  <option value="read_workspace_file">read_workspace_file</option>
+                </select>
+              </div>
+              <div class="field-stack">
+                <label>&nbsp;</label>
+                <button id="callToolBtn" class="primary">SessionToolCall</button>
+              </div>
+            </div>
+            <div class="field-stack">
+              <label for="toolArgs">Tool Arguments (JSON)</label>
+              <textarea id="toolArgs" class="output-pane" spellcheck="false">{
+  "text": "hello from graph"
+}</textarea>
+            </div>
+            <div class="field-stack">
+              <label for="toolResultView">Tool Result</label>
+              <textarea id="toolResultView" class="output-pane" readonly></textarea>
+            </div>
+            <div class="field-stack">
+              <label for="graphTraceView">Graph Trace</label>
+              <textarea id="graphTraceView" class="output-pane" readonly></textarea>
+            </div>
+            <p class="hint">
+              For graph execution, create session with role `full` and `Enable Graph = true`.
+            </p>
+          </div>
+        </article>
+
         <article class="card panel span-12">
           <h2>Raw JSON Message</h2>
           <div class="field-grid">
@@ -485,6 +523,7 @@
                   <option value="SessionAudioCommit">SessionAudioCommit</option>
                   <option value="SessionResponseCreate">SessionResponseCreate</option>
                   <option value="SessionResponseInterrupt">SessionResponseInterrupt</option>
+                  <option value="SessionToolCall">SessionToolCall</option>
                 </select>
               </div>
               <div class="field-stack">
@@ -557,6 +596,11 @@
           createResponseBtn: $("createResponseBtn"),
           interruptResponseBtn: $("interruptResponseBtn"),
           transcriptView: $("transcriptView"),
+          toolName: $("toolName"),
+          toolArgs: $("toolArgs"),
+          callToolBtn: $("callToolBtn"),
+          toolResultView: $("toolResultView"),
+          graphTraceView: $("graphTraceView"),
           rawJson: $("rawJson"),
           sendRawBtn: $("sendRawBtn"),
           templateType: $("templateType"),
@@ -641,6 +685,8 @@
           voiceCounters.audioOutput = 0;
           lastAudioOutputBytes = null;
           els.transcriptView.value = "";
+          els.toolResultView.value = "";
+          els.graphTraceView.value = "";
           els.audioProgress.textContent = "idle";
           setPlaybackStatus("idle");
         }
@@ -728,6 +774,16 @@
               return { type: "SessionResponseCreate", session_id: sid };
             case "SessionResponseInterrupt":
               return { type: "SessionResponseInterrupt", session_id: sid };
+            case "SessionToolCall": {
+              const toolName = els.toolName.value.trim() || "echo_text";
+              const parsedArgs = parseJson(els.toolArgs.value) || { text: "hello from graph" };
+              return {
+                type: "SessionToolCall",
+                session_id: sid,
+                tool_name: toolName,
+                arguments: parsedArgs,
+              };
+            }
             case "GetDiagnostics":
               return { type: "GetDiagnostics" };
             case "GetGatewayHealth":
@@ -885,6 +941,32 @@
             els.transcriptView.value += "\n";
           }
           els.transcriptView.scrollTop = els.transcriptView.scrollHeight;
+        }
+
+        function formatGraphReport(graph) {
+          if (!graph || typeof graph !== "object") {
+            return "No graph report.";
+          }
+
+          const lines = [];
+          lines.push(`thread_id: ${graph.thread_id || "n/a"}`);
+          lines.push(`completed: ${Boolean(graph.completed)}`);
+          lines.push(`interrupted: ${Boolean(graph.interrupted)}`);
+
+          const events = Array.isArray(graph.events) ? graph.events : [];
+          lines.push(`events: ${events.length}`);
+          for (const event of events) {
+            const step = Number(event?.step || 0);
+            const node = event?.node || "unknown";
+            const action = event?.action || "event";
+            const detail = event?.detail || "";
+            lines.push(`- [step ${step}] ${node} :: ${action}${detail ? ` :: ${detail}` : ""}`);
+          }
+
+          lines.push("");
+          lines.push("final_state:");
+          lines.push(JSON.stringify(graph.final_state ?? {}, null, 2));
+          return lines.join("\n");
         }
 
         async function sendFileAsAudioChunks() {
@@ -1162,6 +1244,13 @@
               setPlaybackStatus("interrupted");
             }
 
+            if (parsed.type === "SessionToolResult" && parsed.session_id && parsed.session_id === activeSessionId()) {
+              els.toolResultView.value = JSON.stringify(parsed.result ?? {}, null, 2);
+              els.graphTraceView.value = formatGraphReport(parsed.graph);
+              els.toolResultView.scrollTop = 0;
+              els.graphTraceView.scrollTop = 0;
+            }
+
             if (parsed.type === "TranscriptUpdate" && parsed.session_id && parsed.session_id === activeSessionId()) {
               voiceCounters.transcript += 1;
               appendTranscript(parsed.text || "", Boolean(parsed.is_final));
@@ -1327,6 +1416,30 @@
             return;
           }
           sendObject({ type: "SessionResponseInterrupt", session_id: sid });
+        });
+
+        els.callToolBtn.addEventListener("click", () => {
+          const sid = activeSessionId();
+          if (!sid) {
+            log("error", "Session ID is empty.");
+            return;
+          }
+          const toolName = els.toolName.value.trim();
+          if (!toolName) {
+            log("error", "Tool name is empty.");
+            return;
+          }
+          const args = parseJson(els.toolArgs.value);
+          if (args === null) {
+            log("error", "Tool arguments must be valid JSON.");
+            return;
+          }
+          sendObject({
+            type: "SessionToolCall",
+            session_id: sid,
+            tool_name: toolName,
+            arguments: args,
+          });
         });
 
         els.sendRawBtn.addEventListener("click", () => {

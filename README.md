@@ -120,6 +120,8 @@ The client now supports:
 - Live microphone streaming to `SessionAudio`
 - Decoding and playback of `AudioOutput`
 - Per-session transcript view for `TranscriptUpdate`
+- Direct `SessionToolCall` invocation with tool arguments JSON
+- Graph execution trace inspection from `SessionToolResult.graph`
 
 ```bash
 cd /Users/jameskaranja/Developer/projects/liveclaw
@@ -187,6 +189,7 @@ Clients connect via WebSocket and exchange JSON messages:
 { "type": "SessionAudioCommit", "session_id": "..." }
 { "type": "SessionResponseCreate", "session_id": "..." }
 { "type": "SessionResponseInterrupt", "session_id": "..." }
+{ "type": "SessionToolCall", "session_id": "...", "tool_name": "echo_text", "arguments": {"text":"hello"} }
 { "type": "TerminateSession", "session_id": "..." }
 { "type": "GetGatewayHealth" }
 { "type": "PriorityProbe" }
@@ -200,6 +203,7 @@ Clients connect via WebSocket and exchange JSON messages:
 { "type": "AudioCommitted", "session_id": "..." }
 { "type": "ResponseCreateAccepted", "session_id": "..." }
 { "type": "ResponseInterruptAccepted", "session_id": "..." }
+{ "type": "SessionToolResult", "session_id": "...", "tool_name": "echo_text", "result": {"status":"ok","result":{"text":"hello","length":5}}, "graph": {"thread_id":"...","completed":true,"interrupted":false,"events":[...],"final_state":{...}} }
 { "type": "AudioOutput", "session_id": "...", "audio": "<base64>" }
 { "type": "TranscriptUpdate", "session_id": "...", "text": "...", "is_final": true }
 { "type": "PriorityProbeAccepted", "queued_standard": true, "queued_priority": true }

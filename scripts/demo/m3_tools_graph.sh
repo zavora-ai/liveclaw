@@ -15,6 +15,12 @@ demo_header "M3 Tool and Graph Execution"
   # Role enforcement on tool execution path (readonly denied, full allowed).
   cargo test -p liveclaw-app --bin liveclaw-app tests::test_tool_handler_denies_readonly_role -- --exact
   cargo test -p liveclaw-app --bin liveclaw-app tests::test_tool_handler_executes_for_full_role_and_tracks_metrics -- --exact
+
+  # Gateway protocol/router supports deterministic tool calls from WS clients.
+  cargo test -p liveclaw-gateway session_tool
+
+  # Graph execution path produces deterministic tool result + trace.
+  cargo test -p liveclaw-app --bin liveclaw-app execute_session_tool_call_graph
 )
 
-demo_pass "Baseline tool execution and RBAC checks passed"
+demo_pass "Tool execution, RBAC, and graph-trace validation checks passed"

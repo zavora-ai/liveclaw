@@ -33,6 +33,11 @@ pub enum GatewayMessage {
     SessionResponseInterrupt {
         session_id: SessionId,
     },
+    SessionToolCall {
+        session_id: SessionId,
+        tool_name: String,
+        arguments: serde_json::Value,
+    },
     PriorityProbe,
     GetGatewayHealth,
     GetDiagnostics,
@@ -69,6 +74,12 @@ pub enum GatewayResponse {
     },
     ResponseInterruptAccepted {
         session_id: SessionId,
+    },
+    SessionToolResult {
+        session_id: SessionId,
+        tool_name: String,
+        result: serde_json::Value,
+        graph: GraphExecutionReport,
     },
     AudioOutput {
         session_id: SessionId,
@@ -109,6 +120,25 @@ pub struct SessionConfig {
     pub role: Option<String>,
     /// Whether to wrap the RealtimeAgent in a GraphAgent
     pub enable_graph: Option<bool>,
+}
+
+/// Graph execution trace event for SessionToolCall runs.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct GraphExecutionEvent {
+    pub step: usize,
+    pub node: String,
+    pub action: String,
+    pub detail: String,
+}
+
+/// Graph execution report returned for SessionToolCall.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct GraphExecutionReport {
+    pub thread_id: String,
+    pub completed: bool,
+    pub interrupted: bool,
+    pub events: Vec<GraphExecutionEvent>,
+    pub final_state: serde_json::Value,
 }
 
 /// Runtime and feature diagnostics for operator validation.
@@ -169,6 +199,7 @@ pub fn supported_client_message_types() -> Vec<String> {
         "SessionAudioCommit".to_string(),
         "SessionResponseCreate".to_string(),
         "SessionResponseInterrupt".to_string(),
+        "SessionToolCall".to_string(),
         "PriorityProbe".to_string(),
         "GetGatewayHealth".to_string(),
         "GetDiagnostics".to_string(),
@@ -188,6 +219,7 @@ pub fn supported_server_response_types() -> Vec<String> {
         "AudioCommitted".to_string(),
         "ResponseCreateAccepted".to_string(),
         "ResponseInterruptAccepted".to_string(),
+        "SessionToolResult".to_string(),
         "AudioOutput".to_string(),
         "TranscriptUpdate".to_string(),
         "PriorityProbeAccepted".to_string(),
@@ -295,6 +327,18 @@ mod tests {
     fn test_gateway_message_session_response_interrupt() {
         let msg = GatewayMessage::SessionResponseInterrupt {
             session_id: "sess-001".into(),
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        let parsed: GatewayMessage = serde_json::from_str(&json).unwrap();
+        assert_eq!(msg, parsed);
+    }
+
+    #[test]
+    fn test_gateway_message_session_tool_call() {
+        let msg = GatewayMessage::SessionToolCall {
+            session_id: "sess-001".into(),
+            tool_name: "echo_text".into(),
+            arguments: serde_json::json!({ "text": "hello" }),
         };
         let json = serde_json::to_string(&msg).unwrap();
         let parsed: GatewayMessage = serde_json::from_str(&json).unwrap();
@@ -430,6 +474,32 @@ mod tests {
     }
 
     #[test]
+    fn test_gateway_response_session_tool_result() {
+        let resp = GatewayResponse::SessionToolResult {
+            session_id: "sess-002".into(),
+            tool_name: "echo_text".into(),
+            result: serde_json::json!({ "text": "hello", "length": 5 }),
+            graph: GraphExecutionReport {
+                thread_id: "sess-002-graph-1".into(),
+                completed: true,
+                interrupted: false,
+                events: vec![GraphExecutionEvent {
+                    step: 0,
+                    node: "resolve_tool".into(),
+                    action: "node_end".into(),
+                    detail: "resolved one pending tool".into(),
+                }],
+                final_state: serde_json::json!({
+                    "tools_executed_count": 1,
+                }),
+            },
+        };
+        let json = serde_json::to_string(&resp).unwrap();
+        let parsed: GatewayResponse = serde_json::from_str(&json).unwrap();
+        assert_eq!(resp, parsed);
+    }
+
+    #[test]
     fn test_gateway_response_audio_output() {
         let resp = GatewayResponse::AudioOutput {
             session_id: "sess-002".into(),
@@ -549,6 +619,7 @@ mod tests {
         assert!(client_types.contains(&"SessionAudioCommit".to_string()));
         assert!(client_types.contains(&"SessionResponseCreate".to_string()));
         assert!(client_types.contains(&"SessionResponseInterrupt".to_string()));
+        assert!(client_types.contains(&"SessionToolCall".to_string()));
         assert!(server_types.contains(&"Diagnostics".to_string()));
         assert!(server_types.contains(&"GatewayHealth".to_string()));
         assert!(server_types.contains(&"PriorityProbeAccepted".to_string()));
@@ -556,6 +627,7 @@ mod tests {
         assert!(server_types.contains(&"AudioCommitted".to_string()));
         assert!(server_types.contains(&"ResponseCreateAccepted".to_string()));
         assert!(server_types.contains(&"ResponseInterruptAccepted".to_string()));
+        assert!(server_types.contains(&"SessionToolResult".to_string()));
     }
 
     #[test]

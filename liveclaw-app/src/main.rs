@@ -17,6 +17,10 @@ use adk_core::{
     CallbackContext, Content, EventActions, MemoryEntry as CoreMemoryEntry, Part, ReadonlyContext,
     Tool, ToolContext,
 };
+use adk_graph::{
+    ExecutionConfig as GraphExecutionConfig, GraphAgent, GraphError, MemoryCheckpointer,
+    NodeContext, NodeOutput, State, END, START,
+};
 use adk_memory::MemoryService;
 use adk_realtime::config::ToolDefinition;
 use adk_realtime::error::RealtimeError;
@@ -25,6 +29,7 @@ use adk_realtime::openai::OpenAIRealtimeModel;
 use adk_realtime::runner::{EventHandler, ToolHandler};
 use adk_realtime::{RealtimeConfig, RealtimeRunner};
 use adk_telemetry::{init_telemetry, init_with_otlp};
+use serde_json::{json, Value};
 
 use liveclaw_app::config::{
     CompactionConfig, LiveClawConfig, ProviderProfileConfig, ProvidersConfig, ResilienceConfig,
@@ -34,8 +39,8 @@ use liveclaw_app::storage::{build_memory_service, FileArtifactService};
 use liveclaw_app::tools::{build_baseline_tools_with_workspace, WorkspaceToolPolicy};
 use liveclaw_gateway::pairing::PairingGuard;
 use liveclaw_gateway::protocol::{
-    supported_client_message_types, supported_server_response_types, RuntimeDiagnostics,
-    SessionConfig, PROTOCOL_VERSION,
+    supported_client_message_types, supported_server_response_types, GraphExecutionEvent,
+    GraphExecutionReport, RuntimeDiagnostics, SessionConfig, PROTOCOL_VERSION,
 };
 use liveclaw_gateway::server::{
     Gateway, GatewayConfig, RunnerHandle, SessionAudioOutput, SessionTranscriptOutput,
@@ -46,6 +51,10 @@ struct RealtimeSession {
     runtime: Arc<dyn SessionRuntime>,
     run_task: JoinHandle<()>,
     user_id: String,
+    role: String,
+    tools: HashMap<String, Arc<dyn Tool>>,
+    graph_enabled: bool,
+    graph_recursion_limit: usize,
     shutdown: Arc<AtomicBool>,
 }
 
@@ -120,6 +129,48 @@ impl SessionRuntime for RealtimeRunnerRuntime {
             .await
             .map_err(|e| anyhow::anyhow!("Failed to interrupt realtime response: {}", e))
     }
+}
+
+const GRAPH_TOOL_REQUEST_KEY: &str = "tool_request";
+const GRAPH_PENDING_TOOL_CALLS_KEY: &str = "pending_tool_calls";
+const GRAPH_TOOL_RESULTS_KEY: &str = "tool_results";
+const GRAPH_TOOLS_EXECUTED_COUNT_KEY: &str = "tools_executed_count";
+const GRAPH_TRACE_KEY: &str = "graph_trace";
+
+fn graph_event_json(event: &GraphExecutionEvent) -> Value {
+    json!({
+        "step": event.step,
+        "node": event.node,
+        "action": event.action,
+        "detail": event.detail,
+    })
+}
+
+fn append_graph_trace(state: &State, event: GraphExecutionEvent) -> Value {
+    let mut trace = state
+        .get(GRAPH_TRACE_KEY)
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    trace.push(graph_event_json(&event));
+    Value::Array(trace)
+}
+
+fn graph_trace_from_state(state: &State) -> Vec<GraphExecutionEvent> {
+    state
+        .get(GRAPH_TRACE_KEY)
+        .and_then(Value::as_array)
+        .map(|events| {
+            events
+                .iter()
+                .filter_map(|item| serde_json::from_value::<GraphExecutionEvent>(item.clone()).ok())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn graph_state_to_json(state: State) -> Value {
+    Value::Object(state.into_iter().collect())
 }
 
 #[derive(Clone)]
@@ -369,6 +420,235 @@ impl ToolHandler for AdkToolHandler {
                 Err(RealtimeError::ToolError(e.to_string()))
             }
         }
+    }
+}
+
+async fn execute_session_tool_call_graph(
+    session_id: &str,
+    user_id: &str,
+    role: &str,
+    tool_name: &str,
+    arguments: Value,
+    tools: HashMap<String, Arc<dyn Tool>>,
+    recursion_limit: usize,
+) -> Result<(Value, GraphExecutionReport)> {
+    let thread_id = format!(
+        "{}-graph-{}",
+        session_id,
+        chrono::Utc::now().timestamp_millis()
+    );
+
+    let tools = Arc::new(tools);
+    let available_tools = {
+        let mut names = tools.keys().cloned().collect::<Vec<_>>();
+        names.sort();
+        Arc::new(names)
+    };
+    let user_id = user_id.to_string();
+    let session_id_owned = session_id.to_string();
+
+    let mut builder = GraphAgent::builder("liveclaw_tool_graph")
+        .node_fn("resolve_tool_call", |ctx: NodeContext| async move {
+            let tool_request = ctx
+                .state
+                .get(GRAPH_TOOL_REQUEST_KEY)
+                .cloned()
+                .unwrap_or_else(|| json!({}));
+            let pending = if tool_request.is_null() {
+                Vec::new()
+            } else {
+                vec![tool_request]
+            };
+            let detail = if pending.is_empty() {
+                "no tool call queued".to_string()
+            } else {
+                format!("queued {} tool call(s)", pending.len())
+            };
+
+            Ok(NodeOutput::new()
+                .with_update(GRAPH_PENDING_TOOL_CALLS_KEY, Value::Array(pending))
+                .with_update(
+                    GRAPH_TRACE_KEY,
+                    append_graph_trace(
+                        &ctx.state,
+                        GraphExecutionEvent {
+                            step: ctx.step,
+                            node: "resolve_tool_call".to_string(),
+                            action: "node_end".to_string(),
+                            detail,
+                        },
+                    ),
+                ))
+        })
+        .node_fn("tools", move |ctx: NodeContext| {
+            let tools = tools.clone();
+            let available_tools = available_tools.clone();
+            let user_id = user_id.clone();
+            let session_id = session_id_owned.clone();
+            async move {
+                let pending_calls = ctx
+                    .state
+                    .get(GRAPH_PENDING_TOOL_CALLS_KEY)
+                    .and_then(Value::as_array)
+                    .cloned()
+                    .unwrap_or_default();
+
+                let mut results = Vec::with_capacity(pending_calls.len());
+                for (idx, call) in pending_calls.iter().enumerate() {
+                    let called_tool_name = call
+                        .get("name")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .trim()
+                        .to_string();
+                    let call_arguments =
+                        call.get("arguments").cloned().unwrap_or_else(|| json!({}));
+
+                    if called_tool_name.is_empty() {
+                        results.push(json!({
+                            "tool": "",
+                            "status": "error",
+                            "message": "Tool call missing 'name'",
+                        }));
+                        continue;
+                    }
+
+                    let Some(tool) = tools.get(&called_tool_name) else {
+                        results.push(json!({
+                            "tool": called_tool_name,
+                            "status": "error",
+                            "message": "Tool is not registered for this session",
+                            "available_tools": &*available_tools,
+                        }));
+                        continue;
+                    };
+
+                    let invocation_id = format!("graph-tool-{}-{}", ctx.step, idx);
+                    let tool_ctx = Arc::new(ToolInvocationContext::new(
+                        invocation_id,
+                        user_id.clone(),
+                        session_id.clone(),
+                    )) as Arc<dyn ToolContext>;
+
+                    match tool.execute(tool_ctx, call_arguments).await {
+                        Ok(output) => {
+                            results.push(json!({
+                                "tool": called_tool_name,
+                                "status": "ok",
+                                "result": output,
+                            }));
+                        }
+                        Err(err) => {
+                            results.push(json!({
+                                "tool": called_tool_name,
+                                "status": "error",
+                                "message": err.to_string(),
+                            }));
+                        }
+                    }
+                }
+
+                let detail = format!("executed {} tool call(s)", results.len());
+                Ok(NodeOutput::new()
+                    .with_update(GRAPH_PENDING_TOOL_CALLS_KEY, json!([]))
+                    .with_update(GRAPH_TOOL_RESULTS_KEY, Value::Array(results.clone()))
+                    .with_update(GRAPH_TOOLS_EXECUTED_COUNT_KEY, json!(results.len()))
+                    .with_update(
+                        GRAPH_TRACE_KEY,
+                        append_graph_trace(
+                            &ctx.state,
+                            GraphExecutionEvent {
+                                step: ctx.step,
+                                node: "tools".to_string(),
+                                action: "node_end".to_string(),
+                                detail,
+                            },
+                        ),
+                    ))
+            }
+        })
+        .edge(START, "resolve_tool_call")
+        .conditional_edge(
+            "resolve_tool_call",
+            |state: &State| {
+                if state
+                    .get(GRAPH_PENDING_TOOL_CALLS_KEY)
+                    .and_then(Value::as_array)
+                    .is_some_and(|calls| !calls.is_empty())
+                {
+                    "tools".to_string()
+                } else {
+                    END.to_string()
+                }
+            },
+            [("tools", "tools"), ("__end__", END)],
+        )
+        .edge("tools", END)
+        .checkpointer(MemoryCheckpointer::new())
+        .recursion_limit(recursion_limit.max(1));
+
+    if role == "supervised" {
+        builder = builder.interrupt_before(&["tools"]);
+    }
+
+    let graph = builder
+        .build()
+        .map_err(|e| anyhow::anyhow!("Failed to build graph tool runtime: {}", e))?;
+
+    let mut input = State::new();
+    input.insert(
+        GRAPH_TOOL_REQUEST_KEY.to_string(),
+        json!({ "name": tool_name, "arguments": arguments }),
+    );
+    input.insert(GRAPH_TRACE_KEY.to_string(), json!([]));
+
+    let execution = GraphExecutionConfig::new(&thread_id).with_recursion_limit(recursion_limit);
+    match graph.invoke(input, execution).await {
+        Ok(state) => {
+            let result = state
+                .get(GRAPH_TOOL_RESULTS_KEY)
+                .and_then(Value::as_array)
+                .and_then(|items| items.first())
+                .cloned()
+                .unwrap_or_else(|| {
+                    json!({
+                        "tool": tool_name,
+                        "status": "error",
+                        "message": "Graph execution produced no tool result",
+                    })
+                });
+            let report = GraphExecutionReport {
+                thread_id,
+                completed: true,
+                interrupted: false,
+                events: graph_trace_from_state(&state),
+                final_state: graph_state_to_json(state),
+            };
+            Ok((result, report))
+        }
+        Err(GraphError::Interrupted(interrupt)) => {
+            let mut events = graph_trace_from_state(&interrupt.state);
+            events.push(GraphExecutionEvent {
+                step: interrupt.step,
+                node: "tools".to_string(),
+                action: "interrupted".to_string(),
+                detail: "Execution paused before tools node (supervised role)".to_string(),
+            });
+            let result = json!({
+                "tool": tool_name,
+                "status": "interrupted",
+                "message": "Graph interrupted before tool execution. Resume flow is not implemented yet.",
+            });
+            let report = GraphExecutionReport {
+                thread_id,
+                completed: false,
+                interrupted: true,
+                events,
+                final_state: graph_state_to_json(interrupt.state),
+            };
+            Ok((result, report))
+        }
+        Err(e) => Err(anyhow::anyhow!("Graph tool execution failed: {}", e)),
     }
 }
 
@@ -706,6 +986,8 @@ struct RunnerAdapter {
     artifact_service: Option<Arc<dyn ArtifactService>>,
     reconnect_policy: ReconnectPolicy,
     memory_compaction_policy: MemoryCompactionPolicy,
+    graph_default_enabled: bool,
+    graph_recursion_limit: usize,
     sessions: Arc<RwLock<HashMap<String, RealtimeSession>>>,
     audio_tx: mpsc::Sender<SessionAudioOutput>,
     transcript_tx: mpsc::Sender<SessionTranscriptOutput>,
@@ -719,6 +1001,8 @@ struct RunnerAdapterInit {
     artifact_service: Option<Arc<dyn ArtifactService>>,
     reconnect_policy: ReconnectPolicy,
     memory_compaction_policy: MemoryCompactionPolicy,
+    graph_default_enabled: bool,
+    graph_recursion_limit: usize,
     audio_tx: mpsc::Sender<SessionAudioOutput>,
     transcript_tx: mpsc::Sender<SessionTranscriptOutput>,
 }
@@ -742,6 +1026,8 @@ impl RunnerAdapter {
             artifact_service: init.artifact_service,
             reconnect_policy: init.reconnect_policy,
             memory_compaction_policy: init.memory_compaction_policy,
+            graph_default_enabled: init.graph_default_enabled,
+            graph_recursion_limit: init.graph_recursion_limit.max(1),
             sessions: Arc::new(RwLock::new(HashMap::new())),
             audio_tx: init.audio_tx,
             transcript_tx: init.transcript_tx,
@@ -850,17 +1136,13 @@ impl RunnerHandle for RunnerAdapter {
             bail!("Missing API key. Set [voice].api_key or LIVECLAW_API_KEY / OPENAI_API_KEY.");
         }
 
-        if let Some(cfg) = &config {
-            if cfg.enable_graph.is_some() {
-                info!(
-                    session_id = session_id,
-                    "Ignoring enable_graph override in realtime runner path"
-                );
-            }
-        }
-
         let (model_id, voice, instructions) = self.resolve_session_settings(config.as_ref());
         let role = self.resolve_role(config.as_ref())?;
+        let graph_enabled = config
+            .as_ref()
+            .and_then(|cfg| cfg.enable_graph)
+            .unwrap_or(self.graph_default_enabled);
+        let graph_recursion_limit = self.graph_recursion_limit.max(1);
         let protected_tools = self.build_protected_tools(user_id, &role)?;
         info!(
             session_id = session_id,
@@ -868,6 +1150,8 @@ impl RunnerHandle for RunnerAdapter {
             provider = %self.provider.provider_label,
             provider_profile = %self.provider.profile_name,
             role = %role,
+            graph_enabled = graph_enabled,
+            graph_recursion_limit = graph_recursion_limit,
             tool_count = protected_tools.len(),
             "Configured baseline toolset for realtime session"
         );
@@ -917,6 +1201,11 @@ impl RunnerHandle for RunnerAdapter {
                 transcript_tx: self.transcript_tx.clone(),
             });
 
+        let mut session_tools = HashMap::new();
+        for tool in &protected_tools {
+            session_tools.insert(tool.name().to_string(), tool.clone());
+        }
+
         for tool in protected_tools {
             let definition = ToolDefinition {
                 name: tool.name().to_string(),
@@ -962,6 +1251,10 @@ impl RunnerHandle for RunnerAdapter {
                 runtime,
                 run_task,
                 user_id: user_id.to_string(),
+                role,
+                tools: session_tools,
+                graph_enabled,
+                graph_recursion_limit,
                 shutdown,
             },
         );
@@ -977,6 +1270,7 @@ impl RunnerHandle for RunnerAdapter {
             run_task,
             user_id,
             shutdown,
+            ..
         }) = session
         else {
             bail!("Session '{}' not found", session_id);
@@ -1055,6 +1349,45 @@ impl RunnerHandle for RunnerAdapter {
     async fn interrupt_response(&self, session_id: &str) -> Result<()> {
         let runtime = self.runtime_for_session(session_id).await?;
         runtime.interrupt_response().await
+    }
+
+    async fn session_tool_call(
+        &self,
+        session_id: &str,
+        tool_name: &str,
+        arguments: Value,
+    ) -> Result<(Value, GraphExecutionReport)> {
+        let (user_id, role, tools, graph_enabled, graph_recursion_limit) = {
+            let sessions = self.sessions.read().await;
+            let Some(session) = sessions.get(session_id) else {
+                bail!("Session '{}' not found", session_id);
+            };
+            (
+                session.user_id.clone(),
+                session.role.clone(),
+                session.tools.clone(),
+                session.graph_enabled,
+                session.graph_recursion_limit,
+            )
+        };
+
+        if !graph_enabled {
+            bail!(
+                "Graph execution is disabled for session '{}'. Create a session with enable_graph=true or set [graph].enable_graph=true.",
+                session_id
+            );
+        }
+
+        execute_session_tool_call_graph(
+            session_id,
+            &user_id,
+            &role,
+            tool_name,
+            arguments,
+            tools,
+            graph_recursion_limit,
+        )
+        .await
     }
 
     async fn diagnostics(&self) -> Result<RuntimeDiagnostics> {
@@ -1481,6 +1814,8 @@ async fn main() -> Result<()> {
             artifact_service,
             reconnect_policy: ReconnectPolicy::from(&config.resilience),
             memory_compaction_policy: MemoryCompactionPolicy::from(&config.compaction),
+            graph_default_enabled: config.graph.enable_graph,
+            graph_recursion_limit: config.graph.recursion_limit,
             audio_tx: gw_audio_tx,
             transcript_tx: gw_transcript_tx,
         },
@@ -1558,6 +1893,8 @@ mod tests {
                 artifact_service: None,
                 reconnect_policy: ReconnectPolicy::from(&ResilienceConfig::default()),
                 memory_compaction_policy: MemoryCompactionPolicy::from(&CompactionConfig::default()),
+                graph_default_enabled: true,
+                graph_recursion_limit: 25,
                 audio_tx,
                 transcript_tx,
             },
@@ -1771,6 +2108,75 @@ mod tests {
         let (total, failed, _duration) = metrics.snapshot();
         assert_eq!(total, 1);
         assert_eq!(failed, 0);
+    }
+
+    #[tokio::test]
+    async fn test_execute_session_tool_call_graph_runs_tool_and_records_trace() {
+        let adapter = test_adapter("full", vec![]);
+        let tools = adapter
+            .build_protected_tools("principal-1", "full")
+            .unwrap()
+            .into_iter()
+            .map(|tool| (tool.name().to_string(), tool))
+            .collect::<HashMap<_, _>>();
+
+        let (result, report) = execute_session_tool_call_graph(
+            "sess-graph-1",
+            "principal-1",
+            "full",
+            "echo_text",
+            json!({ "text": "hello graph" }),
+            tools,
+            25,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result["status"], json!("ok"));
+        assert_eq!(result["tool"], json!("echo_text"));
+        assert_eq!(result["result"]["text"], json!("hello graph"));
+        assert!(report.completed);
+        assert!(!report.interrupted);
+        assert!(
+            report
+                .events
+                .iter()
+                .any(|event| event.node == "resolve_tool_call"),
+            "expected resolve_tool_call in trace events: {:?}",
+            report.events
+        );
+        assert!(
+            report.events.iter().any(|event| event.node == "tools"),
+            "expected tools in trace events: {:?}",
+            report.events
+        );
+    }
+
+    #[tokio::test]
+    async fn test_execute_session_tool_call_graph_supervised_interrupts_before_tools() {
+        let adapter = test_adapter("supervised", vec!["echo_text"]);
+        let tools = adapter
+            .build_protected_tools("principal-1", "supervised")
+            .unwrap()
+            .into_iter()
+            .map(|tool| (tool.name().to_string(), tool))
+            .collect::<HashMap<_, _>>();
+
+        let (result, report) = execute_session_tool_call_graph(
+            "sess-graph-2",
+            "principal-1",
+            "supervised",
+            "echo_text",
+            json!({ "text": "needs approval" }),
+            tools,
+            25,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result["status"], json!("interrupted"));
+        assert!(report.interrupted);
+        assert!(!report.completed);
     }
 
     #[test]
