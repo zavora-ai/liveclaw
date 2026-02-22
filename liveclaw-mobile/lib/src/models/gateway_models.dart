@@ -13,11 +13,14 @@ sealed class GatewayEvent {
           principalId: json['principal_id'] as String? ?? 'unknown',
         );
       case 'PairFailure':
-        return PairFailureEvent(reason: json['reason'] as String? ?? 'Pairing failed');
+        return PairFailureEvent(
+            reason: json['reason'] as String? ?? 'Pairing failed');
       case 'SessionCreated':
-        return SessionCreatedEvent(sessionId: json['session_id'] as String? ?? '');
+        return SessionCreatedEvent(
+            sessionId: json['session_id'] as String? ?? '');
       case 'SessionTerminated':
-        return SessionTerminatedEvent(sessionId: json['session_id'] as String? ?? '');
+        return SessionTerminatedEvent(
+            sessionId: json['session_id'] as String? ?? '');
       case 'TranscriptUpdate':
         return TranscriptUpdateEvent(
           sessionId: json['session_id'] as String? ?? '',
@@ -25,9 +28,23 @@ sealed class GatewayEvent {
           isFinal: json['is_final'] as bool? ?? false,
         );
       case 'AudioOutput':
+        final audioPayload = json['audio'] ??
+            json['audio_base64'] ??
+            _asMap(json['data'])['audio'] ??
+            _asMap(json['data'])['audio_base64'] ??
+            json['chunk'];
         return AudioOutputEvent(
           sessionId: json['session_id'] as String? ?? '',
-          audioBase64: json['audio'] as String? ?? '',
+          audioBase64: audioPayload as String? ?? '',
+        );
+      case 'AudioAccepted':
+      case 'AudioCommitted':
+      case 'ResponseCreateAccepted':
+      case 'ResponseInterruptAccepted':
+      case 'PromptAccepted':
+        return ProtocolAckEvent(
+          type: type!,
+          sessionId: json['session_id'] as String?,
         );
       case 'SessionToolResult':
         final rawResult = json['result'];
@@ -44,7 +61,8 @@ sealed class GatewayEvent {
           protocolVersion: data['protocol_version'] as String? ?? '',
           runtimeKind: data['runtime_kind'] as String? ?? '',
           providerKind: data['provider_kind'] as String? ?? '',
-          securityAllowPublicBind: data['security_allow_public_bind'] as bool? ?? false,
+          securityAllowPublicBind:
+              data['security_allow_public_bind'] as bool? ?? false,
           activeSessions: data['active_sessions'] as int? ?? 0,
         );
       case 'GatewayHealth':
@@ -66,7 +84,8 @@ sealed class GatewayEvent {
     }
   }
 
-  static Map<String, dynamic> _asMap(dynamic value, {String fallbackKey = 'data'}) {
+  static Map<String, dynamic> _asMap(dynamic value,
+      {String fallbackKey = 'data'}) {
     if (value is Map<String, dynamic>) {
       return value;
     }
@@ -122,6 +141,13 @@ class AudioOutputEvent extends GatewayEvent {
 
   final String sessionId;
   final String audioBase64;
+}
+
+class ProtocolAckEvent extends GatewayEvent {
+  const ProtocolAckEvent({required this.type, required this.sessionId});
+
+  final String type;
+  final String? sessionId;
 }
 
 class SessionToolResultEvent extends GatewayEvent {

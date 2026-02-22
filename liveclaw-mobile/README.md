@@ -1,6 +1,6 @@
-# Liveclaw Mobile (Flutter)
+# LiveClaw Mobile (Flutter)
 
-Secure, audio-first mobile experience for Liveclaw. This app is designed as a **voice command deck** instead of a chat UI.
+Secure, audio-first mobile experience for LiveClaw. This app is designed as a **voice command deck** instead of a chat UI.
 
 ## What is unique here
 
@@ -34,7 +34,7 @@ flutter pub get
 flutter run
 ```
 
-Default gateway URL is `ws://127.0.0.1:8080/ws`.
+Default gateway URL is `ws://127.0.0.1:8420/ws`.
 
 ## Notes
 

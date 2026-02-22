@@ -64,6 +64,8 @@ class VoiceSessionState {
     required this.stage,
     required this.gatewayUrl,
     required this.role,
+    required this.deviceAuthEnabled,
+    required this.statusMessage,
     required this.paired,
     required this.biometricUnlocked,
     required this.recording,
@@ -81,8 +83,10 @@ class VoiceSessionState {
 
   factory VoiceSessionState.initial() => const VoiceSessionState(
         stage: ConnectionStage.disconnected,
-        gatewayUrl: 'ws://127.0.0.1:8080/ws',
+        gatewayUrl: 'ws://127.0.0.1:8420/ws',
         role: UserRole.supervised,
+        deviceAuthEnabled: false,
+        statusMessage: 'Ready. Connect to your LiveClaw gateway.',
         paired: false,
         biometricUnlocked: false,
         recording: false,
@@ -98,6 +102,8 @@ class VoiceSessionState {
   final ConnectionStage stage;
   final String gatewayUrl;
   final UserRole role;
+  final bool deviceAuthEnabled;
+  final String statusMessage;
   final bool paired;
   final bool biometricUnlocked;
   final bool recording;
@@ -118,6 +124,8 @@ class VoiceSessionState {
     ConnectionStage? stage,
     String? gatewayUrl,
     UserRole? role,
+    bool? deviceAuthEnabled,
+    String? statusMessage,
     bool? paired,
     bool? biometricUnlocked,
     bool? recording,
@@ -139,6 +147,8 @@ class VoiceSessionState {
       stage: stage ?? this.stage,
       gatewayUrl: gatewayUrl ?? this.gatewayUrl,
       role: role ?? this.role,
+      deviceAuthEnabled: deviceAuthEnabled ?? this.deviceAuthEnabled,
+      statusMessage: statusMessage ?? this.statusMessage,
       paired: paired ?? this.paired,
       biometricUnlocked: biometricUnlocked ?? this.biometricUnlocked,
       recording: recording ?? this.recording,
@@ -151,7 +161,8 @@ class VoiceSessionState {
       toolActivity: toolActivity ?? this.toolActivity,
       principalId: clearPrincipalId ? null : (principalId ?? this.principalId),
       sessionId: clearSessionId ? null : (sessionId ?? this.sessionId),
-      errorMessage: clearErrorMessage ? null : (errorMessage ?? this.errorMessage),
+      errorMessage:
+          clearErrorMessage ? null : (errorMessage ?? this.errorMessage),
     );
   }
 }

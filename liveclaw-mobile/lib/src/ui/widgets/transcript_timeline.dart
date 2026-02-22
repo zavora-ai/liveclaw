@@ -19,7 +19,8 @@ class TranscriptTimeline extends StatelessWidget {
       return Container(
         padding: const EdgeInsets.all(18),
         decoration: _panelDecoration(),
-        child: const Text('Transcript lane is empty. Start speaking to populate it.'),
+        child: const Text(
+            'Transcript lane is empty. Start speaking to populate it.'),
       );
     }
 
@@ -36,7 +37,8 @@ class TranscriptTimeline extends StatelessWidget {
               child: Container(
                 constraints: const BoxConstraints(maxWidth: 360),
                 margin: const EdgeInsets.symmetric(vertical: 5),
-                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
                 decoration: BoxDecoration(
                   color: _bubbleColor(item.speaker),
                   borderRadius: BorderRadius.circular(14),

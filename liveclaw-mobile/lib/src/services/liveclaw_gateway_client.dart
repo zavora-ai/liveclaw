@@ -87,7 +87,8 @@ class LiveclawGatewayClient {
         'enable_graph': enableGraph,
         if (model != null && model.isNotEmpty) 'model': model,
         if (voice != null && voice.isNotEmpty) 'voice': voice,
-        if (instructions != null && instructions.isNotEmpty) 'instructions': instructions,
+        if (instructions != null && instructions.isNotEmpty)
+          'instructions': instructions,
       },
     });
   }
@@ -99,7 +100,8 @@ class LiveclawGatewayClient {
     });
   }
 
-  void sendAudioChunk({required String sessionId, required String audioBase64}) {
+  void sendAudioChunk(
+      {required String sessionId, required String audioBase64}) {
     _send(<String, dynamic>{
       'type': 'SessionAudio',
       'session_id': sessionId,

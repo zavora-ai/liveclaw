@@ -1,7 +1,8 @@
 import 'package:local_auth/local_auth.dart';
 
 class BiometricGate {
-  BiometricGate({LocalAuthentication? auth}) : _auth = auth ?? LocalAuthentication();
+  BiometricGate({LocalAuthentication? auth})
+      : _auth = auth ?? LocalAuthentication();
 
   final LocalAuthentication _auth;
 
@@ -14,12 +15,9 @@ class BiometricGate {
 
     try {
       return await _auth.authenticate(
-        localizedReason: 'Unlock Liveclaw session controls',
-        options: const AuthenticationOptions(
-          biometricOnly: false,
-          stickyAuth: true,
-          useErrorDialogs: true,
-        ),
+        localizedReason: 'Unlock LiveClaw session controls',
+        biometricOnly: false,
+        persistAcrossBackgrounding: true,
       );
     } catch (_) {
       return false;

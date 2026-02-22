@@ -14,7 +14,7 @@ class LiveclawApp extends StatelessWidget {
     const frost = Color(0xFFE8F5EF);
 
     return MaterialApp(
-      title: 'Liveclaw Resonance',
+      title: 'LiveClaw',
       debugShowCheckedModeBanner: false,
       theme: ThemeData(
         colorScheme: ColorScheme.fromSeed(
@@ -38,7 +38,7 @@ class LiveclawApp extends StatelessWidget {
             color: frost,
           ),
           bodyMedium: GoogleFonts.spaceGrotesk(
-            color: frost.withOpacity(0.8),
+            color: frost.withValues(alpha: 0.8),
           ),
           labelLarge: GoogleFonts.spaceGrotesk(
             fontWeight: FontWeight.w600,

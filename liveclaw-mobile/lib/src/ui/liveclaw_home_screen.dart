@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:flutter_svg/flutter_svg.dart';
 
 import '../models/session_models.dart';
 import '../state/voice_session_controller.dart';
@@ -41,8 +42,9 @@ class _LiveclawHomeScreenState extends ConsumerState<LiveclawHomeScreen> {
     final state = ref.watch(voiceSessionControllerProvider);
     final controller = ref.read(voiceSessionControllerProvider.notifier);
 
-    final canSpeak =
-        state.sessionId != null && (state.stage == ConnectionStage.sessionReady || state.stage == ConnectionStage.streaming);
+    final canSpeak = state.sessionId != null &&
+        (state.stage == ConnectionStage.sessionReady ||
+            state.stage == ConnectionStage.streaming);
 
     return Scaffold(
       body: Stack(
@@ -80,11 +82,13 @@ class _LiveclawHomeScreenState extends ConsumerState<LiveclawHomeScreen> {
                   const SizedBox(height: 12),
                   _sessionControls(context, state, controller),
                   const SizedBox(height: 14),
-                  Text('Action Lane', style: Theme.of(context).textTheme.titleMedium),
+                  Text('Action Lane',
+                      style: Theme.of(context).textTheme.titleMedium),
                   const SizedBox(height: 8),
                   ActionLane(entries: state.toolActivity),
                   const SizedBox(height: 14),
-                  Text('Transcript', style: Theme.of(context).textTheme.titleMedium),
+                  Text('Transcript',
+                      style: Theme.of(context).textTheme.titleMedium),
                   const SizedBox(height: 8),
                   TranscriptTimeline(items: state.transcript),
                 ],
@@ -101,6 +105,8 @@ class _LiveclawHomeScreenState extends ConsumerState<LiveclawHomeScreen> {
     VoiceSessionState state,
     VoiceSessionController controller,
   ) {
+    final isConnecting = state.stage == ConnectionStage.connecting;
+
     return Container(
       padding: const EdgeInsets.all(14),
       decoration: BoxDecoration(
@@ -117,7 +123,7 @@ class _LiveclawHomeScreenState extends ConsumerState<LiveclawHomeScreen> {
             controller: _gatewayController,
             decoration: const InputDecoration(
               labelText: 'Gateway WebSocket URL',
-              hintText: 'ws://127.0.0.1:8080/ws',
+              hintText: 'ws://127.0.0.1:8420/ws',
               prefixIcon: Icon(Icons.router_rounded),
             ),
             onChanged: controller.setGatewayUrl,
@@ -139,7 +145,9 @@ class _LiveclawHomeScreenState extends ConsumerState<LiveclawHomeScreen> {
               ),
               const SizedBox(width: 10),
               FilledButton.icon(
-                onPressed: () => controller.pairWithCode(_pairCodeController.text),
+                onPressed: isConnecting
+                    ? null
+                    : () => controller.pairWithCode(_pairCodeController.text),
                 icon: const Icon(Icons.link_rounded),
                 label: const Text('Pair'),
               ),
@@ -147,12 +155,28 @@ class _LiveclawHomeScreenState extends ConsumerState<LiveclawHomeScreen> {
           ),
           const SizedBox(height: 8),
           FilledButton.tonalIcon(
-            onPressed: () {
-              controller.setGatewayUrl(_gatewayController.text);
-              controller.secureConnect();
-            },
-            icon: const Icon(Icons.verified_user_rounded),
-            label: const Text('Secure Connect'),
+            onPressed: isConnecting
+                ? null
+                : () {
+                    controller.setGatewayUrl(_gatewayController.text);
+                    controller.secureConnect();
+                  },
+            icon: isConnecting
+                ? const SizedBox(
+                    width: 18,
+                    height: 18,
+                    child: CircularProgressIndicator(strokeWidth: 2),
+                  )
+                : const Icon(Icons.verified_user_rounded),
+            label: Text(state.deviceAuthEnabled ? 'Secure Connect' : 'Connect'),
+          ),
+          const SizedBox(height: 6),
+          SwitchListTile.adaptive(
+            value: state.deviceAuthEnabled,
+            contentPadding: EdgeInsets.zero,
+            title: const Text('Require device auth'),
+            subtitle: const Text('Use Face ID / passcode before connecting'),
+            onChanged: controller.setDeviceAuthEnabled,
           ),
           const SizedBox(height: 12),
           SegmentedButton<UserRole>(
@@ -185,13 +209,27 @@ class _LiveclawHomeScreenState extends ConsumerState<LiveclawHomeScreen> {
             runSpacing: 8,
             children: <Widget>[
               _badge('Paired', state.paired ? 'YES' : 'NO', state.paired),
-              _badge('Biometric', state.biometricUnlocked ? 'UNLOCKED' : 'LOCKED', state.biometricUnlocked),
-              _badge('Protocol', state.protocolVersion.isEmpty ? '--' : state.protocolVersion, true),
-              _badge('Runtime', state.runtimeKind.isEmpty ? '--' : state.runtimeKind, true),
-              _badge('Provider', state.providerKind.isEmpty ? '--' : state.providerKind, true),
-              _badge('Public Bind', state.publicBindAllowed ? 'ON' : 'OFF', !state.publicBindAllowed),
+              _badge(
+                'Device Auth',
+                state.deviceAuthEnabled
+                    ? (state.biometricUnlocked ? 'UNLOCKED' : 'ON')
+                    : 'OFF',
+                !state.deviceAuthEnabled || state.biometricUnlocked,
+              ),
+              _badge(
+                  'Protocol',
+                  state.protocolVersion.isEmpty ? '--' : state.protocolVersion,
+                  true),
+              _badge('Runtime',
+                  state.runtimeKind.isEmpty ? '--' : state.runtimeKind, true),
+              _badge('Provider',
+                  state.providerKind.isEmpty ? '--' : state.providerKind, true),
+              _badge('Public Bind', state.publicBindAllowed ? 'ON' : 'OFF',
+                  !state.publicBindAllowed),
             ],
           ),
+          const SizedBox(height: 10),
+          _statusPanel(context, state),
           if (state.principalId != null) ...<Widget>[
             const SizedBox(height: 8),
             Text(
@@ -213,6 +251,51 @@ class _LiveclawHomeScreenState extends ConsumerState<LiveclawHomeScreen> {
     );
   }
 
+  Widget _statusPanel(BuildContext context, VoiceSessionState state) {
+    final isError = state.stage == ConnectionStage.error;
+    final isBusy = state.stage == ConnectionStage.connecting;
+    final panelColor = isError
+        ? const Color(0x33F66B3D)
+        : isBusy
+            ? const Color(0x3358B9E9)
+            : const Color(0x2732E0C4);
+    final borderColor = isError
+        ? const Color(0x99F66B3D)
+        : isBusy
+            ? const Color(0x9958B9E9)
+            : const Color(0x9932E0C4);
+    final icon = isError
+        ? Icons.error_outline_rounded
+        : isBusy
+            ? Icons.sync_rounded
+            : Icons.info_outline_rounded;
+
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+      decoration: BoxDecoration(
+        color: panelColor,
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: borderColor),
+      ),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: <Widget>[
+          Icon(icon, size: 18, color: Colors.white),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Text(
+              state.statusMessage,
+              style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                    color: Colors.white,
+                  ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
   Widget _sessionControls(
     BuildContext context,
     VoiceSessionState state,
@@ -228,31 +311,39 @@ class _LiveclawHomeScreenState extends ConsumerState<LiveclawHomeScreen> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: <Widget>[
-          Text('Operator Moves', style: Theme.of(context).textTheme.titleMedium),
+          Text('Operator Moves',
+              style: Theme.of(context).textTheme.titleMedium),
           const SizedBox(height: 10),
           Wrap(
             spacing: 8,
             runSpacing: 8,
             children: <Widget>[
               FilledButton.icon(
-                onPressed: (state.sessionId == null && state.stage == ConnectionStage.authenticated)
+                onPressed: (state.sessionId == null &&
+                        state.stage == ConnectionStage.authenticated)
                     ? controller.createSession
                     : null,
                 icon: const Icon(Icons.play_circle_fill_rounded),
                 label: const Text('Create Session'),
               ),
               FilledButton.tonalIcon(
-                onPressed: state.sessionId == null ? null : controller.createMemoryPulse,
+                onPressed: state.sessionId == null
+                    ? null
+                    : controller.createMemoryPulse,
                 icon: const Icon(Icons.auto_awesome_rounded),
                 label: const Text('Memory Pulse'),
               ),
               OutlinedButton.icon(
-                onPressed: state.sessionId == null ? null : controller.interruptResponse,
+                onPressed: state.sessionId == null
+                    ? null
+                    : controller.interruptResponse,
                 icon: const Icon(Icons.pause_circle_filled_rounded),
                 label: const Text('Interrupt'),
               ),
               OutlinedButton.icon(
-                onPressed: state.sessionId == null ? null : controller.terminateSession,
+                onPressed: state.sessionId == null
+                    ? null
+                    : controller.terminateSession,
                 icon: const Icon(Icons.stop_circle_outlined),
                 label: const Text('Terminate'),
               ),
@@ -291,7 +382,8 @@ class _LiveclawHomeScreenState extends ConsumerState<LiveclawHomeScreen> {
         text: TextSpan(
           style: Theme.of(context).textTheme.labelSmall,
           children: <TextSpan>[
-            TextSpan(text: '$label ', style: const TextStyle(color: Colors.white70)),
+            TextSpan(
+                text: '$label ', style: const TextStyle(color: Colors.white70)),
             TextSpan(text: value, style: const TextStyle(color: Colors.white)),
           ],
         ),
@@ -309,11 +401,27 @@ class _Header extends StatelessWidget {
   Widget build(BuildContext context) {
     return Row(
       children: <Widget>[
+        Container(
+          width: 52,
+          height: 52,
+          padding: const EdgeInsets.all(8),
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(14),
+            color: const Color(0x33132D37),
+            border: Border.all(color: Colors.white12),
+          ),
+          child: SvgPicture.asset(
+            'assets/logo/liveclaw_logo.svg',
+            semanticsLabel: 'LiveClaw logo',
+          ),
+        ),
+        const SizedBox(width: 12),
         Expanded(
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: <Widget>[
-              Text('Liveclaw Resonance', style: Theme.of(context).textTheme.headlineSmall),
+              Text('LiveClaw',
+                  style: Theme.of(context).textTheme.headlineSmall),
               const SizedBox(height: 4),
               Text(
                 'Audio-first command deck for secure realtime sessions.',
@@ -359,7 +467,11 @@ class _Backdrop extends StatelessWidget {
         gradient: LinearGradient(
           begin: Alignment.topLeft,
           end: Alignment.bottomRight,
-          colors: <Color>[Color(0xFF07141A), Color(0xFF102631), Color(0xFF051015)],
+          colors: <Color>[
+            Color(0xFF07141A),
+            Color(0xFF102631),
+            Color(0xFF051015)
+          ],
           stops: <double>[0.0, 0.62, 1.0],
         ),
       ),

@@ -4,8 +4,9 @@ class SecureTokenVault {
   SecureTokenVault({FlutterSecureStorage? storage})
       : _storage = storage ??
             const FlutterSecureStorage(
-              aOptions: AndroidOptions(encryptedSharedPreferences: true),
-              iOptions: IOSOptions(accessibility: KeychainAccessibility.first_unlock_this_device),
+              iOptions: IOSOptions(
+                  accessibility:
+                      KeychainAccessibility.first_unlock_this_device),
             );
 
   static const _pairingTokenKey = 'liveclaw_pairing_token';

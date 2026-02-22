@@ -20,7 +20,8 @@ final gatewayClientProvider = Provider<LiveclawGatewayClient>((ref) {
   return client;
 });
 
-final tokenVaultProvider = Provider<SecureTokenVault>((ref) => SecureTokenVault());
+final tokenVaultProvider =
+    Provider<SecureTokenVault>((ref) => SecureTokenVault());
 
 final biometricGateProvider = Provider<BiometricGate>((ref) => BiometricGate());
 
@@ -41,74 +42,105 @@ final audioPlaybackServiceProvider = Provider<AudioPlaybackService>((ref) {
 });
 
 final voiceSessionControllerProvider =
-    StateNotifierProvider<VoiceSessionController, VoiceSessionState>((ref) {
-  return VoiceSessionController(
-    gateway: ref.watch(gatewayClientProvider),
-    tokenVault: ref.watch(tokenVaultProvider),
-    biometricGate: ref.watch(biometricGateProvider),
-    audioCapture: ref.watch(audioCaptureServiceProvider),
-    audioPlayback: ref.watch(audioPlaybackServiceProvider),
-  );
-});
+    NotifierProvider<VoiceSessionController, VoiceSessionState>(
+  VoiceSessionController.new,
+);
 
-class VoiceSessionController extends StateNotifier<VoiceSessionState> {
-  VoiceSessionController({
-    required LiveclawGatewayClient gateway,
-    required SecureTokenVault tokenVault,
-    required BiometricGate biometricGate,
-    required AudioCaptureService audioCapture,
-    required AudioPlaybackService audioPlayback,
-  })  : _gateway = gateway,
-        _tokenVault = tokenVault,
-        _biometricGate = biometricGate,
-        _audioCapture = audioCapture,
-        _audioPlayback = audioPlayback,
-        super(VoiceSessionState.initial()) {
-    _gatewayEventsSub = _gateway.events.listen(_handleGatewayEvent);
-  }
-
-  final LiveclawGatewayClient _gateway;
-  final SecureTokenVault _tokenVault;
-  final BiometricGate _biometricGate;
-  final AudioCaptureService _audioCapture;
-  final AudioPlaybackService _audioPlayback;
+class VoiceSessionController extends Notifier<VoiceSessionState> {
+  late LiveclawGatewayClient _gateway;
+  late SecureTokenVault _tokenVault;
+  late BiometricGate _biometricGate;
+  late AudioCaptureService _audioCapture;
+  late AudioPlaybackService _audioPlayback;
 
   StreamSubscription<GatewayEvent>? _gatewayEventsSub;
   StreamSubscription<Uint8List>? _micStreamSub;
 
+  @override
+  VoiceSessionState build() {
+    _gateway = ref.read(gatewayClientProvider);
+    _tokenVault = ref.read(tokenVaultProvider);
+    _biometricGate = ref.read(biometricGateProvider);
+    _audioCapture = ref.read(audioCaptureServiceProvider);
+    _audioPlayback = ref.read(audioPlaybackServiceProvider);
+    _gatewayEventsSub = _gateway.events.listen(_handleGatewayEvent);
+    ref.onDispose(() {
+      unawaited(_micStreamSub?.cancel());
+      unawaited(_gatewayEventsSub?.cancel());
+      unawaited(_audioCapture.stopCapture());
+    });
+    return VoiceSessionState.initial();
+  }
+
   void setGatewayUrl(String url) {
-    state = state.copyWith(gatewayUrl: url.trim(), clearErrorMessage: true);
+    state = state.copyWith(
+      gatewayUrl: url.trim(),
+      clearErrorMessage: true,
+      statusMessage: 'Gateway URL updated.',
+    );
   }
 
   void setRole(UserRole role) {
-    state = state.copyWith(role: role, clearErrorMessage: true);
+    state = state.copyWith(
+      role: role,
+      clearErrorMessage: true,
+      statusMessage: 'Role set to ${role.label}.',
+    );
   }
 
-  Future<void> secureConnect() async {
+  void setDeviceAuthEnabled(bool enabled) {
+    state = state.copyWith(
+      deviceAuthEnabled: enabled,
+      biometricUnlocked: enabled ? state.biometricUnlocked : false,
+      clearErrorMessage: true,
+      statusMessage: enabled
+          ? 'Device auth enabled. Connect will require Face ID/passcode.'
+          : 'Device auth disabled. URL + pair code will be used.',
+    );
+  }
+
+  Future<bool> secureConnect() async {
+    if (state.stage == ConnectionStage.connecting) {
+      return false;
+    }
+
     state = state.copyWith(
       stage: ConnectionStage.connecting,
       clearErrorMessage: true,
-      clearPrincipalId: true,
-      clearSessionId: true,
-      paired: false,
       recording: false,
       micLevel: 0,
-      transcript: const <TranscriptEntry>[],
-      toolActivity: const <ToolActivityEntry>[],
+      statusMessage: state.deviceAuthEnabled
+          ? 'Verifying device authentication...'
+          : 'Connecting to gateway...',
     );
 
-    final unlocked = await _biometricGate.unlock();
-    if (!unlocked) {
-      _pushError('Biometric/passcode unlock was cancelled');
-      return;
+    if (state.deviceAuthEnabled) {
+      final unlocked = await _biometricGate.unlock();
+      if (!unlocked) {
+        state = state.copyWith(
+          stage: ConnectionStage.disconnected,
+          biometricUnlocked: false,
+          errorMessage: 'Device auth was cancelled',
+          recording: false,
+          micLevel: 0,
+          statusMessage: 'Connection cancelled: device auth was not completed.',
+        );
+        return false;
+      }
+      state = state.copyWith(
+        biometricUnlocked: true,
+        statusMessage: 'Device auth passed. Connecting to gateway...',
+      );
+    } else {
+      state = state.copyWith(biometricUnlocked: false);
     }
 
     try {
       await _gateway.connect(state.gatewayUrl);
       state = state.copyWith(
         stage: ConnectionStage.connected,
-        biometricUnlocked: true,
         clearErrorMessage: true,
+        statusMessage: 'Connected. Checking gateway health...',
       );
 
       _gateway.requestDiagnostics();
@@ -117,33 +149,72 @@ class VoiceSessionController extends StateNotifier<VoiceSessionState> {
 
       final savedToken = await _tokenVault.readPairingToken();
       if (savedToken != null && savedToken.isNotEmpty) {
-        state = state.copyWith(paired: true);
+        state = state.copyWith(
+          paired: true,
+          statusMessage: 'Saved token found. Authenticating...',
+        );
         _gateway.authenticate(savedToken);
+      } else {
+        state = state.copyWith(
+          statusMessage: 'Connected. Enter your 6-digit pairing code.',
+        );
       }
+      return true;
     } catch (error) {
       _pushError('Failed to connect: $error');
+      return false;
     }
   }
 
   Future<void> pairWithCode(String code) async {
     if (code.trim().length != 6) {
-      _pushError('Pairing code should be 6 digits');
+      _pushError('Pairing code should be exactly 6 digits');
       return;
     }
 
-    if (state.stage == ConnectionStage.disconnected || state.stage == ConnectionStage.error) {
-      await secureConnect();
+    if (state.stage == ConnectionStage.connecting) {
+      state = state.copyWith(
+        statusMessage: 'Connection in progress. Please wait...',
+      );
+      return;
     }
 
+    if (state.stage == ConnectionStage.disconnected ||
+        state.stage == ConnectionStage.error) {
+      state = state.copyWith(
+        statusMessage: 'Connecting before pairing...',
+        clearErrorMessage: true,
+      );
+      final connected = await secureConnect();
+      if (!connected) {
+        return;
+      }
+    }
+
+    if (state.stage == ConnectionStage.disconnected ||
+        state.stage == ConnectionStage.connecting ||
+        state.stage == ConnectionStage.error) {
+      _pushError('Connect to gateway before pairing');
+      return;
+    }
+
+    state = state.copyWith(
+      statusMessage: 'Submitting pairing code...',
+      clearErrorMessage: true,
+    );
     _gateway.pair(code.trim());
   }
 
   void createSession() {
+    state = state.copyWith(
+      statusMessage: 'Creating session...',
+      clearErrorMessage: true,
+    );
     _gateway.createSession(
       role: state.role.wireValue,
       enableGraph: state.role == UserRole.supervised,
       instructions:
-          'You are Liveclaw mobile mode. Keep audio replies short, action-oriented, and confirm high-risk tools before execution.',
+          'You are LiveClaw mobile mode. Keep audio replies short, action-oriented, and confirm high-risk tools before execution.',
     );
   }
 
@@ -159,24 +230,48 @@ class VoiceSessionController extends StateNotifier<VoiceSessionState> {
     }
 
     try {
-      final stream = await _audioCapture.startCapture();
-      _micStreamSub = stream.listen(
-        (chunk) {
-          _gateway.sendAudioChunk(
-            sessionId: sessionId,
-            audioBase64: base64Encode(chunk),
-          );
-          state = state.copyWith(
-            micLevel: _estimateMicLevel(chunk),
-            recording: true,
-            stage: ConnectionStage.streaming,
-          );
-        },
-        onError: (Object error) {
-          _pushError('Mic stream failed: $error');
-        },
-        cancelOnError: false,
+      final capture = await _audioCapture.startCapture();
+      final captureSampleRate = capture.sampleRate;
+      final captureChannels = capture.numChannels;
+
+      state = state.copyWith(
+        statusMessage: capture.statusHint ??
+            (captureSampleRate == 24000 && captureChannels == 1
+                ? 'Listening at 24kHz... release to send audio.'
+                : 'Listening at ${captureSampleRate}Hz/${captureChannels}ch and adapting to 24kHz mono...'),
       );
+
+      if (capture.mode == AudioCaptureMode.stream) {
+        final stream = capture.stream;
+        if (stream == null) {
+          throw StateError('Microphone stream started without stream payload.');
+        }
+        _micStreamSub = stream.listen(
+          (chunk) {
+            final normalizedChunk = _normalizeCapturedChunk(
+              chunk,
+              captureSampleRate,
+              captureChannels,
+            );
+            if (normalizedChunk.isEmpty) {
+              return;
+            }
+            _gateway.sendAudioChunk(
+              sessionId: sessionId,
+              audioBase64: base64Encode(normalizedChunk),
+            );
+            state = state.copyWith(
+              micLevel: _estimateMicLevel(normalizedChunk),
+              recording: true,
+              stage: ConnectionStage.streaming,
+            );
+          },
+          onError: (Object error) {
+            _pushError('Mic stream failed: $error');
+          },
+          cancelOnError: false,
+        );
+      }
 
       state = state.copyWith(
         recording: true,
@@ -201,7 +296,28 @@ class VoiceSessionController extends StateNotifier<VoiceSessionState> {
     await _micStreamSub?.cancel();
     _micStreamSub = null;
 
-    await _audioCapture.stopCapture();
+    final captured = await _audioCapture.stopCapture();
+    final bufferedBytes = captured?.pcm16Bytes;
+    if (captured?.mode == AudioCaptureMode.bufferedFile &&
+        (bufferedBytes == null || bufferedBytes.isEmpty)) {
+      _pushError('Could not capture microphone audio. Try again.');
+      return;
+    }
+    if (captured != null && bufferedBytes != null) {
+      final normalized = _normalizeCapturedChunk(
+        bufferedBytes,
+        captured.sampleRate,
+        captured.numChannels,
+      );
+      if (normalized.isEmpty) {
+        _pushError('Captured audio was empty. Try holding to speak again.');
+        return;
+      }
+      _sendBufferedAudio(
+        sessionId: sessionId,
+        pcm16Bytes: normalized,
+      );
+    }
     _gateway.commitAudio(sessionId);
     _gateway.createResponse(sessionId);
 
@@ -209,6 +325,9 @@ class VoiceSessionController extends StateNotifier<VoiceSessionState> {
       recording: false,
       micLevel: 0,
       stage: ConnectionStage.sessionReady,
+      statusMessage: captured?.mode == AudioCaptureMode.bufferedFile
+          ? 'Buffered audio sent. Waiting for LiveClaw response...'
+          : 'Audio sent. Waiting for LiveClaw response...',
     );
   }
 
@@ -251,6 +370,7 @@ class VoiceSessionController extends StateNotifier<VoiceSessionState> {
         state = state.copyWith(
           paired: true,
           clearErrorMessage: true,
+          statusMessage: 'Pairing accepted. Authenticating...',
         );
         _gateway.authenticate(token);
       case AuthenticatedEvent(:final principalId):
@@ -258,6 +378,8 @@ class VoiceSessionController extends StateNotifier<VoiceSessionState> {
           stage: ConnectionStage.authenticated,
           principalId: principalId,
           clearErrorMessage: true,
+          statusMessage:
+              'Authenticated as $principalId. You can create a session now.',
         );
       case PairFailureEvent(:final reason):
         _pushError('Pair failed: $reason');
@@ -266,6 +388,7 @@ class VoiceSessionController extends StateNotifier<VoiceSessionState> {
           stage: ConnectionStage.sessionReady,
           sessionId: sessionId,
           clearErrorMessage: true,
+          statusMessage: 'Session created. Hold the orb to speak.',
           transcript: <TranscriptEntry>[
             ...state.transcript,
             TranscriptEntry(
@@ -282,24 +405,17 @@ class VoiceSessionController extends StateNotifier<VoiceSessionState> {
           recording: false,
           micLevel: 0,
           clearSessionId: true,
+          statusMessage: 'Session terminated.',
         );
       case TranscriptUpdateEvent(:final text, :final isFinal):
         if (text.trim().isEmpty) {
           return;
         }
-        state = state.copyWith(
-          transcript: <TranscriptEntry>[
-            ...state.transcript,
-            TranscriptEntry(
-              speaker: isFinal ? 'agent' : 'live',
-              text: text,
-              timestamp: DateTime.now(),
-              isFinal: isFinal,
-            ),
-          ],
-        );
+        _upsertTranscriptUpdate(text: text, isFinal: isFinal);
       case AudioOutputEvent(:final audioBase64):
-        unawaited(_audioPlayback.playPcm16FromBase64(audioBase64));
+        unawaited(_playAudioOutput(audioBase64));
+      case ProtocolAckEvent(:final type, :final sessionId):
+        _handleProtocolAck(type: type, sessionId: sessionId);
       case SessionToolResultEvent(:final toolName, :final result):
         state = state.copyWith(
           toolActivity: <ToolActivityEntry>[
@@ -325,6 +441,7 @@ class VoiceSessionController extends StateNotifier<VoiceSessionState> {
         );
       case GatewayHealthEvent(:final activeSessions):
         state = state.copyWith(
+          statusMessage: 'Gateway online. Active sessions: $activeSessions',
           toolActivity: <ToolActivityEntry>[
             ToolActivityEntry(
               toolName: 'health',
@@ -368,6 +485,130 @@ class VoiceSessionController extends StateNotifier<VoiceSessionState> {
     return compact;
   }
 
+  void _upsertTranscriptUpdate({
+    required String text,
+    required bool isFinal,
+  }) {
+    final updated = List<TranscriptEntry>.from(state.transcript);
+    final now = DateTime.now();
+    final liveIndex = updated.lastIndexWhere(
+      (entry) => entry.speaker == 'live' && !entry.isFinal,
+    );
+
+    if (isFinal) {
+      if (liveIndex >= 0) {
+        updated[liveIndex] = TranscriptEntry(
+          speaker: 'agent',
+          text: _mergeTranscriptDelta(updated[liveIndex].text, text),
+          timestamp: now,
+          isFinal: true,
+        );
+      } else {
+        updated.add(
+          TranscriptEntry(
+            speaker: 'agent',
+            text: text,
+            timestamp: now,
+            isFinal: true,
+          ),
+        );
+      }
+    } else {
+      if (liveIndex >= 0) {
+        final previous = updated[liveIndex];
+        updated[liveIndex] = TranscriptEntry(
+          speaker: 'live',
+          text: _mergeTranscriptDelta(previous.text, text),
+          timestamp: now,
+          isFinal: false,
+        );
+      } else {
+        updated.add(
+          TranscriptEntry(
+            speaker: 'live',
+            text: text,
+            timestamp: now,
+            isFinal: false,
+          ),
+        );
+      }
+    }
+
+    state = state.copyWith(transcript: updated);
+  }
+
+  String _mergeTranscriptDelta(String previous, String next) {
+    final previousTrimmed = previous.trim();
+    final nextTrimmed = next.trim();
+    if (previousTrimmed.isEmpty) {
+      return nextTrimmed;
+    }
+    if (nextTrimmed.isEmpty) {
+      return previousTrimmed;
+    }
+    if (nextTrimmed.startsWith(previousTrimmed)) {
+      return nextTrimmed;
+    }
+    if (previousTrimmed.endsWith(nextTrimmed)) {
+      return previousTrimmed;
+    }
+    return '$previousTrimmed $nextTrimmed';
+  }
+
+  Future<void> _playAudioOutput(String audioBase64) async {
+    if (audioBase64.trim().isEmpty) {
+      return;
+    }
+    try {
+      await _audioPlayback.playPcm16FromBase64(audioBase64);
+    } catch (error) {
+      state = state.copyWith(
+        toolActivity: <ToolActivityEntry>[
+          ToolActivityEntry(
+            toolName: 'audio',
+            summary: 'Playback failed: $error',
+            timestamp: DateTime.now(),
+          ),
+          ...state.toolActivity,
+        ],
+      );
+    }
+  }
+
+  void _handleProtocolAck({
+    required String type,
+    required String? sessionId,
+  }) {
+    final activeSessionId = state.sessionId;
+    if (sessionId != null &&
+        sessionId.isNotEmpty &&
+        activeSessionId != null &&
+        activeSessionId != sessionId) {
+      return;
+    }
+
+    switch (type) {
+      case 'AudioCommitted':
+        state = state.copyWith(
+          statusMessage: 'Audio committed. Waiting for response...',
+        );
+      case 'ResponseCreateAccepted':
+        state = state.copyWith(
+          statusMessage: 'Response generation started...',
+        );
+      case 'ResponseInterruptAccepted':
+        state = state.copyWith(
+          statusMessage: 'Response interrupted.',
+        );
+      case 'PromptAccepted':
+        state = state.copyWith(
+          statusMessage: 'Prompt accepted by gateway.',
+        );
+      default:
+        break;
+    }
+  }
+
   double _estimateMicLevel(Uint8List bytes) {
     if (bytes.length < 2) {
       return 0;
@@ -384,20 +625,118 @@ class VoiceSessionController extends StateNotifier<VoiceSessionState> {
     return mean.clamp(0, 1);
   }
 
+  Uint8List _normalizeCapturedChunk(
+    Uint8List bytes,
+    int inputSampleRate,
+    int inputChannels,
+  ) {
+    final mono = _downmixToMonoPcm16(bytes, inputChannels);
+    if (mono.isEmpty) {
+      return Uint8List(0);
+    }
+
+    final resampled = inputSampleRate == 24000
+        ? mono
+        : _resampleMonoPcm16(mono, inputSampleRate, 24000);
+
+    return _monoPcm16ToBytes(resampled);
+  }
+
+  Int16List _downmixToMonoPcm16(Uint8List bytes, int inputChannels) {
+    if (inputChannels <= 0) {
+      return Int16List(0);
+    }
+
+    final totalSamples = bytes.length ~/ 2;
+    final frameCount = totalSamples ~/ inputChannels;
+    if (frameCount <= 0) {
+      return Int16List(0);
+    }
+
+    final output = Int16List(frameCount);
+    final inputView = ByteData.sublistView(bytes);
+
+    for (var frame = 0; frame < frameCount; frame++) {
+      var sum = 0;
+      final baseSampleIndex = frame * inputChannels;
+      for (var ch = 0; ch < inputChannels; ch++) {
+        final sample = inputView.getInt16(
+          (baseSampleIndex + ch) * 2,
+          Endian.little,
+        );
+        sum += sample;
+      }
+      final mixed = (sum / inputChannels).round().clamp(-32768, 32767);
+      output[frame] = mixed;
+    }
+
+    return output;
+  }
+
+  Int16List _resampleMonoPcm16(
+    Int16List input,
+    int inputSampleRate,
+    int targetSampleRate,
+  ) {
+    if (input.isEmpty || inputSampleRate <= 0 || targetSampleRate <= 0) {
+      return Int16List(0);
+    }
+    if (inputSampleRate == targetSampleRate) {
+      return input;
+    }
+
+    final outputLength =
+        ((input.length * targetSampleRate) / inputSampleRate).floor();
+    if (outputLength <= 0) {
+      return Int16List(0);
+    }
+
+    final output = Int16List(outputLength);
+    for (var i = 0; i < outputLength; i++) {
+      final sourceIndex =
+          ((i * inputSampleRate) / targetSampleRate).floor().clamp(
+                0,
+                input.length - 1,
+              );
+      output[i] = input[sourceIndex];
+    }
+
+    return output;
+  }
+
+  Uint8List _monoPcm16ToBytes(Int16List samples) {
+    final bytes = Uint8List(samples.length * 2);
+    final view = ByteData.sublistView(bytes);
+    for (var i = 0; i < samples.length; i++) {
+      view.setInt16(i * 2, samples[i], Endian.little);
+    }
+    return bytes;
+  }
+
+  void _sendBufferedAudio({
+    required String sessionId,
+    required Uint8List pcm16Bytes,
+  }) {
+    const chunkSize = 3840; // 80ms at 24kHz mono PCM16.
+    for (var offset = 0; offset < pcm16Bytes.length; offset += chunkSize) {
+      final end = offset + chunkSize < pcm16Bytes.length
+          ? offset + chunkSize
+          : pcm16Bytes.length;
+      final chunk = Uint8List.sublistView(pcm16Bytes, offset, end);
+      _gateway.sendAudioChunk(
+        sessionId: sessionId,
+        audioBase64: base64Encode(chunk),
+      );
+    }
+  }
+
   void _pushError(String message) {
     state = state.copyWith(
       stage: ConnectionStage.error,
       errorMessage: message,
       recording: false,
       micLevel: 0,
+      statusMessage: 'Failed: $message',
     );
-  }
-
-  @override
-  void dispose() {
-    unawaited(_micStreamSub?.cancel());
-    unawaited(_gatewayEventsSub?.cancel());
-    unawaited(_audioCapture.stopCapture());
-    super.dispose();
   }
 }

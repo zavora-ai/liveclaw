@@ -34,15 +34,16 @@ class ResonanceOrb extends StatelessWidget {
           shape: BoxShape.circle,
           gradient: RadialGradient(
             colors: <Color>[
-              colorScheme.primary.withOpacity(0.9),
-              colorScheme.primary.withOpacity(0.22),
+              colorScheme.primary.withValues(alpha: 0.9),
+              colorScheme.primary.withValues(alpha: 0.22),
               const Color(0xFF061A1F),
             ],
             stops: const <double>[0.0, 0.42, 1.0],
           ),
           boxShadow: <BoxShadow>[
             BoxShadow(
-              color: colorScheme.primary.withOpacity(0.42 + (micLevel * 0.18)),
+              color: colorScheme.primary
+                  .withValues(alpha: 0.42 + (micLevel * 0.18)),
               blurRadius: 24 + (micLevel * 36),
               spreadRadius: 3 + (micLevel * 7),
             ),
@@ -64,7 +65,9 @@ class ResonanceOrb extends StatelessWidget {
               mainAxisAlignment: MainAxisAlignment.center,
               children: <Widget>[
                 Icon(
-                  recording ? Icons.radio_button_checked_rounded : Icons.mic_rounded,
+                  recording
+                      ? Icons.radio_button_checked_rounded
+                      : Icons.mic_rounded,
                   color: Colors.white,
                   size: 44,
                 ),
@@ -105,7 +108,8 @@ class _ResonanceRingsPainter extends CustomPainter {
       final dynamicRadius = baseRadius * (0.36 + (ringProgress * 0.46)) +
           (active ? pulse * (8 + (i * 3)) : 0);
       final paint = Paint()
-        ..color = color.withOpacity(active ? (0.24 - (ringProgress * 0.06)) : 0.08)
+        ..color = color.withValues(
+            alpha: active ? (0.24 - (ringProgress * 0.06)) : 0.08)
         ..style = PaintingStyle.stroke
         ..strokeWidth = active ? 2.2 : 1.1;
 
